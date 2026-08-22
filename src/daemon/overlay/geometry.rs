@@ -1,0 +1,187 @@
+//! Surface placement: where the layer-shell surface sits on screen and how
+//! drag deltas move it. Pure functions over (Config, margins) — no runtime
+//! state, no iced types beyond the Wayland anchor vocabulary.
+
+use hyprlay_core::config::AnchorMode;
+use hyprlay_core::config::Config;
+use hyprlay_core::config::HorizontalAnchor;
+use hyprlay_core::config::VerticalAnchor;
+use iced_layershell::reexport::Anchor;
+
+/// Margins are clamped so a long drag session can't overflow i32 or push
+/// the surface into undefined compositor territory.
+const MARGIN_LIMIT: i32 = 8000;
+
+/// The vertical edge the surface actually glues to: `Auto` defers to the
+/// position's vertical side; an explicit anchor overrides it. Drag/nudge
+/// accumulation must branch on this resolved edge — nudging while
+/// bottom-glued over a top position otherwise accumulates on the top margin
+/// while the surface hangs from the bottom, so offsets fight the anchor.
+fn effective_vertical(cfg: &Config) -> VerticalAnchor {
+    match cfg.anchor {
+        AnchorMode::Auto => cfg.vertical,
+        AnchorMode::Top => VerticalAnchor::Top,
+        AnchorMode::Bottom => VerticalAnchor::Bottom,
+    }
+}
+
+/// Wayland anchors for the configured screen edge: top-left config anchors
+/// top+left, center adds both horizontal anchors (fixed size → centered).
+/// The `anchor` config overrides the vertical glue edge — anchored top the
+/// list grows downward as users join, anchored bottom it grows upward, so
+/// the overlay never runs off screen.
+pub fn anchor(cfg: &Config) -> Anchor {
+    let horizontal = match cfg.horizontal {
+        HorizontalAnchor::Left => Anchor::Left,
+        HorizontalAnchor::Right => Anchor::Right,
+        HorizontalAnchor::Center => Anchor::Left | Anchor::Right,
+    };
+    let vertical = match effective_vertical(cfg) {
+        VerticalAnchor::Top => Anchor::Top,
+        VerticalAnchor::Bottom => Anchor::Bottom,
+    };
+    horizontal | vertical
+}
+
+/// Initial (top, right, bottom, left) layer-shell margin for the configured
+/// anchor — the user-facing `offset_x`/`offset_y` pushed onto anchored edges.
+pub fn offset(cfg: &Config) -> (i32, i32, i32, i32) {
+    (cfg.offset_y, cfg.offset_x, cfg.offset_y, cfg.offset_x)
+}
+
+pub fn clamp(v: i32) -> i32 {
+    v.clamp(-MARGIN_LIMIT, MARGIN_LIMIT)
+}
+
+/// Apply a drag delta: anchored sides absorb the motion. Center-horizontal
+/// uses both sides inversely so the surface stays between them.
+pub fn drag(margin: (i32, i32, i32, i32), cfg: &Config, dx: i32, dy: i32) -> (i32, i32, i32, i32) {
+    let (mut top, mut right, mut bottom, mut left) = margin;
+    match cfg.horizontal {
+        HorizontalAnchor::Left => left = clamp(left + dx),
+        HorizontalAnchor::Right => right = clamp(right - dx),
+        HorizontalAnchor::Center => {
+            left = clamp(left + dx);
+            right = clamp(right - dx);
+        }
+    }
+    match effective_vertical(cfg) {
+        VerticalAnchor::Top => top = clamp(top + dy),
+        VerticalAnchor::Bottom => bottom = clamp(bottom - dy),
+    }
+    (top, right, bottom, left)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(h: HorizontalAnchor, v: VerticalAnchor) -> Config {
+        Config {
+            horizontal: h,
+            vertical: v,
+            offset_x: 16,
+            offset_y: 24,
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn anchor_combines_configured_edges() {
+        assert_eq!(
+            anchor(&cfg(HorizontalAnchor::Left, VerticalAnchor::Top)),
+            Anchor::Top | Anchor::Left
+        );
+        assert_eq!(
+            anchor(&cfg(HorizontalAnchor::Right, VerticalAnchor::Bottom)),
+            Anchor::Bottom | Anchor::Right
+        );
+        assert_eq!(
+            anchor(&cfg(HorizontalAnchor::Center, VerticalAnchor::Top)),
+            Anchor::Top | Anchor::Left | Anchor::Right
+        );
+    }
+
+    #[test]
+    fn anchor_override_decides_the_glue_edge() {
+        // Auto follows the position's vertical edge...
+        assert!(anchor(&cfg(HorizontalAnchor::Left, VerticalAnchor::Top)).contains(Anchor::Top));
+        // ...an explicit anchor overrides it.
+        let mut c = cfg(HorizontalAnchor::Left, VerticalAnchor::Top);
+        c.anchor = hyprlay_core::config::AnchorMode::Bottom;
+        let anchored_bottom = anchor(&c);
+        assert!(anchored_bottom.contains(Anchor::Bottom));
+        assert!(!anchored_bottom.contains(Anchor::Top));
+    }
+
+    #[test]
+    fn initial_margin_sets_all_sides_from_config() {
+        assert_eq!(
+            offset(&cfg(HorizontalAnchor::Left, VerticalAnchor::Top)),
+            (24, 16, 24, 16)
+        );
+    }
+
+    #[test]
+    fn clamp_bounds_drag_accumulation() {
+        assert_eq!(clamp(9_000_000), 8000);
+        assert_eq!(clamp(-9_000_000), -8000);
+        assert_eq!(clamp(120), 120);
+    }
+
+    #[test]
+    fn drag_left_anchored_grows_left_margin() {
+        let m = offset(&cfg(HorizontalAnchor::Left, VerticalAnchor::Top));
+        // dy=−20 → top−20; dx=+30 → left+30.
+        assert_eq!(
+            drag(
+                m,
+                &cfg(HorizontalAnchor::Left, VerticalAnchor::Top),
+                30,
+                -20
+            ),
+            (4, 16, 24, 46)
+        );
+    }
+
+    #[test]
+    fn drag_right_anchored_grows_right_margin() {
+        let c = cfg(HorizontalAnchor::Right, VerticalAnchor::Top);
+        assert_eq!(drag(offset(&c), &c, 30, -20), (4, -14, 24, 16));
+    }
+
+    #[test]
+    fn drag_center_anchored_moves_both_horizontal_margins() {
+        let c = cfg(HorizontalAnchor::Center, VerticalAnchor::Top);
+        assert_eq!(drag(offset(&c), &c, 30, -20), (4, -14, 24, 46));
+    }
+
+    #[test]
+    fn drag_bottom_anchored_moves_away_when_dragged_up() {
+        let c = cfg(HorizontalAnchor::Left, VerticalAnchor::Bottom);
+        // Dragging up (dy < 0) pulls the surface away from the bottom edge.
+        assert_eq!(drag(offset(&c), &c, 0, -40).2, 64);
+    }
+
+    #[test]
+    fn drag_accumulates_on_the_anchored_edge_when_anchor_overrides_position() {
+        // Top position but bottom-glued (anchor=bottom): dy must accumulate
+        // on the BOTTOM margin — the edge the surface actually hangs from —
+        // or offsets fight the anchor.
+        let mut c = cfg(HorizontalAnchor::Left, VerticalAnchor::Top);
+        c.anchor = hyprlay_core::config::AnchorMode::Bottom;
+        let dragged = drag(offset(&c), &c, 0, -40);
+        assert_eq!(dragged.2, 64, "bottom margin absorbs the upward drag");
+        assert_eq!(dragged.0, 24, "top margin untouched");
+    }
+
+    #[test]
+    fn auto_still_uses_vertical_for_drag() {
+        // Auto keeps following the position's vertical side in both
+        // directions.
+        let top = cfg(HorizontalAnchor::Left, VerticalAnchor::Top);
+        assert_eq!(drag(offset(&top), &top, 0, -40).0, -16);
+        let bottom = cfg(HorizontalAnchor::Left, VerticalAnchor::Bottom);
+        assert_eq!(drag(offset(&bottom), &bottom, 0, -40).2, 64);
+    }
+}

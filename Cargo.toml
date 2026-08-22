@@ -1,0 +1,76 @@
+[package]
+name = "hyprlay"
+version = "0.1.0"
+edition = "2024"
+description = "A lightweight Linux Discord voice chat overlay for Wayland compositors"
+authors = ["FAZuH <mail@fazuh.com>"]
+license = "MIT"
+repository = "https://github.com/FAZuH/hyprlay"
+
+[workspace]
+resolver = "3"
+members = ["crates/hyprlay-core"]
+# Standalone debug probes for Discord's wire protocols
+exclude = ["scripts"]
+
+# Members opt in with `dep = { workspace = true }`.
+[workspace.dependencies]
+hyprlay-core = { version = "0.1.0", path = "crates/hyprlay-core" }
+iced = { version = "0.14", default-features = false, features = [
+    "wgpu",
+    "tiny-skia",
+    "crisp",
+    "image-without-codecs",
+    "tokio",
+    "wayland",
+] }
+iced_layershell = "0.19.1"
+iced_runtime = "0.14"
+tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "time", "macros"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+futures-channel = { version = "0.3", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }
+dirs = "6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+clap = { version = "4.5", default-features = false, features = [
+    "std",
+    "help",
+    "usage",
+    "error-context",
+    "suggestions",
+] }
+
+[dependencies]
+hyprlay-core = { workspace = true }
+clap = { workspace = true }
+iced = { workspace = true }
+iced_layershell = { workspace = true }
+iced_runtime = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+futures-channel = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true }
+base64 = { workspace = true }
+image = { workspace = true }
+dirs = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+
+# Release tuning: trade build time for a smaller, faster binary.
+# lto = cross-crate optimization at link time; codegen-units = 1 gives the
+# optimizer full visibility (serializes codegen); strip drops debug symbols.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

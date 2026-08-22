@@ -1,0 +1,32 @@
+[package]
+name = "hyprlay-scripts"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Standalone debug probes for Discord's wire protocols. Deliberately a
+# separate crate: they never build with, ship in, or get installed by the
+# main `hyprlay` binary. Run them from this directory:
+#
+#   cargo run --example wsprobe -- api
+#   cargo run --example ipcprobe
+#
+# They are [[example]] targets, not bins, on purpose: a `cargo install
+# --git <repo>` scan that finds two packages with binaries errors out with
+# "multiple packages with binaries found", which would break bare installs
+# of the main package. Examples keep this crate bin-free so the repo scan
+# stays single-binary-package and bare installs work.
+
+[[example]]
+name = "wsprobe"
+path = "examples/wsprobe.rs"
+
+[[example]]
+name = "ipcprobe"
+path = "examples/ipcprobe.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "time"] }
+tokio-tungstenite = "0.27"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+serde_json = "1"

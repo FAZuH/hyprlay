@@ -1,0 +1,17 @@
+[package]
+name = "hyprlay-core"
+version = "0.1.0"
+edition = "2024"
+description = "Domain, config, and ctl protocol shared by the hyprlay binaries"
+authors = ["FAZuH <mail@fazuh.com>"]
+license = "MIT"
+repository = "https://github.com/FAZuH/hyprlay"
+
+# Deliberately no iced, no tokio, no clap: this crate compiles into every
+# binary, so it must stay cheap and framework-free.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+dirs = { workspace = true }
+tracing = { workspace = true }
