@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## 0.1.0 (2026-08-23)
 
 hyprlay shows your Discord voice channel as an always-on-top overlay for
 Hyprland. A daemon renders the roster, a CLI controls it from any
