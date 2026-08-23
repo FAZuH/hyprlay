@@ -23,4 +23,4 @@ jobs:
     if: "! github.event.pull_request.draft"
     uses: ./.github/workflows/_pr-checks.yml
     with:
-      apt-deps: pkg-config
+      apt-deps: pkg-config libxkbcommon-dev
