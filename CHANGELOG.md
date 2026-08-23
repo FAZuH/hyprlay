@@ -2,11 +2,9 @@
 
 ## 0.1.0 (2026-08-23)
 
-hyprlay shows your Discord voice channel as an always-on-top overlay for
-Hyprland. A daemon renders the roster, a CLI controls it from any
-terminal, and a settings window handles the rest.
+A lightweight Discord voice overlay for Hyprland.
 
-- Always-on-top voice roster pinned to any screen edge
+- Always-on-top voice overlay pinned to any screen edge
 - Click-through rendering; hold left button to drag
 - Placement on any monitor with presets, anchors, offsets, and nudges
 - Speaking ring, custom colors, opacity, width, and text-size controls
