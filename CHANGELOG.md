@@ -2,6 +2,8 @@
 
 ## 0.1.0 (2026-08-23)
 
+## 0.1.0 (2026-08-23)
+
 A lightweight Discord voice overlay for Hyprland.
 
 - Always-on-top voice overlay pinned to any screen edge
