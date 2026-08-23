@@ -8,6 +8,11 @@ on:
         required: false
         type: string
         default: ''
+      artifact-pattern:
+        description: 'Glob selecting uploaded artifacts to download as release assets; defaults to <binary-name>-*'
+        required: false
+        type: string
+        default: ''
       platforms:
         description: 'Build targets: multi (all 4) or linux (x64 only)'
         required: false
@@ -261,7 +266,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: ${{ inputs.binary-name }}-*
+          pattern: ${{ inputs.artifact-pattern || format('{0}-*', inputs.binary-name) }}
 
       - name: Prepare Release Files
         if: ${{ inputs.build-binaries }}

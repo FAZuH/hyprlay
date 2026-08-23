@@ -18,4 +18,5 @@ jobs:
       platforms: linux
       build-binaries: true
       publish-crates: false
+      artifact-pattern: 'hyprlay*-*'
     secrets: inherit
