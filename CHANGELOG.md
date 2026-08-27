@@ -4,6 +4,11 @@
 
 - Add tray menu
 
+### Overlay
+- Added show on fullscreen to keep roster above fullscreen windows
+- Added dim on hover to lower opacity while pointer is over overlay
+- Added hover opacity setting for dimmed level
+
 ## 0.1.0 (2026-08-23)
 
 A lightweight Discord voice overlay for Hyprland.
