@@ -10,8 +10,7 @@
 
 use std::process::Stdio;
 
-/// Sibling binary, resolved next to the running `hyprlay-tray` image.
-const GUI_BIN: &str = "hyprlay-gui";
+use hyprlay_core::bins::GUI_BIN;
 
 /// Spawn the sibling `hyprlay-gui` (Open settings).
 pub fn spawn_sibling_gui() -> Result<(), String> {

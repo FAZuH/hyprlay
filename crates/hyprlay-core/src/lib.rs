@@ -4,6 +4,7 @@
 //! socket protocol. Everything here must stay free of UI frameworks and
 //! async runtimes so every binary can afford to link it.
 
+pub mod bins;
 pub mod color;
 pub mod compositor;
 pub mod config;

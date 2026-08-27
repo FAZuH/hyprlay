@@ -134,7 +134,8 @@ pub fn systemctl(subcommand: &str) -> Result<(), String> {
 /// sibling" helper (used by the tray's Open-settings action) is intentionally
 /// not here — that sibling-binary surface is unified separately.
 fn spawn_sibling_daemon() -> Result<(), String> {
-    const DAEMON_BIN: &str = "hyprlayd";
+    use crate::bins::DAEMON_BIN;
+
     let exe = std::env::current_exe()
         .map_err(|e| format!("error: could not locate the running hyprlay binary: {e}"))?;
     let Some(dir) = exe.parent() else {

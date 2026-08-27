@@ -14,9 +14,9 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
-use super::dispatch::DAEMON_BIN;
-use super::dispatch::GUI_BIN;
-use super::dispatch::TRAY_BIN;
+use hyprlay_core::bins::DAEMON_BIN;
+use hyprlay_core::bins::GUI_BIN;
+use hyprlay_core::bins::TRAY_BIN;
 
 /// The systemctl boundary: `run(args)` executes `systemctl --user <args…>`.
 /// Owned wrapper around an external binary, so tests substitute a recording
