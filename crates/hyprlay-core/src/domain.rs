@@ -276,6 +276,9 @@ pub enum Key {
     // existing keys and new keys join the end of the shared table.
     Visible,
     AutoSave,
+    ShowOnFullscreen,
+    DimOnHover,
+    HoverOpacity,
 }
 
 /// Config sections, shared by `reset <group>` and the TOML layout.
@@ -344,7 +347,7 @@ impl fmt::Display for Value {
 
 impl Key {
     /// Every key in display order (grouped, wire order inside a group).
-    pub const ALL: [Key; 25] = [
+    pub const ALL: [Key; 28] = [
         Key::Position,
         Key::Anchor,
         Key::Monitor,
@@ -370,6 +373,9 @@ impl Key {
         Key::BoxColor,
         Key::Visible,
         Key::AutoSave,
+        Key::ShowOnFullscreen,
+        Key::DimOnHover,
+        Key::HoverOpacity,
     ];
 
     pub fn name(self) -> &'static str {
@@ -399,6 +405,9 @@ impl Key {
             Self::BoxColor => "box-color",
             Self::Visible => "visible",
             Self::AutoSave => "auto-save",
+            Self::ShowOnFullscreen => "show-on-fullscreen",
+            Self::DimOnHover => "dim-on-hover",
+            Self::HoverOpacity => "hover-opacity",
         }
     }
 
@@ -425,10 +434,14 @@ impl Key {
             | Self::TalkingOnly
             | Self::OwnUser
             | Self::Visible
-            | Self::AutoSave => Group::Layout,
-            Self::Opacity | Self::AvatarOpacity | Self::TextOpacity | Self::BoxOpacity => {
-                Group::Opacity
-            }
+            | Self::AutoSave
+            | Self::ShowOnFullscreen
+            | Self::DimOnHover => Group::Layout,
+            Self::Opacity
+            | Self::AvatarOpacity
+            | Self::TextOpacity
+            | Self::BoxOpacity
+            | Self::HoverOpacity => Group::Opacity,
             Self::SpeakingColor | Self::TextColor | Self::BoxColor => Group::Colors,
         }
     }
@@ -464,10 +477,13 @@ impl Key {
             Self::OwnUser => Value::Flag(cfg.show_own_user),
             Self::Visible => Value::Flag(cfg.visible),
             Self::AutoSave => Value::Flag(cfg.auto_save),
+            Self::ShowOnFullscreen => Value::Flag(cfg.show_on_fullscreen),
+            Self::DimOnHover => Value::Flag(cfg.dim_on_hover),
             Self::Opacity => Value::Num(cfg.opacity as i64),
             Self::AvatarOpacity => Value::Num(cfg.avatar_opacity as i64),
             Self::TextOpacity => Value::Num(cfg.text_opacity as i64),
             Self::BoxOpacity => Value::Num(cfg.box_opacity as i64),
+            Self::HoverOpacity => Value::Num(cfg.hover_opacity as i64),
             Self::SpeakingColor => Value::Color(cfg.speaking_color),
             Self::TextColor => Value::Color(cfg.text_color),
             Self::BoxColor => Value::Color(cfg.box_color),
@@ -481,9 +497,11 @@ impl Key {
             Self::OffsetX | Self::OffsetY | Self::OffsetMin | Self::OffsetMax => {
                 Some(pair(OFFSETS))
             }
-            Self::Opacity | Self::AvatarOpacity | Self::TextOpacity | Self::BoxOpacity => {
-                Some((OPACITY.min as i64, OPACITY.max as i64))
-            }
+            Self::Opacity
+            | Self::AvatarOpacity
+            | Self::TextOpacity
+            | Self::BoxOpacity
+            | Self::HoverOpacity => Some((OPACITY.min as i64, OPACITY.max as i64)),
             Self::Width => Some((WIDTH.min as i64, WIDTH.max as i64)),
             Self::Scale => Some((SCALE.min as i64, SCALE.max as i64)),
             Self::AvatarSize => Some((AVATAR_SIZE.min as i64, AVATAR_SIZE.max as i64)),
@@ -546,6 +564,8 @@ fn cycle_able(key: Key) -> bool {
             | Key::OwnUser
             | Key::Visible
             | Key::AutoSave
+            | Key::ShowOnFullscreen
+            | Key::DimOnHover
     )
 }
 
@@ -612,6 +632,8 @@ impl Key {
             Self::OwnUser => flag(self.name()),
             Self::Visible => flag(self.name()),
             Self::AutoSave => flag(self.name()),
+            Self::ShowOnFullscreen => flag(self.name()),
+            Self::DimOnHover => flag(self.name()),
             Self::OffsetX
             | Self::OffsetY
             | Self::OffsetMin
@@ -625,7 +647,8 @@ impl Key {
             | Self::Opacity
             | Self::AvatarOpacity
             | Self::TextOpacity
-            | Self::BoxOpacity => num(),
+            | Self::BoxOpacity
+            | Self::HoverOpacity => num(),
             Self::SpeakingColor => color(self.name()),
             Self::TextColor => color(self.name()),
             Self::BoxColor => color(self.name()),
@@ -648,6 +671,10 @@ impl Key {
                 Self::OwnUser => Value::Flag(!cfg.show_own_user),
                 Self::Visible => Value::Flag(!cfg.visible),
                 Self::AutoSave => Value::Flag(!cfg.auto_save),
+                Self::DimOnHover => Value::Flag(!cfg.dim_on_hover),
+                Self::ShowOnFullscreen => {
+                    return CommandResult::err("error: not a config command");
+                }
                 _ => return CommandResult::err(format!("error: {} requires a value", self.name())),
             },
             other => other,
@@ -676,6 +703,10 @@ impl Key {
             // Routed by the daemon shell before config application: a change
             // re-creates the layer surface on another output.
             (Self::Monitor, _) => CommandResult::err("error: not a config command"),
+            (Self::ShowOnFullscreen, _) => CommandResult::err("error: not a config command"),
+            (Self::DimOnHover, Value::Flag(v)) => {
+                set_flag(&mut cfg.dim_on_hover, v, "dim-on-hover", Effect::Resize)
+            }
             (Self::Rtl, Value::Flag(v)) => set_flag(&mut cfg.rtl, v, "rtl", Effect::Resize),
             (Self::TalkingOnly, Value::Flag(v)) => set_flag(
                 &mut cfg.show_only_talking_users,
@@ -772,6 +803,9 @@ impl Key {
             }
             (Self::BoxOpacity, Value::Num(v)) => {
                 set_pct(&mut cfg.box_opacity, v as u8, "box-opacity")
+            }
+            (Self::HoverOpacity, Value::Num(v)) => {
+                set_pct(&mut cfg.hover_opacity, v as u8, "hover-opacity")
             }
             (Self::SpeakingColor, Value::Color(c)) => {
                 set_color(&mut cfg.speaking_color, c, "speaking-color")
@@ -959,6 +993,10 @@ impl Command {
                 let defaults = Config::default();
                 for key in Key::ALL {
                     if key == Key::Monitor || key.group() != group {
+                        continue;
+                    }
+                    if key == Key::ShowOnFullscreen {
+                        config.show_on_fullscreen = defaults.show_on_fullscreen;
                         continue;
                     }
                     key.apply(config, key.value_of(&defaults));
@@ -1512,5 +1550,135 @@ mod tests {
         assert_eq!(Key::OffsetX.slider_bounds(&cfg), Some((-100.0, 100.0)));
         assert_eq!(Key::OffsetMin.slider_bounds(&cfg), None);
         assert_eq!(Key::Opacity.slider_bounds(&cfg), Some((0.0, 100.0)));
+    }
+
+    #[test]
+    fn new_keys_have_wire_names_groups_and_bounds() {
+        assert_eq!(Key::ShowOnFullscreen.name(), "show-on-fullscreen");
+        assert_eq!(Key::DimOnHover.name(), "dim-on-hover");
+        assert_eq!(Key::HoverOpacity.name(), "hover-opacity");
+        assert_eq!(Key::ShowOnFullscreen.group(), Group::Layout);
+        assert_eq!(Key::DimOnHover.group(), Group::Layout);
+        assert_eq!(Key::HoverOpacity.group(), Group::Opacity);
+        assert_eq!(
+            Key::HoverOpacity.num_bounds(),
+            Some((OPACITY.min as i64, OPACITY.max as i64))
+        );
+        assert_eq!(Key::ShowOnFullscreen.num_bounds(), None);
+        assert_eq!(Key::DimOnHover.num_bounds(), None);
+        assert_eq!(
+            Key::HoverOpacity.slider_bounds(&Config::default()),
+            Some((0.0, 100.0))
+        );
+    }
+
+    #[test]
+    fn new_keys_parse_values_and_cycle_correctly() {
+        assert_eq!(
+            "set show-on-fullscreen on".parse::<Command>().unwrap(),
+            Command::Set(Key::ShowOnFullscreen, Value::Flag(true))
+        );
+        assert_eq!(
+            "set show-on-fullscreen off".parse::<Command>().unwrap(),
+            Command::Set(Key::ShowOnFullscreen, Value::Flag(false))
+        );
+        assert_eq!(
+            "set show-on-fullscreen".parse::<Command>().unwrap(),
+            Command::Set(Key::ShowOnFullscreen, Value::Cycle)
+        );
+        assert_eq!(
+            "set dim-on-hover on".parse::<Command>().unwrap(),
+            Command::Set(Key::DimOnHover, Value::Flag(true))
+        );
+        assert_eq!(
+            "set dim-on-hover".parse::<Command>().unwrap(),
+            Command::Set(Key::DimOnHover, Value::Cycle)
+        );
+        assert_eq!(
+            parse_err("set dim-on-hover maybe"),
+            "error: dim-on-hover <on|off>"
+        );
+        assert_eq!(
+            "set hover-opacity 40".parse::<Command>().unwrap(),
+            Command::Set(Key::HoverOpacity, Value::Num(40))
+        );
+        assert_eq!(
+            parse_err("set hover-opacity"),
+            "error: hover-opacity <0-100>"
+        );
+        assert_eq!(
+            parse_err("set hover-opacity 200"),
+            "error: hover-opacity <0-100>"
+        );
+    }
+
+    #[test]
+    fn new_keys_apply_and_reset_groups() {
+        let mut cfg = Config::default();
+        assert_eq!(
+            apply("set dim-on-hover on", &mut cfg).reply,
+            "dim-on-hover=on"
+        );
+        assert!(cfg.dim_on_hover);
+        assert_eq!(
+            apply("set dim-on-hover", &mut cfg).reply,
+            "dim-on-hover=off"
+        );
+        assert_eq!(
+            apply("set hover-opacity 55", &mut cfg).reply,
+            "hover-opacity=55"
+        );
+        assert_eq!(cfg.hover_opacity, 55);
+        assert_eq!(
+            apply("set show-on-fullscreen on", &mut cfg).reply,
+            "error: not a config command"
+        );
+        let mut cfg2 = Config {
+            dim_on_hover: true,
+            hover_opacity: 20,
+            show_on_fullscreen: false,
+            visible: false,
+            width: 500,
+            opacity: 30,
+            ..Config::default()
+        };
+        apply("reset layout", &mut cfg2);
+        assert_eq!(cfg2.dim_on_hover, Config::default().dim_on_hover);
+        assert_eq!(
+            cfg2.show_on_fullscreen,
+            Config::default().show_on_fullscreen
+        );
+        assert_eq!(cfg2.visible, Config::default().visible);
+        assert_eq!(cfg2.width, Config::default().width);
+        assert_eq!(cfg2.hover_opacity, 20);
+        assert_eq!(cfg2.opacity, 30);
+        apply("reset opacity", &mut cfg2);
+        assert_eq!(cfg2.hover_opacity, Config::default().hover_opacity);
+        assert_eq!(cfg2.opacity, Config::default().opacity);
+    }
+
+    #[test]
+    fn new_keys_display_canonical_and_get_roundtrip() {
+        assert_eq!(
+            Command::Set(Key::ShowOnFullscreen, Value::Flag(true)).to_string(),
+            "set show-on-fullscreen on"
+        );
+        assert_eq!(
+            Command::Set(Key::DimOnHover, Value::Cycle).to_string(),
+            "set dim-on-hover"
+        );
+        assert_eq!(
+            Command::Set(Key::HoverOpacity, Value::Num(40)).to_string(),
+            "set hover-opacity 40"
+        );
+        let cfg = Config::default();
+        assert_eq!(
+            Key::ShowOnFullscreen.get(&cfg),
+            format!(
+                "show-on-fullscreen={}",
+                if cfg.show_on_fullscreen { "on" } else { "off" }
+            )
+        );
+        assert_eq!(Key::HoverOpacity.get(&cfg), "hover-opacity=40");
     }
 }

@@ -8,12 +8,16 @@ mod hyprland;
 pub use hyprland::Hyprland;
 
 /// One connected output as reported by the compositor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Monitor {
     pub name: String,
     pub description: String,
     /// Whether this is the currently focused output.
     pub active: bool,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 
 pub trait Compositor: Send {
@@ -30,6 +34,14 @@ pub fn detect() -> Box<dyn Compositor> {
         Box::new(Hyprland)
     } else {
         Box::new(Unknown)
+    }
+}
+
+pub fn cursor_pos() -> Option<(i32, i32)> {
+    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
+        hyprland::cursor_pos()
+    } else {
+        None
     }
 }
 

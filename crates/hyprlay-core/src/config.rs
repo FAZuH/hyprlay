@@ -119,6 +119,10 @@ pub struct Config {
     /// Persist every applied change to config.toml immediately. Off keeps
     /// changes session-only until an explicit `save`.
     pub auto_save: bool,
+    pub show_on_fullscreen: bool,
+    pub dim_on_hover: bool,
+    /// Hover opacity in percent (0..=100), used when hovered.
+    pub hover_opacity: u8,
     /// Avatar diameter in logical px (16..=64).
     pub avatar_size: u32,
     /// Username font size in logical px (8..=32).
@@ -156,6 +160,9 @@ impl Default for Config {
             show_only_talking_users: false,
             visible: true,
             auto_save: true,
+            show_on_fullscreen: true,
+            dim_on_hover: false,
+            hover_opacity: 40,
             avatar_size: 34,
             text_size: 14,
             spacing: 4,
@@ -269,12 +276,15 @@ impl Config {
                 own_user: Some(self.show_own_user),
                 visible: Some(self.visible),
                 auto_save: Some(self.auto_save),
+                show_on_fullscreen: Some(self.show_on_fullscreen),
+                dim_on_hover: Some(self.dim_on_hover),
             },
             opacity: OpacityTable {
                 overall: Some(self.opacity),
                 avatar: Some(self.avatar_opacity),
                 text: Some(self.text_opacity),
                 box_: Some(self.box_opacity),
+                hover_opacity: Some(self.hover_opacity),
             },
             colors: ColorsTable {
                 speaking: Some(self.speaking_color),
@@ -310,10 +320,13 @@ impl Config {
             show_own_user: l.own_user.unwrap_or(d.show_own_user),
             visible: l.visible.unwrap_or(d.visible),
             auto_save: l.auto_save.unwrap_or(d.auto_save),
+            show_on_fullscreen: l.show_on_fullscreen.unwrap_or(d.show_on_fullscreen),
+            dim_on_hover: l.dim_on_hover.unwrap_or(d.dim_on_hover),
             opacity: o.overall.unwrap_or(d.opacity),
             avatar_opacity: o.avatar.unwrap_or(d.avatar_opacity),
             text_opacity: o.text.unwrap_or(d.text_opacity),
             box_opacity: o.box_.unwrap_or(d.box_opacity),
+            hover_opacity: o.hover_opacity.unwrap_or(d.hover_opacity),
             speaking_color: c.speaking.unwrap_or(d.speaking_color),
             text_color: c.text.unwrap_or(d.text_color),
             box_color: c.box_.unwrap_or(d.box_color),
@@ -350,6 +363,8 @@ struct LayoutTable {
     own_user: Option<bool>,
     visible: Option<bool>,
     auto_save: Option<bool>,
+    show_on_fullscreen: Option<bool>,
+    dim_on_hover: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -360,6 +375,8 @@ struct OpacityTable {
     text: Option<u8>,
     #[serde(rename = "box")]
     box_: Option<u8>,
+    #[serde(rename = "hover-opacity")]
+    hover_opacity: Option<u8>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -401,6 +418,7 @@ impl Config {
         self.avatar_opacity = OPACITY.clamp_value(self.avatar_opacity);
         self.text_opacity = OPACITY.clamp_value(self.text_opacity);
         self.box_opacity = OPACITY.clamp_value(self.box_opacity);
+        self.hover_opacity = OPACITY.clamp_value(self.hover_opacity);
         self.scale = SCALE.clamp_value(self.scale);
         self.width = WIDTH.clamp_value(self.width);
         self.max_username_length = MAX_NAME.clamp_value(self.max_username_length);
@@ -436,12 +454,29 @@ impl Config {
     }
 
     pub fn alphas(&self) -> Alphas {
-        let part = |pct: u8| self.opacity as f32 / 100.0 * pct as f32 / 100.0;
+        self.alphas_for(false)
+    }
+
+    pub fn alphas_for(&self, hovered: bool) -> Alphas {
+        let opacity = if hovered {
+            self.hover_opacity
+        } else {
+            self.opacity
+        };
+        let part = |pct: u8| opacity as f32 / 100.0 * pct as f32 / 100.0;
         Alphas {
-            overall: self.opacity as f32 / 100.0,
+            overall: opacity as f32 / 100.0,
             avatar: part(self.avatar_opacity),
             text: part(self.text_opacity),
             box_bg: part(self.box_opacity),
+        }
+    }
+
+    pub fn effective_opacity(&self, hovered: bool) -> u8 {
+        if hovered {
+            self.hover_opacity
+        } else {
+            self.opacity
         }
     }
 }
@@ -759,5 +794,102 @@ speaking = \"#00ff00\"
     #[test]
     fn bounds_hint_formats_as_min_max_angle_brackets() {
         assert_eq!(Bounds { min: 200, max: 600 }.hint(), "<200-600>");
+    }
+
+    #[test]
+    fn new_layout_and_opacity_defaults_match_spec() {
+        let cfg = Config::default();
+        assert!(cfg.show_on_fullscreen);
+        assert!(!cfg.dim_on_hover);
+        assert_eq!(cfg.hover_opacity, 40);
+    }
+
+    #[test]
+    fn clamp_caps_hover_opacity_at_100() {
+        let mut cfg = Config {
+            hover_opacity: 200,
+            ..Config::default()
+        };
+        cfg.clamp();
+        assert_eq!(cfg.hover_opacity, 100);
+    }
+
+    #[test]
+    fn hover_opacity_lives_in_opacity_section_and_roundtrips() {
+        let cfg = Config {
+            hover_opacity: 55,
+            ..Config::default()
+        };
+        let toml_str = toml::to_string(&cfg).unwrap();
+        assert!(
+            toml_str.contains("hover-opacity"),
+            "hover-opacity missing from toml:\n{toml_str}"
+        );
+        let back: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(back.hover_opacity, 55);
+        let re: Config = toml::from_str(&toml::to_string(&back).unwrap()).unwrap();
+        assert_eq!(re.hover_opacity, 55);
+    }
+
+    #[test]
+    fn show_on_fullscreen_and_dim_on_hover_live_in_layout_section() {
+        let cfg = Config {
+            show_on_fullscreen: false,
+            dim_on_hover: true,
+            ..Config::default()
+        };
+        let toml_str = toml::to_string(&cfg).unwrap();
+        let layout_start = toml_str.find("[layout]").expect("layout section present");
+        let next_section = toml_str[layout_start + 1..]
+            .find("\n[")
+            .map(|i| layout_start + 1 + i)
+            .unwrap_or(toml_str.len());
+        let layout_slice = &toml_str[layout_start..next_section];
+        assert!(
+            layout_slice.contains("show-on-fullscreen = false"),
+            "show-on-fullscreen missing from [layout] in:\n{toml_str}"
+        );
+        assert!(
+            layout_slice.contains("dim-on-hover = true"),
+            "dim-on-hover missing from [layout] in:\n{toml_str}"
+        );
+        let back: Config = toml::from_str(&toml_str).unwrap();
+        assert!(!back.show_on_fullscreen);
+        assert!(back.dim_on_hover);
+        let back: Config = toml::from_str("[layout]\nwidth = 400").unwrap();
+        assert!(back.show_on_fullscreen);
+        assert!(!back.dim_on_hover);
+    }
+
+    #[test]
+    fn missing_hover_fields_fall_back_to_defaults() {
+        let back: Config = toml::from_str("[opacity]\noverall = 80").unwrap();
+        assert_eq!(back.hover_opacity, Config::default().hover_opacity);
+        assert_eq!(back.opacity, 80);
+    }
+
+    #[test]
+    fn alphas_for_hover_switches_overall_to_hover_opacity() {
+        let cfg = Config {
+            opacity: 100,
+            hover_opacity: 40,
+            avatar_opacity: 100,
+            text_opacity: 50,
+            box_opacity: 90,
+            ..Config::default()
+        };
+        let idle = cfg.alphas_for(false);
+        let hovered = cfg.alphas_for(true);
+        assert_eq!(idle.overall, 1.0);
+        assert_eq!(hovered.overall, 0.4);
+        assert_eq!(idle.avatar, 1.0);
+        assert_eq!(hovered.avatar, 0.4);
+        assert_eq!(idle.text, 0.5);
+        assert_eq!(hovered.text, 0.2);
+        assert_eq!(idle.box_bg, 0.9);
+        assert_eq!(hovered.box_bg, 0.36);
+        assert_eq!(cfg.alphas(), idle);
+        assert_eq!(cfg.effective_opacity(false), 100);
+        assert_eq!(cfg.effective_opacity(true), 40);
     }
 }
