@@ -7,9 +7,9 @@ touching `src/` or `crates/`. ADRs for significant decisions live in
 ## What this is
 
 A two-crate Rust workspace. One multi-bin package, `hyprlay`, ships all
-three binaries (`hyprlay`, `hyprlayd`, `hyprlay-gui`) as thin
-`src/bin/` mains over the shared modules `src/cli`, `src/daemon`, and
-`src/gui`; `crates/hyprlay-core` is the separate pure-lib crate. The
+four binaries (`hyprlay`, `hyprlayd`, `hyprlay-gui`, `hyprlay-tray`) as thin
+`src/bin/` mains over the shared modules `src/cli`, `src/daemon`, `src/gui`, and
+`src/tray`; `crates/hyprlay-core` is the separate pure-lib crate. The
 package renders a Discord voice-channel roster on a transparent Wayland
 layer-shell surface, plus two control surfaces (CLI over a unix socket,
 settings GUI) that mutate a shared runtime config. Linux / Hyprland
@@ -23,6 +23,7 @@ only.
   settings GUI starts it when it is down, or it runs as the systemd user
   service. Bare `hyprlay` prints help and starts nothing. Closing the
   GUI never stops it — daemon lifetime is never tied to a client's.
+- **Tray** — the `hyprlay-tray` process: a resident StatusNotifierItem (system tray) menu. It shows daemon state and sends control commands over the control socket. It outlives the daemon and runs as its own systemd user unit. It depends only on `hyprlay-core` plus a flock lock helper. It adds only the `ksni` crate for the SNI over DBus.
 - **Client** — any short-lived invocation of the CLI bin (`hyprlay
   <command>`) or the settings GUI bin (`hyprlay-gui`); both send commands
   to the daemon over **the control socket**
@@ -66,15 +67,15 @@ only.
 - Tokens and OAuth codes are never written to logs.
 - Every numeric config value is clamped on load; hand-edited configs can
   never produce a broken overlay.
-- Dependency direction: the three fronts (`cli`, `daemon`, `gui`) are
+- Dependency direction: the four fronts (`cli`, `daemon`, `gui`, `tray`) are
   modules of one package; each depends only on `hyprlay-core`, and core
   never imports UI-framework or async-runtime types. Inside the daemon
   front: core ← adapters ← overlay/ctl ← shell. Front↔front separation
   is a convention, not a compiler wall: consolidation removed cargo's
   per-crate boundary, so `tests/front_isolation.rs` re-arms it by
-  scanning `src/{cli,daemon,gui}` for cross-front imports on every
-  `cargo test`. The CLI adds only clap; the GUI adds iced; adapters never
-  import UI modules.
+  scanning `src/{cli,daemon,gui,tray}` for cross-front imports on every
+  `cargo test`. The CLI adds only clap; the GUI adds iced; the tray adds
+  only ksni; adapters never import UI modules.
 - Daemon-side commands (`save`, `dump`, `status`, `help`, `get`,
   `restart`, `quit`, `set monitor`) are answered by the shell before
   reaching `apply_config`.
