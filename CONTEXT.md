@@ -48,6 +48,19 @@ only.
   empty roster renders an empty transparent surface.
 - **RosterChange** — `Changed`/`Unchanged` result of applying a Discord
   event to the `Overlay`; drives cache writes and view refreshes.
+- **Overlay layer** — the Wayland layer-shell layer the overlay binds to.
+  `Top` (normal) is below fullscreen windows; `Overlay` is above them.
+  Controlled by `show-on-fullscreen` and requires a daemon restart to
+  re-bind (same path as `monitor`).
+- **Dim on hover** — when `dim-on-hover` is on, a pointer inside the
+  overlay's geometry switches the rendered overall opacity from `opacity`
+  to `hover-opacity`. Detection keeps `events_transparent:true` (full
+  click-through) and polls the Hyprland cursor position over its IPC
+  socket vs the overlay rect; it is a no-op when `visible` is off or the
+  roster is empty. Hyprland-only.
+- **Hover opacity** — target overall opacity (0..100, default 40) while
+  hovered. It replaces `opacity` in `Alphas` during hover and multiplies
+  into avatar/text/box.
 - **Bounds** — the inclusive min/max range of one numeric knob, declared
   once in `crates/hyprlay-core/src/config.rs`. Parser validation, config
   clamping, GUI slider ranges, error text, and help text all derive from it.
@@ -77,8 +90,9 @@ only.
   `cargo test`. The CLI adds only clap; the GUI adds iced; the tray adds
   only ksni; adapters never import UI modules.
 - Daemon-side commands (`save`, `dump`, `status`, `help`, `get`,
-  `restart`, `quit`, `set monitor`) are answered by the shell before
-  reaching `apply_config`.
+  `restart`, `quit`, `set monitor`, `set show-on-fullscreen`) are
+  answered by the shell before reaching `apply_config` (they re-bind the
+  layer surface and need a restart).
 
 ## Glossary pointers
 
