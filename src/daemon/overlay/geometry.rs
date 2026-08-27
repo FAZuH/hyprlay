@@ -53,6 +53,62 @@ pub fn clamp(v: i32) -> i32 {
     v.clamp(-MARGIN_LIMIT, MARGIN_LIMIT)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl Rect {
+    pub fn contains(&self, point: (i32, i32)) -> bool {
+        let (px, py) = point;
+        px >= self.x && px < self.x + self.w as i32 && py >= self.y && py < self.y + self.h as i32
+    }
+}
+
+pub fn overlay_rect(
+    cfg: &Config,
+    size: (u32, u32),
+    offset: (i32, i32, i32, i32),
+    monitor: Option<&hyprlay_core::compositor::Monitor>,
+) -> Rect {
+    let (top, right, bottom, left) = offset;
+    let (w, h) = size;
+    let (mx, my, mw, mh) = monitor
+        .map(|m| (m.x, m.y, m.width, m.height))
+        .unwrap_or((0, 0, 0, 0));
+    let x = match cfg.horizontal {
+        HorizontalAnchor::Left => mx + left,
+        HorizontalAnchor::Right => {
+            if mw == 0 {
+                mx + left
+            } else {
+                mx + mw - w as i32 - right
+            }
+        }
+        HorizontalAnchor::Center => {
+            if mw == 0 {
+                mx + left
+            } else {
+                mx + (mw - w as i32) / 2 + (left - right) / 2
+            }
+        }
+    };
+    let y = match effective_vertical(cfg) {
+        VerticalAnchor::Top => my + top,
+        VerticalAnchor::Bottom => {
+            if mh == 0 {
+                my + top
+            } else {
+                my + mh - h as i32 - bottom
+            }
+        }
+    };
+    Rect { x, y, w, h }
+}
+
 /// Apply a drag delta: anchored sides absorb the motion. Center-horizontal
 /// uses both sides inversely so the surface stays between them.
 pub fn drag(margin: (i32, i32, i32, i32), cfg: &Config, dx: i32, dy: i32) -> (i32, i32, i32, i32) {
@@ -183,5 +239,97 @@ mod tests {
         assert_eq!(drag(offset(&top), &top, 0, -40).0, -16);
         let bottom = cfg(HorizontalAnchor::Left, VerticalAnchor::Bottom);
         assert_eq!(drag(offset(&bottom), &bottom, 0, -40).2, 64);
+    }
+
+    fn monitor(x: i32, y: i32, w: i32, h: i32) -> hyprlay_core::compositor::Monitor {
+        hyprlay_core::compositor::Monitor {
+            name: "test".to_string(),
+            description: String::new(),
+            active: true,
+            x,
+            y,
+            width: w,
+            height: h,
+        }
+    }
+
+    #[test]
+    fn overlay_rect_left_top_uses_offset_and_monitor_origin() {
+        let cfg = cfg(HorizontalAnchor::Left, VerticalAnchor::Top);
+        let m = monitor(10, 20, 1920, 1080);
+        let rect = overlay_rect(&cfg, (300, 100), (24, 16, 24, 16), Some(&m));
+        assert_eq!(
+            rect,
+            Rect {
+                x: 26,
+                y: 44,
+                w: 300,
+                h: 100
+            }
+        );
+        assert!(rect.contains((30, 50)));
+        assert!(!rect.contains((0, 0)));
+    }
+
+    #[test]
+    fn overlay_rect_right_bottom_uses_monitor_size_minus_offset() {
+        let cfg = cfg(HorizontalAnchor::Right, VerticalAnchor::Bottom);
+        let m = monitor(0, 0, 1920, 1080);
+        let rect = overlay_rect(&cfg, (300, 100), (24, 16, 24, 16), Some(&m));
+        assert_eq!(rect.x, 1920 - 300 - 16);
+        assert_eq!(rect.y, 1080 - 100 - 24);
+    }
+
+    #[test]
+    fn overlay_rect_center_top_is_centered_horizontally() {
+        let cfg = cfg(HorizontalAnchor::Center, VerticalAnchor::Top);
+        let m = monitor(0, 0, 1920, 1080);
+        let rect = overlay_rect(&cfg, (300, 100), (24, 16, 24, 16), Some(&m));
+        assert_eq!(rect.x, (1920 - 300) / 2);
+        assert_eq!(rect.y, 24);
+    }
+
+    #[test]
+    fn overlay_rect_center_with_drag_offsets_shifts_from_center() {
+        let cfg = cfg(HorizontalAnchor::Center, VerticalAnchor::Top);
+        let m = monitor(0, 0, 1920, 1080);
+        // Simulate drag 30px right: left 46, right -14
+        let offset = (24, -14, 24, 46);
+        let rect = overlay_rect(&cfg, (300, 100), offset, Some(&m));
+        assert_eq!(rect.x, (1920 - 300) / 2 + (46 - (-14)) / 2);
+    }
+
+    #[test]
+    fn overlay_rect_monitor_offset_shifts_global_coords() {
+        let cfg = cfg(HorizontalAnchor::Left, VerticalAnchor::Top);
+        let m = monitor(1920, 0, 1920, 1080);
+        let rect = overlay_rect(&cfg, (300, 100), (10, 5, 10, 5), Some(&m));
+        assert_eq!(rect.x, 1925);
+        assert_eq!(rect.y, 10);
+        assert!(rect.contains((1930, 20)));
+        assert!(!rect.contains((10, 20)));
+    }
+
+    #[test]
+    fn overlay_rect_fallback_when_monitor_none_uses_left_top() {
+        let cfg = cfg(HorizontalAnchor::Right, VerticalAnchor::Bottom);
+        let rect = overlay_rect(&cfg, (300, 100), (24, 16, 24, 16), None);
+        assert_eq!(rect.x, 16);
+        assert_eq!(rect.y, 24);
+    }
+
+    #[test]
+    fn rect_contains_is_inclusive_top_left_exclusive_bottom_right() {
+        let r = Rect {
+            x: 10,
+            y: 20,
+            w: 100,
+            h: 50,
+        };
+        assert!(r.contains((10, 20)));
+        assert!(r.contains((109, 69)));
+        assert!(!r.contains((110, 20)));
+        assert!(!r.contains((10, 70)));
+        assert!(!r.contains((9, 20)));
     }
 }
