@@ -16,6 +16,7 @@ use std::path::PathBuf;
 
 use super::dispatch::DAEMON_BIN;
 use super::dispatch::GUI_BIN;
+use super::dispatch::TRAY_BIN;
 
 /// The systemctl boundary: `run(args)` executes `systemctl --user <args…>`.
 /// Owned wrapper around an external binary, so tests substitute a recording
@@ -58,6 +59,10 @@ fn desktop_path(data_base: &Path) -> PathBuf {
     data_base.join("applications/hyprlay.desktop")
 }
 
+fn tray_unit_path(config_base: &Path) -> PathBuf {
+    config_base.join("systemd/user/hyprlay-tray.service")
+}
+
 fn unit_text(exe_dir: &Path) -> String {
     // %h is systemd's own home specifier, resolved by the manager at load
     // time — credentials may arrive via service.env even under systemd.
@@ -89,9 +94,47 @@ fn desktop_text(exe_dir: &Path) -> String {
     )
 }
 
-/// Write both files, reload the user manager, and (unless `start` is false)
-/// enable + start the unit. Every step lands in the returned report; the
-/// first failing step aborts with an error naming it.
+/// Second systemd user unit, mirroring the daemon template
+/// (`Restart=on-failure`, `EnvironmentFile`, `WantedBy=default.target`) so a
+/// late-starting waybar still gets its tray. Runs the resident tray binary.
+fn tray_unit_text(exe_dir: &Path) -> String {
+    format!(
+        "[Unit]\n\
+         Description=hyprlay system tray menu\n\
+         \n\
+         [Service]\n\
+         ExecStart={}/{}\n\
+         Restart=on-failure\n\
+         EnvironmentFile=-%h/.config/hyprlay/service.env\n\
+         \n\
+         [Install]\n\
+         WantedBy=default.target\n",
+        exe_dir.display(),
+        TRAY_BIN
+    )
+}
+
+/// The sibling binaries that must all be present before anything is written.
+/// A partial install would otherwise reference missing executables.
+const REQUIRED_BINS: &[&str] = &[DAEMON_BIN, GUI_BIN, TRAY_BIN];
+
+/// Names of the required sibling binaries missing from `exe_dir`.
+fn missing_bins(exe_dir: &Path) -> Vec<&'static str> {
+    REQUIRED_BINS
+        .iter()
+        .copied()
+        .filter(|name| !exe_dir.join(name).exists())
+        .collect()
+}
+
+/// Write both unit files + the desktop entry, reload the user manager, and
+/// (unless `start` is false) enable + start both units. Every step lands in
+/// the returned report; the first failing step aborts with an error naming
+/// it.
+///
+/// Binaries are verified **before any write**: a partial install must fail
+/// loudly naming the missing bins rather than writing units that reference
+/// executables that are not there.
 pub fn install(
     config_base: &Path,
     data_base: &Path,
@@ -99,23 +142,26 @@ pub fn install(
     start: bool,
     systemctl: &dyn Systemctl,
 ) -> Result<Vec<String>, String> {
+    let missing = missing_bins(exe_dir);
+    if !missing.is_empty() {
+        return Err(format!(
+            "error: missing binaries for install: {}\nthe hyprlay binaries must be installed together",
+            missing.join(", ")
+        ));
+    }
+
     let unit = unit_path(config_base);
+    let tray_unit = tray_unit_path(config_base);
     let desktop = desktop_path(data_base);
     write_file(&unit, &unit_text(exe_dir))?;
+    write_file(&tray_unit, &tray_unit_text(exe_dir))?;
     write_file(&desktop, &desktop_text(exe_dir))?;
 
     let mut report = vec![
         format!("wrote {}", unit.display()),
+        format!("wrote {}", tray_unit.display()),
         format!("wrote {}", desktop.display()),
     ];
-    if !siblings_present(exe_dir) {
-        // Running from target/ or a partial tree still works: the files
-        // just reference this location, and the user must know that.
-        report.push(format!(
-            "note: {DAEMON_BIN}/{GUI_BIN} not found next to this binary; installed paths point at {}",
-            exe_dir.display()
-        ));
-    }
 
     systemctl
         .run(&["daemon-reload"])
@@ -127,6 +173,10 @@ pub fn install(
             .run(&["enable", "--now", "hyprlay"])
             .map_err(|e| format!("systemctl --user enable --now hyprlay failed: {e}"))?;
         report.push("systemctl --user enable --now hyprlay: ok".to_string());
+        systemctl
+            .run(&["enable", "--now", "hyprlay-tray"])
+            .map_err(|e| format!("systemctl --user enable --now hyprlay-tray failed: {e}"))?;
+        report.push("systemctl --user enable --now hyprlay-tray: ok".to_string());
     } else {
         report.push("skipped systemctl --user enable --now (--no-start)".to_string());
     }
@@ -150,10 +200,6 @@ pub fn uninstall(
     remove_reported(&unit_path(config_base), &mut report)?;
     remove_reported(&desktop_path(data_base), &mut report)?;
     Ok(report)
-}
-
-fn siblings_present(exe_dir: &Path) -> bool {
-    exe_dir.join(DAEMON_BIN).exists() && exe_dir.join(GUI_BIN).exists()
 }
 
 fn write_file(path: &Path, contents: &str) -> Result<(), String> {

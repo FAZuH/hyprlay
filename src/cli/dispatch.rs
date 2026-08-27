@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 pub const DAEMON_BIN: &str = "hyprlayd";
 pub const GUI_BIN: &str = "hyprlay-gui";
+pub const TRAY_BIN: &str = "hyprlay-tray";
 
 /// Resolve `name` inside `exe_dir`, demanding that the file exists so a
 /// broken install reports here instead of exec-failing with a bare ENOENT.

@@ -17,7 +17,11 @@ use hyprlay::cli::install::uninstall;
 
 const DAEMON_RELOAD: &str = "systemctl --user daemon-reload";
 const ENABLE_NOW: &str = "systemctl --user enable --now hyprlay";
+const ENABLE_NOW_TRAY: &str = "systemctl --user enable --now hyprlay-tray";
 const DISABLE_NOW: &str = "systemctl --user disable --now hyprlay";
+const TRAY_BIN: &str = "hyprlay-tray";
+const DAEMON_BIN: &str = "hyprlayd";
+const GUI_BIN: &str = "hyprlay-gui";
 
 /// Spy double for the systemctl boundary: records each invocation as one
 /// readable line and can be told to fail a specific command (simulating
@@ -83,10 +87,15 @@ impl World {
     fn with_sibling_bins(&self) {
         std::fs::write(self.bin_dir.join("hyprlayd"), b"").unwrap();
         std::fs::write(self.bin_dir.join("hyprlay-gui"), b"").unwrap();
+        std::fs::write(self.bin_dir.join(TRAY_BIN), b"").unwrap();
     }
 
     fn unit(&self) -> PathBuf {
         self.config_base.join("systemd/user/hyprlay.service")
+    }
+
+    fn tray_unit(&self) -> PathBuf {
+        self.config_base.join("systemd/user/hyprlay-tray.service")
     }
 
     fn desktop(&self) -> PathBuf {
@@ -108,6 +117,25 @@ impl World {
              [Install]\n\
              WantedBy=default.target\n",
             self.bin_dir.display()
+        )
+    }
+
+    /// Independently written truth for the tray unit, mirroring the daemon
+    /// template (Restart=on-failure, EnvironmentFile, WantedBy=default.target).
+    fn expected_tray_unit(&self) -> String {
+        format!(
+            "[Unit]\n\
+             Description=hyprlay system tray menu\n\
+             \n\
+             [Service]\n\
+             ExecStart={}/{}\n\
+             Restart=on-failure\n\
+             EnvironmentFile=-%h/.config/hyprlay/service.env\n\
+             \n\
+             [Install]\n\
+             WantedBy=default.target\n",
+            self.bin_dir.display(),
+            TRAY_BIN
         )
     }
 
@@ -173,7 +201,7 @@ fn install_writes_the_desktop_entry_with_pinned_contents() {
 }
 
 #[test]
-fn install_runs_daemon_reload_then_enable_now_in_order() {
+fn install_runs_daemon_reload_then_enable_now_both_units_in_order() {
     let world = World::new("flow-order");
     world.with_sibling_bins();
     let spy = Spy::recording();
@@ -189,7 +217,31 @@ fn install_runs_daemon_reload_then_enable_now_in_order() {
 
     assert_eq!(
         spy.lines(),
-        vec![DAEMON_RELOAD.to_string(), ENABLE_NOW.to_string()]
+        vec![
+            DAEMON_RELOAD.to_string(),
+            ENABLE_NOW.to_string(),
+            ENABLE_NOW_TRAY.to_string()
+        ]
+    );
+}
+
+#[test]
+fn install_writes_the_tray_unit_file_with_pinned_contents() {
+    let world = World::new("tray-unit-content");
+    world.with_sibling_bins();
+
+    install(
+        &world.config_base,
+        &world.data_base,
+        &world.bin_dir,
+        true,
+        &Spy::recording(),
+    )
+    .expect("install succeeds");
+
+    assert_eq!(
+        std::fs::read_to_string(world.tray_unit()).unwrap(),
+        world.expected_tray_unit()
     );
 }
 
@@ -356,22 +408,52 @@ fn uninstall_succeeds_when_nothing_is_installed() {
 }
 
 #[test]
-fn install_notes_when_binaries_are_missing_from_the_exe_dir() {
+fn install_aborts_before_any_write_when_bins_are_missing() {
     let world = World::new("missing-bins");
+    // No sibling binaries present at all.
 
-    let report = install(
+    let err = install(
         &world.config_base,
         &world.data_base,
         &world.bin_dir,
         true,
         &Spy::recording(),
     )
-    .expect("install still works without siblings present");
+    .unwrap_err();
+
+    // The error names every missing bin.
+    assert!(err.contains(DAEMON_BIN), "error names hyprlayd: {err}");
+    assert!(err.contains(GUI_BIN), "error names hyprlay-gui: {err}");
+    assert!(err.contains(TRAY_BIN), "error names hyprlay-tray: {err}");
+    // Nothing was written before the check failed.
+    assert!(!world.unit().exists(), "daemon unit must not be written");
+    assert!(!world.tray_unit().exists(), "tray unit must not be written");
+    assert!(
+        !world.desktop().exists(),
+        "desktop entry must not be written"
+    );
+}
+
+#[test]
+fn install_aborts_and_names_only_the_bins_that_are_absent() {
+    let world = World::new("partial-bins");
+    // Present: hyprlayd only. Missing: hyprlay-gui and hyprlay-tray.
+    std::fs::write(world.bin_dir.join(DAEMON_BIN), b"").unwrap();
+
+    let err = install(
+        &world.config_base,
+        &world.data_base,
+        &world.bin_dir,
+        true,
+        &Spy::recording(),
+    )
+    .unwrap_err();
 
     assert!(
-        report
-            .iter()
-            .any(|line| line.contains(&world.bin_dir.display().to_string())),
-        "report says where the written paths point: {report:?}"
+        !err.contains(DAEMON_BIN),
+        "present bin must not be named: {err}"
     );
+    assert!(err.contains(GUI_BIN), "missing hyprlay-gui named: {err}");
+    assert!(err.contains(TRAY_BIN), "missing hyprlay-tray named: {err}");
+    assert!(!world.unit().exists(), "nothing written on abort");
 }

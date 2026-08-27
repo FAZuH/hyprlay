@@ -9,4 +9,6 @@ pub mod compositor;
 pub mod config;
 pub mod credentials;
 pub mod ctl;
+pub mod daemon_control;
 pub mod domain;
+pub mod singleton;
