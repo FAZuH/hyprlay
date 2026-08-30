@@ -525,14 +525,20 @@ fn update(gui: &mut Gui, message: Message) -> Task<Message> {
         }
         Message::SetFlag(key, v) => {
             let command = Command::Set(key, Value::Flag(v));
-            // The daemon decides persistence with its pre-apply autosave
-            // value; capture ours before the optimistic mirror flips too.
-            let persists = hyprlay_core::domain::should_persist(&command, gui.config.auto_save);
-            command.clone().apply_config(&mut gui.config);
-            if !persists {
-                gui.dirty = true;
+            if key == Key::ShowOnFullscreen {
+                gui.config.show_on_fullscreen = v;
+                mark_dirty(gui, &command);
+                Task::perform(send(command.to_string()), Message::Applied)
+            } else {
+                // The daemon decides persistence with its pre-apply autosave
+                // value; capture ours before the optimistic mirror flips too.
+                let persists = hyprlay_core::domain::should_persist(&command, gui.config.auto_save);
+                command.clone().apply_config(&mut gui.config);
+                if !persists {
+                    gui.dirty = true;
+                }
+                Task::perform(send(command.to_string()), Message::Applied)
             }
-            Task::perform(send(command.to_string()), Message::Applied)
         }
         Message::AuthClientId(id) => {
             gui.auth_client_id = id;
