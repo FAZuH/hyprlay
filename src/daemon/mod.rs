@@ -259,10 +259,18 @@ fn hover_subscription() -> impl futures_util::Stream<Item = Message> {
 
 fn update(state: &mut Overlay, message: Message) -> Task<Message> {
     match message {
-        Message::Discord(ev) => match state.apply_discord(ev) {
-            state::RosterChange::Changed => Task::batch([resize_task(state), avatar_tasks(state)]),
-            state::RosterChange::Unchanged => Task::none(),
-        },
+        Message::Discord(ev) => {
+            let change = state.apply_discord(ev);
+            if !hover_poll_enabled(state) && state.is_hovered() {
+                state.set_hovered(false);
+            }
+            match change {
+                state::RosterChange::Changed => {
+                    Task::batch([resize_task(state), avatar_tasks(state)])
+                }
+                state::RosterChange::Unchanged => Task::none(),
+            }
+        }
         Message::AvatarResult { user_id, data } => {
             if let Some(data) = data {
                 state.insert_avatar(user_id, data);
@@ -295,6 +303,13 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
                 monitor.as_ref(),
             );
             let now_hovered = rect.contains((x, y));
+            tracing::debug!(
+                event = "hover_tick",
+                pos = ?pos,
+                rect = ?rect,
+                hovered = now_hovered,
+                dim_on_hover = state.config().dim_on_hover
+            );
             if now_hovered != state.is_hovered() {
                 state.set_hovered(now_hovered);
             }
@@ -565,6 +580,9 @@ fn handle_ctl(
     // explicit force-write, monitor changes save in their own arm.
     let persists = hyprlay_core::domain::should_persist(&cmd, state.config().auto_save);
     let result = cmd.apply_config(state.config_mut());
+    if !hover_poll_enabled(state) && state.is_hovered() {
+        state.set_hovered(false);
+    }
     if persists && !result.reply.starts_with("error:") {
         state.config().save();
     }

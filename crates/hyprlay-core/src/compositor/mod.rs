@@ -31,18 +31,16 @@ pub trait Compositor: Send {
 /// instead of shelling out to `hyprctl` on foreign compositors.
 pub fn detect() -> Box<dyn Compositor> {
     if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
-        Box::new(Hyprland)
-    } else {
-        Box::new(Unknown)
+        return Box::new(Hyprland);
     }
+    if hyprland::has_socket() {
+        return Box::new(Hyprland);
+    }
+    Box::new(Unknown)
 }
 
 pub fn cursor_pos() -> Option<(i32, i32)> {
-    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
-        hyprland::cursor_pos()
-    } else {
-        None
-    }
+    hyprland::cursor_pos()
 }
 
 /// Placeholder for non-Hyprland sessions: reports nothing.

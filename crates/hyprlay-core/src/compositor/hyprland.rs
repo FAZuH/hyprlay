@@ -31,54 +31,104 @@ impl Compositor for Hyprland {
 }
 
 pub fn cursor_pos() -> Option<(i32, i32)> {
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR")?;
-    let sig = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")?;
-    let socket_path = std::path::PathBuf::from(runtime)
-        .join("hypr")
-        .join(sig)
-        .join(".socket.sock");
-    let mut stream = match std::os::unix::net::UnixStream::connect(&socket_path) {
+    for path in candidate_socket_paths() {
+        if let Some(pos) = cursor_pos_from_socket(&path) {
+            return Some(pos);
+        }
+    }
+    cursor_pos_via_hyprctl()
+}
+
+pub(crate) fn has_socket() -> bool {
+    candidate_socket_paths().iter().any(|p| p.exists())
+}
+
+fn candidate_socket_paths() -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let mut paths = Vec::new();
+    if let (Some(rt), Some(sig)) = (
+        std::env::var_os("XDG_RUNTIME_DIR"),
+        std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE"),
+    ) {
+        paths.push(
+            PathBuf::from(rt)
+                .join("hypr")
+                .join(sig)
+                .join(".socket.sock"),
+        );
+    }
+    let mut bases = Vec::new();
+    if let Some(rt) =
+        dirs::runtime_dir().or_else(|| std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from))
+    {
+        bases.push(rt.join("hypr"));
+    } else {
+        let uid = unsafe { libc::getuid() };
+        bases.push(PathBuf::from(format!("/run/user/{uid}/hypr")));
+        bases.push(PathBuf::from("/tmp/hypr"));
+    }
+    for base in bases {
+        if let Ok(entries) = std::fs::read_dir(&base) {
+            for entry in entries.flatten() {
+                let p = entry.path().join(".socket.sock");
+                if p.exists() && !paths.contains(&p) {
+                    paths.push(p);
+                }
+            }
+        }
+    }
+    paths
+}
+
+fn cursor_pos_from_socket(path: &std::path::Path) -> Option<(i32, i32)> {
+    use std::io::Read;
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+    let mut stream = match UnixStream::connect(path) {
         Ok(s) => s,
         Err(e) => {
-            tracing::debug!(event = "cursor_socket_failed", error = %e, "could not connect to hyprland socket");
+            tracing::debug!(event = "cursor_socket_failed", path = %path.display(), error = %e, "could not connect to hyprland socket");
             return None;
         }
     };
-    if let Err(e) = std::io::Write::write_all(&mut stream, b"cursorpos\n") {
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+    if let Err(e) = stream.write_all(b"cursorpos\n") {
         tracing::debug!(event = "cursor_send_failed", error = %e, "could not send cursorpos");
         return None;
     }
     let mut buf = Vec::new();
-    if let Err(e) = std::io::Read::read_to_end(&mut stream, &mut buf) {
+    if let Err(e) = stream.read_to_end(&mut buf) {
         tracing::debug!(event = "cursor_read_failed", error = %e, "could not read cursorpos reply");
         return None;
     }
     let reply = String::from_utf8_lossy(&buf).trim().to_string();
     if reply.is_empty() {
-        tracing::debug!(event = "cursor_empty_reply", "empty cursorpos reply");
+        tracing::debug!(event = "cursor_empty_reply", path = %path.display(), "empty cursorpos reply");
         return None;
     }
-    if reply.starts_with('{') {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&reply) {
-            let x = v.get("x").and_then(|x| x.as_i64()).map(|x| x as i32);
-            let y = v.get("y").and_then(|y| y.as_i64()).map(|y| y as i32);
-            if let (Some(x), Some(y)) = (x, y) {
-                return Some((x, y));
-            }
-        }
-        tracing::debug!(event = "cursor_parse_failed", reply = %reply, "failed to parse json cursorpos");
-        return None;
-    }
-    let parts: Vec<&str> = reply.split(',').collect();
-    if parts.len() == 2
-        && let (Ok(x), Ok(y)) = (
-            parts[0].trim().parse::<i32>(),
-            parts[1].trim().parse::<i32>(),
-        )
-    {
-        return Some((x, y));
+    if let Some(pos) = parse_cursor_reply(&reply) {
+        return Some(pos);
     }
     tracing::debug!(event = "cursor_parse_failed", reply = %reply, "failed to parse cursorpos");
+    None
+}
+
+fn cursor_pos_via_hyprctl() -> Option<(i32, i32)> {
+    for args in [vec!["cursorpos", "-j"], vec!["cursorpos"]] {
+        if let Ok(out) = std::process::Command::new("hyprctl").args(&args).output()
+            && out.status.success()
+        {
+            let reply = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !reply.is_empty() {
+                if let Some(pos) = parse_cursor_reply(&reply) {
+                    return Some(pos);
+                }
+                tracing::debug!(event = "cursor_hyprctl_parse_failed", reply = %reply, "hyprctl parse failed");
+            }
+        }
+    }
     None
 }
 
@@ -169,17 +219,22 @@ mod tests {
     fn cursor_pos_returns_none_without_hyprland_env() {
         let orig_runtime = std::env::var_os("XDG_RUNTIME_DIR");
         let orig_sig = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE");
+        let tmp = std::env::temp_dir().join(format!("hyprlay-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
         unsafe {
-            std::env::remove_var("XDG_RUNTIME_DIR");
+            std::env::set_var("XDG_RUNTIME_DIR", &tmp);
             std::env::remove_var("HYPRLAND_INSTANCE_SIGNATURE");
         }
         assert_eq!(cursor_pos(), None);
         assert_eq!(super::super::cursor_pos(), None);
         if let Some(v) = orig_runtime {
             unsafe { std::env::set_var("XDG_RUNTIME_DIR", v) };
+        } else {
+            unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
         }
         if let Some(v) = orig_sig {
             unsafe { std::env::set_var("HYPRLAND_INSTANCE_SIGNATURE", v) };
         }
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
