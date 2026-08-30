@@ -8,12 +8,32 @@ mod hyprland;
 pub use hyprland::Hyprland;
 
 /// One connected output as reported by the compositor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Monitor {
     pub name: String,
     pub description: String,
     /// Whether this is the currently focused output.
     pub active: bool,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub scale: f32,
+}
+
+impl Default for Monitor {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: String::new(),
+            active: false,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            scale: 1.0,
+        }
+    }
 }
 
 pub trait Compositor: Send {
@@ -27,10 +47,16 @@ pub trait Compositor: Send {
 /// instead of shelling out to `hyprctl` on foreign compositors.
 pub fn detect() -> Box<dyn Compositor> {
     if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
-        Box::new(Hyprland)
-    } else {
-        Box::new(Unknown)
+        return Box::new(Hyprland);
     }
+    if hyprland::has_socket() {
+        return Box::new(Hyprland);
+    }
+    Box::new(Unknown)
+}
+
+pub fn cursor_pos() -> Option<(i32, i32)> {
+    hyprland::cursor_pos()
 }
 
 /// Placeholder for non-Hyprland sessions: reports nothing.

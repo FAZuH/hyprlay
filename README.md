@@ -122,10 +122,11 @@ daemon writes `config.toml` after every successful change. With
 `auto-save` off, changes stay session-only until you run
 `hyprlay save`.
 
-A monitor change re-creates the layer surface, so `set monitor`
-restarts the daemon. An unknown output name fails with a clean error.
-A bare `set monitor` cycles from the active monitor through each
-detected output.
+A monitor or `show-on-fullscreen` change re-creates the layer surface,
+so `set monitor` or `set show-on-fullscreen` restarts the daemon. An
+unknown output name fails with a clean error. A bare `set monitor`
+cycles from the active monitor through each detected output. `dim-on-hover`
+and `hover-opacity` apply live without restart.
 
 Nudges shift the overlay at runtime only: re-anchoring or restarting
 resets the shift (`nudge -h` says so too). Persistent shifts belong in
@@ -136,8 +137,9 @@ Keys (use with `get`/`set`):
 - Position: `position`, `anchor`, `monitor`, `offset-x`, `offset-y`,
   `offset-min`, `offset-max`, `rtl`
 - Layout: `width`, `scale`, `avatar-size`, `text-size`, `spacing`,
-  `max-name`, `talking-only`, `own-user`, `visible`, `auto-save`
-- Opacity: `opacity`, `avatar-opacity`, `text-opacity`, `box-opacity`
+  `max-name`, `talking-only`, `own-user`, `visible`, `auto-save`,
+  `show-on-fullscreen`, `dim-on-hover`
+- Opacity: `opacity`, `hover-opacity`, `avatar-opacity`, `text-opacity`, `box-opacity`
 - Colors: `speaking-color`, `text-color`, `box-color`
 
 Hyprland keybinds:
@@ -204,9 +206,12 @@ talking-only = false             # render speaking users only
 own-user = true                  # show yourself
 visible = true                   # false hides all roster rows
 auto-save = true                 # persist every applied change
+show-on-fullscreen = true        # keep overlay above fullscreen windows
+dim-on-hover = false             # dim overlay while hovered (Hyprland-only)
 
 [opacity]
 overall = 100                    # 0-100
+hover-opacity = 40               # 0-100, overall opacity while hovered
 avatar = 100                     # 0-100, applied on top of overall
 text = 100                       # 0-100, applied on top of overall
 box = 90                         # username chip background, 0-100
