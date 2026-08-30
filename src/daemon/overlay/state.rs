@@ -84,6 +84,7 @@ pub struct Overlay {
     /// matter; derived from `offset_x`/`offset_y`.
     offset: (i32, i32, i32, i32),
     size: (u32, u32),
+    hovered: bool,
 }
 
 /// What changed after applying a Discord event — the shell turns this into
@@ -108,6 +109,7 @@ impl Overlay {
             auth_label: "own-app",
             offset,
             size: (width, 0),
+            hovered: false,
         }
     }
 
@@ -134,13 +136,29 @@ impl Overlay {
         self.auth_label
     }
 
-    #[cfg(test)]
     pub fn size(&self) -> (u32, u32) {
         self.size
     }
 
     pub fn offset(&self) -> (i32, i32, i32, i32) {
         self.offset
+    }
+
+    pub fn is_hovered(&self) -> bool {
+        self.hovered
+    }
+
+    pub fn set_hovered(&mut self, v: bool) -> bool {
+        if self.hovered != v {
+            self.hovered = v;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn effective_alphas(&self) -> hyprlay_core::config::Alphas {
+        self.config.alphas_for(self.hovered)
     }
 
     // -- discord events ----------------------------------------------------
@@ -437,5 +455,42 @@ mod tests {
         assert_eq!(first.unwrap().1, state.size().1);
         // Same roster again → no change to report.
         assert!(state.take_size_change().is_none());
+    }
+
+    #[test]
+    fn hovered_state_is_diff_gated_and_affects_alphas() {
+        let mut state = Overlay::new(Config {
+            opacity: 100,
+            hover_opacity: 30,
+            ..Config::default()
+        });
+        assert!(!state.is_hovered());
+        assert_eq!(state.effective_alphas().overall, 1.0);
+        assert!(state.set_hovered(true));
+        assert!(state.is_hovered());
+        assert_eq!(state.effective_alphas().overall, 0.3);
+        assert!(!state.set_hovered(true));
+        assert!(state.set_hovered(false));
+        assert_eq!(state.effective_alphas().overall, 1.0);
+    }
+
+    #[test]
+    fn effective_alphas_multiplies_per_part_with_hover_opacity() {
+        let cfg = Config {
+            opacity: 100,
+            hover_opacity: 40,
+            avatar_opacity: 100,
+            text_opacity: 50,
+            box_opacity: 90,
+            ..Config::default()
+        };
+        let mut state = overlay(vec![participant("1", "a", false)], cfg);
+        assert_eq!(state.effective_alphas().overall, 1.0);
+        state.set_hovered(true);
+        let a = state.effective_alphas();
+        assert_eq!(a.overall, 0.4);
+        assert_eq!(a.avatar, 0.4);
+        assert_eq!(a.text, 0.2);
+        assert_eq!(a.box_bg, 0.36);
     }
 }

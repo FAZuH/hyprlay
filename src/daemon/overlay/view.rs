@@ -47,7 +47,7 @@ pub fn view<'a>(state: &'a Overlay) -> Element<'a, Message> {
     // Four knobs: overall opacity multiplies into the profile picture, the
     // username text, and the username background. At 100/100/100/100 nothing
     // is transparent anywhere.
-    let alphas = state.config().alphas();
+    let alphas = state.effective_alphas();
 
     let rows: Vec<Element<Message>> = state
         .displayed()

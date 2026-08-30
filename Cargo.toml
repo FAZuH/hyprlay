@@ -16,6 +16,8 @@ exclude = ["scripts"]
 # Members opt in with `dep = { workspace = true }`.
 [workspace.dependencies]
 hyprlay-core = { version = "0.1.0", path = "crates/hyprlay-core" }
+ksni = "0.3"
+libc = "0.2"
 iced = { version = "0.14", default-features = false, features = [
     "wgpu",
     "tiny-skia",
@@ -49,6 +51,7 @@ clap = { version = "4.5", default-features = false, features = [
 
 [dependencies]
 hyprlay-core = { workspace = true }
+ksni = { workspace = true }
 clap = { workspace = true }
 iced = { workspace = true }
 iced_layershell = { workspace = true }
