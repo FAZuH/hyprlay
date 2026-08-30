@@ -182,7 +182,7 @@ impl Overlay {
             }
             DiscordEvent::Participants(users) => {
                 self.users = users;
-                if self.status == ConnectionStatus::Connected {
+                if self.status == ConnectionStatus::Connected && !demo_mode() {
                     crate::daemon::adapters::cache::save_roster(
                         self.channel_name.as_deref(),
                         self.me_id.as_deref(),
@@ -278,6 +278,17 @@ impl Overlay {
             self.users = roster.users.into_iter().map(Participant::from).collect();
             self.avatars.hydrate(&self.users);
         }
+    }
+}
+
+fn demo_mode() -> bool {
+    #[cfg(feature = "demo-roster")]
+    {
+        std::env::var_os("HYPRLAY_DEMO_ROSTER").is_some()
+    }
+    #[cfg(not(feature = "demo-roster"))]
+    {
+        false
     }
 }
 

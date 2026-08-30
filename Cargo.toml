@@ -13,6 +13,9 @@ members = ["crates/hyprlay-core"]
 # Standalone debug probes for Discord's wire protocols
 exclude = ["scripts"]
 
+[features]
+demo-roster = []
+
 # Members opt in with `dep = { workspace = true }`.
 [workspace.dependencies]
 hyprlay-core = { version = "0.1.0", path = "crates/hyprlay-core" }

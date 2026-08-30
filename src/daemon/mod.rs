@@ -7,6 +7,8 @@
 //! `hyprlay-core::ctl`; only this listener side is daemon-specific.
 
 mod ctl_server;
+#[cfg(feature = "demo-roster")]
+mod demo;
 mod overlay;
 
 pub mod adapters;
@@ -214,11 +216,15 @@ fn subscription(state: &Overlay, auth: &DiscordRpc) -> Subscription<Message> {
     } else {
         Subscription::none()
     };
-    Subscription::batch([
-        Subscription::run_with(auth.clone(), discord_subscription),
-        Subscription::run(ctl_subscription),
-        hover,
-    ])
+    #[cfg(feature = "demo-roster")]
+    let roster = if demo::enabled() {
+        Subscription::run(demo::subscription)
+    } else {
+        Subscription::run_with(auth.clone(), discord_subscription)
+    };
+    #[cfg(not(feature = "demo-roster"))]
+    let roster = Subscription::run_with(auth.clone(), discord_subscription);
+    Subscription::batch([roster, Subscription::run(ctl_subscription), hover])
 }
 
 fn discord_subscription(rpc: &DiscordRpc) -> impl futures_util::Stream<Item = Message> + use<> {
