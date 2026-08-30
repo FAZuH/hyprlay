@@ -14,3 +14,5 @@ pub mod cli;
 pub mod daemon;
 #[doc(hidden)]
 pub mod gui;
+#[doc(hidden)]
+pub mod tray;

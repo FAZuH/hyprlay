@@ -8,11 +8,13 @@
 //! Every other reply (config echoes, `saved`, `quitting`, validation
 //! errors from a *live* daemon) leaves the state untouched — only probe
 //! outcomes may move it.
+//!
+//! The toggle→action *routing* (which [`Action`](hyprlay_core::daemon_control::Action)
+//! a press resolves to, and how each is performed) lives in
+//! `hyprlay_core::daemon_control`; this module owns only the GUI's view of
+//! daemon state and the boot auto-start watcher.
 
-use std::process::Stdio;
-
-use hyprlay_core::ctl;
-use hyprlay_core::domain::Command;
+use hyprlay_core::daemon_control::Toggle;
 
 /// Chip text before the first probe has answered.
 pub(super) const CONNECTING_TEXT: &str = "connecting…";
@@ -21,9 +23,6 @@ const DAEMON_DOWN_TEXT: &str = "daemon not active";
 const DAEMON_UNREACHABLE: &str = "error: daemon unreachable";
 /// Same wrapper, when the off-thread task itself died.
 const PROBE_TASK_FAILED: &str = "error: command task failed";
-/// systemd user unit name. Its presence routes Start/Stop through
-/// systemctl; its absence falls back to spawn/socket-quit.
-const SERVICE_UNIT: &str = "hyprlay";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum DaemonState {
@@ -73,13 +72,6 @@ impl DaemonState {
             Self::Connecting => None,
         }
     }
-}
-
-/// Which direction the bottom-left toggle would drive the daemon.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Toggle {
-    Start,
-    Stop,
 }
 
 /// Does this reply prove that no daemon answered? Only these two texts —
@@ -146,129 +138,13 @@ impl AutoStart {
     }
 }
 
-/// The concrete mechanism a toggle press resolves to, decided by whether
-/// the systemd user unit is installed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Action {
-    SystemctlStart,
-    SystemctlStop,
-    SpawnDaemon,
-    SocketQuit,
-}
-
-fn plan_action(toggle: Toggle, unit_installed: bool) -> Action {
-    match (toggle, unit_installed) {
-        (Toggle::Start, true) => Action::SystemctlStart,
-        (Toggle::Stop, true) => Action::SystemctlStop,
-        (Toggle::Start, false) => Action::SpawnDaemon,
-        (Toggle::Stop, false) => Action::SocketQuit,
-    }
-}
-
-/// The process/socket boundary of the toggle, abstracted so the decision
-/// logic is testable without touching systemctl or the daemon.
-pub(super) trait DaemonControl: Send + Sync {
-    fn unit_installed(&self) -> bool;
-    fn perform(&self, action: Action) -> Result<(), String>;
-}
-
-/// Real boundary: systemctl for the unit paths, detached sibling spawn and
-/// the control socket otherwise.
-pub(super) struct SystemControl;
-
-impl DaemonControl for SystemControl {
-    fn unit_installed(&self) -> bool {
-        // Exit success is the whole verdict; the printed unit is noise we
-        // suppress so it never lands in the GUI's stderr.
-        std::process::Command::new("systemctl")
-            .args(["--user", "cat", SERVICE_UNIT])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-    }
-
-    fn perform(&self, action: Action) -> Result<(), String> {
-        match action {
-            Action::SystemctlStart => systemctl("start"),
-            Action::SystemctlStop => systemctl("stop"),
-            Action::SpawnDaemon => spawn_sibling_daemon(),
-            Action::SocketQuit => quit_via_socket(),
-        }
-    }
-}
-
-/// Run one systemctl subcommand on our user unit; failure text carries
-/// systemctl's own stderr so the status line explains what went wrong.
-fn systemctl(subcommand: &str) -> Result<(), String> {
-    let output = std::process::Command::new("systemctl")
-        .args(["--user", subcommand, SERVICE_UNIT])
-        .output()
-        .map_err(|e| format!("error: could not run systemctl: {e}"))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let detail = if detail.is_empty() {
-        format!("exit {}", output.status)
-    } else {
-        detail
-    };
-    Err(format!("error: systemctl {subcommand} failed: {detail}"))
-}
-
-/// Detached sibling spawn. Resolution mirrors crates/hyprlay's dispatch.rs
-/// (a gui→cli dependency would drag clap into this binary, and core stays
-/// protocol-only), so the ten-line helper is duplicated deliberately —
-/// same policy as tests/common.
-fn spawn_sibling_daemon() -> Result<(), String> {
-    const DAEMON_BIN: &str = "hyprlayd";
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("error: could not locate the running hyprlay-gui binary: {e}"))?;
-    let Some(dir) = exe.parent() else {
-        return Err(format!(
-            "error: could not find the directory of {}",
-            exe.display()
-        ));
-    };
-    let path = dir.join(DAEMON_BIN);
-    if !path.exists() {
-        return Err(format!(
-            "error: {DAEMON_BIN} not found next to hyprlay-gui (expected {})\nthe hyprlay binaries must be installed together",
-            path.display()
-        ));
-    }
-    use std::os::unix::process::CommandExt;
-    // Own process group + null stdio + no wait: the daemon must outlive the
-    // GUI window and never hold its terminal. A double start is already
-    // guarded daemon-side by the socket probe.
-    std::process::Command::new(&path)
-        .process_group(0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("error: could not start {DAEMON_BIN}: {e}"))
-}
-
-fn quit_via_socket() -> Result<(), String> {
-    ctl::send_command_line(&Command::Quit.to_string())
-        .map(|_| ())
-        .ok_or_else(|| DAEMON_UNREACHABLE.to_string())
-}
-
-/// Resolve and run one toggle press against the injected boundary.
-/// Success stays silent (`None`) — the immediate status refresh that
-/// follows is the visible feedback; a failure returns the text for the
-/// status line.
-pub(super) fn execute_toggle(control: &dyn DaemonControl, toggle: Toggle) -> Option<String> {
-    let action = plan_action(toggle, control.unit_installed());
-    control.perform(action).err()
-}
-
 #[cfg(test)]
 mod tests {
+    use hyprlay_core::daemon_control::Action;
+    use hyprlay_core::daemon_control::DaemonControl;
+    use hyprlay_core::daemon_control::StopPolicy;
+    use hyprlay_core::daemon_control::execute_toggle;
+
     use super::*;
 
     #[test]
@@ -372,22 +248,46 @@ mod tests {
 
     #[test]
     fn an_installed_unit_routes_start_through_systemctl() {
-        assert_eq!(plan_action(Toggle::Start, true), Action::SystemctlStart);
+        assert_eq!(
+            hyprlay_core::daemon_control::plan_action(
+                Toggle::Start,
+                true,
+                StopPolicy::ViaSystemctl
+            ),
+            Action::SystemctlStart
+        );
     }
 
     #[test]
     fn an_installed_unit_routes_stop_through_systemctl() {
-        assert_eq!(plan_action(Toggle::Stop, true), Action::SystemctlStop);
+        assert_eq!(
+            hyprlay_core::daemon_control::plan_action(Toggle::Stop, true, StopPolicy::ViaSystemctl),
+            Action::SystemctlStop
+        );
     }
 
     #[test]
     fn without_a_unit_start_spawns_the_sibling_daemon() {
-        assert_eq!(plan_action(Toggle::Start, false), Action::SpawnDaemon);
+        assert_eq!(
+            hyprlay_core::daemon_control::plan_action(
+                Toggle::Start,
+                false,
+                StopPolicy::ViaSystemctl
+            ),
+            Action::SpawnDaemon
+        );
     }
 
     #[test]
     fn without_a_unit_stop_quits_over_the_control_socket() {
-        assert_eq!(plan_action(Toggle::Stop, false), Action::SocketQuit);
+        assert_eq!(
+            hyprlay_core::daemon_control::plan_action(
+                Toggle::Stop,
+                false,
+                StopPolicy::ViaSystemctl
+            ),
+            Action::SocketQuit
+        );
     }
 
     #[test]
@@ -396,7 +296,7 @@ mod tests {
             installed: true,
             ..FakeControl::default()
         };
-        let outcome = execute_toggle(&control, Toggle::Start);
+        let outcome = execute_toggle(&control, Toggle::Start, StopPolicy::ViaSystemctl);
         assert_eq!(outcome, None);
         assert_eq!(control.performed(), vec![Action::SystemctlStart]);
     }
@@ -410,7 +310,7 @@ mod tests {
         };
         // Stop without a unit resolves to the socket path; its failure must
         // reach the status line verbatim.
-        let outcome = execute_toggle(&control, Toggle::Stop);
+        let outcome = execute_toggle(&control, Toggle::Stop, StopPolicy::ViaSystemctl);
         assert_eq!(
             outcome,
             Some("error: systemctl stop failed: unit not loaded".into())

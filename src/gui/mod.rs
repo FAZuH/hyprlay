@@ -26,10 +26,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use daemon::AutoStart;
-use daemon::DaemonControl;
 use daemon::DaemonState;
-use daemon::SystemControl;
-use daemon::Toggle;
 use fields::SEARCH_ID;
 use fields::Section;
 use fields::search_page;
@@ -41,11 +38,16 @@ use hyprlay_core::config::VerticalAnchor as V;
 use hyprlay_core::config::{self};
 use hyprlay_core::credentials::AppCredentials;
 use hyprlay_core::ctl;
+use hyprlay_core::daemon_control::DaemonControl;
+use hyprlay_core::daemon_control::StopPolicy;
+use hyprlay_core::daemon_control::SystemControl;
+use hyprlay_core::daemon_control::Toggle;
 use hyprlay_core::domain::Command;
 use hyprlay_core::domain::HexColor;
 use hyprlay_core::domain::Key;
 use hyprlay_core::domain::Value;
 use hyprlay_core::domain::corner_of;
+use hyprlay_core::singleton::AcquireError;
 use iced::Alignment;
 use iced::Element;
 use iced::Length;
@@ -164,6 +166,20 @@ pub struct Gui {
 }
 
 pub fn run() -> i32 {
+    // Single-instance guard: a second GUI must not open over a running one.
+    // The lock self-releases when this process exits.
+    let _lock = match hyprlay_core::singleton::acquire("hyprlay-gui") {
+        Ok(lock) => lock,
+        Err(AcquireError::AlreadyHeld) => {
+            eprintln!("hyprlay-gui: another instance is already running");
+            return 1;
+        }
+        Err(e) => {
+            eprintln!("hyprlay-gui: {e}");
+            return 1;
+        }
+    };
+
     iced::application(boot, update, view)
         .window(iced::window::Settings {
             size: iced::Size::new(800.0, 620.0),
@@ -245,9 +261,11 @@ async fn send(command: String) -> String {
 /// Run one Start/Stop action (systemctl, sibling spawn, or socket quit) off
 /// the UI thread, same blocking pattern as [`send`].
 async fn run_toggle(control: Arc<dyn DaemonControl>, toggle: Toggle) -> Option<String> {
-    tokio::task::spawn_blocking(move || daemon::execute_toggle(&*control, toggle))
-        .await
-        .unwrap_or_else(|e| Some(format!("error: daemon toggle task failed: {e}")))
+    tokio::task::spawn_blocking(move || {
+        hyprlay_core::daemon_control::execute_toggle(&*control, toggle, StopPolicy::ViaSystemctl)
+    })
+    .await
+    .unwrap_or_else(|e| Some(format!("error: daemon toggle task failed: {e}")))
 }
 
 /// Persist own-app credentials off the UI thread, then ask the daemon to
@@ -507,14 +525,20 @@ fn update(gui: &mut Gui, message: Message) -> Task<Message> {
         }
         Message::SetFlag(key, v) => {
             let command = Command::Set(key, Value::Flag(v));
-            // The daemon decides persistence with its pre-apply autosave
-            // value; capture ours before the optimistic mirror flips too.
-            let persists = hyprlay_core::domain::should_persist(&command, gui.config.auto_save);
-            command.clone().apply_config(&mut gui.config);
-            if !persists {
-                gui.dirty = true;
+            if key == Key::ShowOnFullscreen {
+                gui.config.show_on_fullscreen = v;
+                mark_dirty(gui, &command);
+                Task::perform(send(command.to_string()), Message::Applied)
+            } else {
+                // The daemon decides persistence with its pre-apply autosave
+                // value; capture ours before the optimistic mirror flips too.
+                let persists = hyprlay_core::domain::should_persist(&command, gui.config.auto_save);
+                command.clone().apply_config(&mut gui.config);
+                if !persists {
+                    gui.dirty = true;
+                }
+                Task::perform(send(command.to_string()), Message::Applied)
             }
-            Task::perform(send(command.to_string()), Message::Applied)
         }
         Message::AuthClientId(id) => {
             gui.auth_client_id = id;

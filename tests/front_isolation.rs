@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-const FRONTS: [&str; 3] = ["cli", "daemon", "gui"];
+const FRONTS: [&str; 4] = ["cli", "daemon", "gui", "tray"];
 
 /// Code text with `//` and `///` comments stripped, so prose that merely
 /// mentions a sibling front cannot fail the scan. Block comments are not

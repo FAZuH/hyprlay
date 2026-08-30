@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.1.0 (2026-08-23)
+## [Unreleased]
+
+- Add tray menu
+
+### Overlay
+- Added "show over fullscreen" config to keep roster above fullscreen windows
+- Added "dim on hover" config to dim while cursor is over overlay
+- Added hover opacity setting
 
 ## 0.1.0 (2026-08-23)
 

@@ -160,6 +160,18 @@ pub(super) const FIELDS: &[Field] = &[
     },
     Field {
         section: Section::Layout,
+        label: "show over fullscreen",
+        tip: "Keep overlay visible when any window is fullscreen. Changing it restarts the overlay instantly. Restart required.",
+        render: f_show_on_fullscreen,
+    },
+    Field {
+        section: Section::Layout,
+        label: "dim on hover",
+        tip: "When on, hovering the overlay dims it to hover opacity for click-through visibility. Hyprland-only, poll every 50 ms.",
+        render: f_dim_on_hover,
+    },
+    Field {
+        section: Section::Layout,
         label: "talking-only",
         tip: "Only show participants who are currently speaking.",
         render: f_talking_only,
@@ -211,6 +223,12 @@ pub(super) const FIELDS: &[Field] = &[
         label: "overall",
         tip: "Dims everything together: avatars, usernames, badges and the speaking ring.",
         render: f_opacity,
+    },
+    Field {
+        section: Section::Opacity,
+        label: "hover opacity",
+        tip: "Overall opacity while hovered (0-100). Only used when dim on hover is on.",
+        render: f_hover_opacity,
     },
     Field {
         section: Section::Opacity,
@@ -375,6 +393,40 @@ pub(super) fn f_text_opacity(gui: &Gui) -> Element<'_, Message> {
 
 pub(super) fn f_box_opacity(gui: &Gui) -> Element<'_, Message> {
     number_row(gui, Key::BoxOpacity)
+}
+
+pub(super) fn f_show_on_fullscreen(gui: &Gui) -> Element<'_, Message> {
+    toggle(gui.config.show_on_fullscreen, |v| {
+        Message::SetFlag(Key::ShowOnFullscreen, v)
+    })
+}
+
+pub(super) fn f_dim_on_hover(gui: &Gui) -> Element<'_, Message> {
+    toggle(gui.config.dim_on_hover, |v| {
+        Message::SetFlag(Key::DimOnHover, v)
+    })
+}
+
+pub(super) fn f_hover_opacity(gui: &Gui) -> Element<'_, Message> {
+    let content = number_row(gui, Key::HoverOpacity);
+    if gui.config.dim_on_hover {
+        content
+    } else {
+        container(
+            column![
+                content,
+                text("requires dim on hover to take effect")
+                    .size(10)
+                    .color(MUTED)
+            ]
+            .spacing(4),
+        )
+        .style(|_theme| container::Style {
+            text_color: Some(MUTED),
+            ..container::Style::default()
+        })
+        .into()
+    }
 }
 
 pub(super) fn f_palettes(_gui: &Gui) -> Element<'_, Message> {

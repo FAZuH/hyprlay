@@ -27,6 +27,7 @@ use hyprlay_core::domain::Command;
 
 use crate::cli::dispatch::DAEMON_BIN;
 use crate::cli::dispatch::GUI_BIN;
+use crate::cli::dispatch::TRAY_BIN;
 use crate::cli::dispatch::exec_sibling;
 
 /// What the launcher does with one invocation.
@@ -37,10 +38,14 @@ pub(crate) enum Outcome {
     /// Exec the sibling `hyprlay-gui` binary.
     Gui,
     /// List compositor outputs without contacting the daemon.
+    /// Run the system tray menu.
+    Tray,
     Monitors,
     /// Write the user unit + desktop entry and (unless `no_start`) enable
     /// + start the service — all locally, before any socket connect.
-    Install { no_start: bool },
+    Install {
+        no_start: bool,
+    },
     /// Stop/disable the unit and remove both files; never touches the
     /// daemon socket.
     Uninstall,
@@ -92,6 +97,7 @@ fn cli() -> ClapCommand {
         .after_help(format!("{}\n{}", files_section(), examples_section()))
         .subcommand(leaf("daemon", "run the overlay daemon"))
         .subcommand(leaf("gui", "open the settings window"))
+        .subcommand(leaf("tray", "run the system tray menu"))
         .subcommand(
             leaf("get", "read one setting")
                 .arg(Arg::new("key").help("setting name (see KEYS below)"))
@@ -212,6 +218,7 @@ fn outcome(matches: &ArgMatches) -> Outcome {
     match name {
         "daemon" => Outcome::Daemon,
         "gui" => Outcome::Gui,
+        "tray" => Outcome::Tray,
         "monitors" => Outcome::Monitors,
         "install" => Outcome::Install {
             no_start: sub.get_flag("no_start"),
@@ -256,6 +263,7 @@ pub fn run(args: &[String]) -> i32 {
     match classify(args) {
         Ok(Outcome::Daemon) => exec_sibling(DAEMON_BIN),
         Ok(Outcome::Gui) => exec_sibling(GUI_BIN),
+        Ok(Outcome::Tray) => exec_sibling(TRAY_BIN),
         Ok(Outcome::Monitors) => list_monitors(),
         Ok(Outcome::Install { no_start }) => crate::cli::install::run_install(no_start),
         Ok(Outcome::Uninstall) => crate::cli::install::run_uninstall(),
@@ -371,6 +379,11 @@ mod tests {
     #[test]
     fn gui_word_launches_the_settings_window() {
         assert_eq!(classified(&["gui"]), Outcome::Gui);
+    }
+
+    #[test]
+    fn tray_word_launches_the_system_tray() {
+        assert_eq!(classified(&["tray"]), Outcome::Tray);
     }
 
     #[test]
