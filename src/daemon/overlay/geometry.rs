@@ -77,7 +77,12 @@ pub fn overlay_rect(
     let (top, right, bottom, left) = offset;
     let (w, h) = size;
     let (mx, my, mw, mh) = monitor
-        .map(|m| (m.x, m.y, m.width, m.height))
+        .map(|m| {
+            let scale = if m.scale == 0.0 { 1.0 } else { m.scale };
+            let mw = (m.width as f32 / scale) as i32;
+            let mh = (m.height as f32 / scale) as i32;
+            (m.x, m.y, mw, mh)
+        })
         .unwrap_or((0, 0, 0, 0));
     let x = match cfg.horizontal {
         HorizontalAnchor::Left => mx + left,
@@ -250,6 +255,26 @@ mod tests {
             y,
             width: w,
             height: h,
+            scale: 1.0,
+        }
+    }
+
+    fn monitor_scaled(
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        scale: f32,
+    ) -> hyprlay_core::compositor::Monitor {
+        hyprlay_core::compositor::Monitor {
+            name: "test".to_string(),
+            description: String::new(),
+            active: true,
+            x,
+            y,
+            width: w,
+            height: h,
+            scale,
         }
     }
 
@@ -331,5 +356,34 @@ mod tests {
         assert!(!r.contains((110, 20)));
         assert!(!r.contains((10, 70)));
         assert!(!r.contains((9, 20)));
+    }
+
+    #[test]
+    fn overlay_rect_accounts_for_monitor_scale() {
+        // eDP-1 1920x1200 @ 1.25 → logical 1536x960, top-right 300w, offset 12
+        // x = 1536 - 300 - 12 = 1224, y = 12
+        let c = cfg(HorizontalAnchor::Right, VerticalAnchor::Top);
+        let m = monitor_scaled(0, 0, 1920, 1200, 1.25);
+        let rect = overlay_rect(&c, (300, 88), (12, 12, 12, 12), Some(&m));
+        assert_eq!(rect.x, 1224);
+        assert_eq!(rect.y, 12);
+        assert_eq!(rect.w, 300);
+        assert_eq!(rect.h, 88);
+        // cursor inside scaled rect should be hoverable (was unreachable before: x=1608 raw)
+        assert!(rect.contains((1443, 40)));
+        assert!(!rect.contains((1600, 40)));
+        // center with scale
+        let c2 = cfg(HorizontalAnchor::Center, VerticalAnchor::Top);
+        let rect_c = overlay_rect(&c2, (300, 100), (12, 12, 12, 12), Some(&m));
+        assert_eq!(rect_c.x, (1536 - 300) / 2);
+    }
+
+    #[test]
+    fn overlay_rect_scaled_bottom_uses_scaled_height() {
+        let cfg = cfg(HorizontalAnchor::Left, VerticalAnchor::Bottom);
+        let m = monitor_scaled(0, 0, 1920, 1200, 1.25);
+        let rect = overlay_rect(&cfg, (300, 100), (12, 16, 12, 16), Some(&m));
+        // logical height 960 → y = 960 -100 -12 =848
+        assert_eq!(rect.y, 848);
     }
 }

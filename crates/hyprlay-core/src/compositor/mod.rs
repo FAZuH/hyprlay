@@ -8,7 +8,7 @@ mod hyprland;
 pub use hyprland::Hyprland;
 
 /// One connected output as reported by the compositor.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Monitor {
     pub name: String,
     pub description: String,
@@ -18,6 +18,22 @@ pub struct Monitor {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    pub scale: f32,
+}
+
+impl Default for Monitor {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: String::new(),
+            active: false,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            scale: 1.0,
+        }
+    }
 }
 
 pub trait Compositor: Send {

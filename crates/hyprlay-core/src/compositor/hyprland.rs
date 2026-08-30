@@ -25,6 +25,7 @@ impl Compositor for Hyprland {
                 y: m["y"].as_i64().unwrap_or(0) as i32,
                 width: m["width"].as_i64().unwrap_or(0) as i32,
                 height: m["height"].as_i64().unwrap_or(0) as i32,
+                scale: m["scale"].as_f64().unwrap_or(1.0) as f32,
             })
             .collect()
     }
@@ -236,5 +237,46 @@ mod tests {
             unsafe { std::env::set_var("HYPRLAND_INSTANCE_SIGNATURE", v) };
         }
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn monitor_scale_parsed_and_defaults_to_one() {
+        let json = serde_json::json!([{
+            "name": "eDP-1",
+            "description": "test",
+            "focused": true,
+            "x": 0,
+            "y": 0,
+            "width": 1920,
+            "height": 1200,
+            "scale": 1.25
+        }, {
+            "name": "HDMI-A-1",
+            "description": "test2",
+            "focused": false,
+            "x": 0,
+            "y": 0,
+            "width": 1920,
+            "height": 1080
+        }]);
+        let arr = json.as_array().unwrap();
+        let m0 = &arr[0];
+        let m1 = &arr[1];
+        let scale0 = m0["scale"].as_f64().unwrap_or(1.0) as f32;
+        let scale1 = m1["scale"].as_f64().unwrap_or(1.0) as f32;
+        assert!((scale0 - 1.25).abs() < f32::EPSILON);
+        assert!((scale1 - 1.0).abs() < f32::EPSILON);
+        let mon0 = Monitor {
+            name: m0["name"].as_str().unwrap().to_string(),
+            description: String::new(),
+            active: true,
+            x: m0["x"].as_i64().unwrap() as i32,
+            y: 0,
+            width: m0["width"].as_i64().unwrap() as i32,
+            height: m0["height"].as_i64().unwrap() as i32,
+            scale: scale0,
+        };
+        assert!((mon0.scale - 1.25).abs() < f32::EPSILON);
+        assert_eq!((mon0.width as f32 / mon0.scale) as i32, 1536);
     }
 }
