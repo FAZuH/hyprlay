@@ -29,8 +29,8 @@ cargo build --release
 
 ## Setup
 
-1. Follow [Token Exchange](docs/token-exchange.md) guide to connect your Discord account with the app.
-2. Install the app with `hyprlay install`.
+1. Install the app with `hyprlay install`.
+2. Follow [Token Exchange](docs/token-exchange.md) guide to connect your Discord account with the app.
 
 ## Usage
 
