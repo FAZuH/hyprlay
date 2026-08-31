@@ -5,7 +5,7 @@
 <hr>
 
 <div align="center">
-● <a href="#installation">Installation</a> ﻿ ● <a href="#preview">Preview</a> ﻿ ● <a href="#usage">Usage</a> ﻿ ● <a href="#docs">Docs</a> ﻿ ● <a href="#license">License</a>
+● <a href="#installation">Installation</a> ﻿ ● <a href="#preview">Preview</a> ﻿ ● <a href="#usage">Usage</a> ﻿ ● <a href="#documentation">Documentation</a> ﻿ ● <a href="#license">License</a>
 </div>
 
 ## Installation
@@ -45,7 +45,7 @@ hyprlayd                    # start overlay directly
 
 See `hyprlay -h` and `hyprlay set -h` for all commands and keys.md) for Discord auth.
 
-## Docs
+## Documentation
 
 - [Token Exchange](docs/token-exchange.md) — connect hyprlay to your own Discord application
 - [Code Layout](docs/dev/code-layout.md) — workspace layout, module interfaces, and layering rules
