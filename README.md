@@ -12,17 +12,14 @@
 
 ### Prebuilt binary
 
-Download the latest binaries from [Releases](https://github.com/FAZuH/hyprlay/releases/latest) and copy all four (`hyprlay`, `hyprlayd`, `hyprlay-gui`, `hyprlay-tray`) to a directory on your `$PATH` (e.g. `~/.local/bin`).
+Download the latest binaries from [Releases](https://github.com/FAZuH/hyprlay/releases/latest) and move all four (`hyprlay`, `hyprlayd`, `hyprlay-gui`, `hyprlay-tray`) to a directory on your `$PATH` (e.g. `~/.local/bin`).
 
 ### Cargo
 
 ```sh
 cargo install --git https://github.com/FAZuH/hyprlay
-```
 
-Or build from source:
-
-```sh
+# Or build from source:
 cargo build --release
 # then copy target/release/hyprlay{,d,-gui,-tray} to $PATH
 ```
