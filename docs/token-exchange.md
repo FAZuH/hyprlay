@@ -16,7 +16,7 @@ hyprlay reads voice-channel state over Discord's local RPC connection. The conne
 3. Copy the **Client ID** and the **Client Secret**.
 4. **Add redirect** URI `http://127.0.0.1/callback`.
 
-![[assets/token.png]]
+![alt text](assets/token.png)
 
 ### 2. Use your Discord application
 
