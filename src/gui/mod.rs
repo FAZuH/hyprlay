@@ -9,13 +9,17 @@
 //! daemon to re-detect its backend.
 //!
 //! Layout: header (title, search, clear-changes, reset, save) / sidebar
-//! (sections) / scrollable content / labeled status bar (unsaved marker,
-//! Start/Stop toggle, daemon state, last reply). Every field has a
-//! tooltip, and the search box filters fields by label, tooltip, and
-//! section name. Changes apply
-//! live but are NOT persisted until "Save"; closing with unsaved changes is
-//! allowed (the daemon keeps runtime state, but a daemon restart reverts to
-//! config.toml).
+//! (section anchors) / one scrollable page holding every section /
+//! labeled status bar (unsaved marker, Start/Stop toggle, daemon state,
+//! last reply). Sidebar buttons and Ctrl+1..5 scroll the page to a
+//! section's header; while the user scrolls, the sidebar highlight
+//! follows the section under the top of the viewport. Typing in the
+//! search box swaps the page for a flat list of matches (by label,
+//! tooltip, and section name); clearing it returns to the page at the
+//! offset held before the search. Every field has a tooltip. Changes
+//! apply live but are NOT persisted until "Save"; closing with unsaved
+//! changes is allowed (the daemon keeps runtime state, but a daemon
+//! restart reverts to config.toml).
 
 mod daemon;
 mod fields;
@@ -27,10 +31,11 @@ use std::sync::Arc;
 
 use daemon::AutoStart;
 use daemon::DaemonState;
+use fields::CONTENT_SCROLL_ID;
 use fields::SEARCH_ID;
 use fields::Section;
 use fields::search_page;
-use fields::section_page;
+use fields::settings_page;
 use hyprlay_core::config::Config;
 use hyprlay_core::config::HorizontalAnchor as H;
 use hyprlay_core::config::PALETTES;
@@ -52,16 +57,22 @@ use iced::Alignment;
 use iced::Element;
 use iced::Length;
 use iced::Point;
+use iced::Rectangle;
 use iced::Subscription;
 use iced::Task;
+use iced::Vector;
 use iced::keyboard::key;
 use iced::keyboard::{self};
+use iced::widget::Id;
 use iced::widget::button;
 use iced::widget::column;
 use iced::widget::container;
 use iced::widget::row;
 use iced::widget::text;
 use iced::widget::text_input;
+use iced_runtime::core::widget::Operation;
+use iced_runtime::core::widget::operation::Outcome;
+use iced_runtime::core::widget::operation::scrollable::Scrollable;
 use picker::ColorTarget;
 use picker::apply_hue;
 use picker::apply_sv;
@@ -102,7 +113,20 @@ enum Message {
     HueMove(ColorTarget, Point),
     PickerRelease,
     Palette(usize),
-    Section(Section),
+    /// Sidebar button or Ctrl+1..5 pressed: clear any search (D3), then
+    /// scroll the one-page view to the section's header.
+    Navigate(Section),
+    /// The one-page content scrolled; the payload is the pixel offset of
+    /// the top of the viewport within the content (scrollspy tracking).
+    Scrolled(f32),
+    /// Layout measurement of the one-page content: per-section header
+    /// offsets, the scrollable range, and the navigation intent (`jump`)
+    /// the measure was spawned with.
+    Measured {
+        offsets: [f32; Section::ALL.len()],
+        max_scroll: f32,
+        jump: Option<Section>,
+    },
     Search(String),
     KeyPressed(keyboard::Event),
     Save,
@@ -150,8 +174,15 @@ pub struct Gui {
     /// True when the daemon's runtime config differs from config.toml.
     dirty: bool,
     monitors: Vec<String>,
+    /// Active section: set immediately on navigation, then kept in sync
+    /// with the section under the top of the viewport while scrolling
+    /// (scrollspy). Drives the sidebar highlight and Ctrl+R's target.
     section: Section,
     search: String,
+    /// Scroll offset of the one-page content, tracked from Scrolled.
+    /// Frozen while the search page is up (its scrollable reports nothing)
+    /// and used to restore the position on search-clear.
+    last_scroll_y: f32,
     /// Which color editor has its HSV picker expanded.
     picker: Option<ColorTarget>,
     /// True while a picker plane is held down; moves then adjust the color.
@@ -213,6 +244,7 @@ fn boot() -> (Gui, Task<Message>) {
             monitors: Vec::new(),
             section: Section::Position,
             search: String::new(),
+            last_scroll_y: 0.0,
             picker: None,
             picker_drag: false,
             picker_pos: Point::ORIGIN,
@@ -429,13 +461,59 @@ fn update(gui: &mut Gui, message: Message) -> Task<Message> {
                     .map(|c| Task::perform(send(c.to_string()), Message::Applied)),
             )
         }
-        Message::Section(section) => {
+        Message::Navigate(section) => {
+            // D3: jumping while searching first returns to the one-page
+            // view; the measure task below runs against the layout built
+            // after this re-render, so its offsets are fresh.
+            if !gui.search.trim().is_empty() {
+                gui.search.clear();
+            }
+            // Immediate highlight — don't make the sidebar wait for the
+            // measure round-trip.
             gui.section = section;
-            Task::none()
+            measure_sections(Some(section))
         }
+        Message::Scrolled(offset_y) => {
+            // Continuously tracked so a search-clear can restore it (D4);
+            // nothing reports Scrolled while the search page is up, so the
+            // value freezes at its pre-search state.
+            gui.last_scroll_y = offset_y;
+            measure_sections(None)
+        }
+        Message::Measured {
+            offsets,
+            max_scroll,
+            jump,
+        } => match jump {
+            Some(section) => scroll_to_section(section, offsets),
+            None => {
+                // Scrollspy: at the very end of the page the last header
+                // can never reach the viewport top (Connection is shorter
+                // than the viewport), so a bottomed-out scroll maps to
+                // INFINITY and clamps to the last section. This branch
+                // only sees a scrollable page: while the content fits its
+                // viewport no scroll event fires, so max_scroll == 0 can
+                // never get here.
+                let at_end = gui.last_scroll_y >= max_scroll - BOTTOM_SLACK;
+                let scroll_y = if at_end {
+                    f32::INFINITY
+                } else {
+                    gui.last_scroll_y
+                };
+                gui.section = active_section_for(scroll_y, &offsets);
+                Task::none()
+            }
+        },
         Message::Search(query) => {
+            // D4: emptying the search re-shows the one-pager; land it back
+            // on the offset tracked before the search began.
+            let restore = !gui.search.trim().is_empty() && query.trim().is_empty();
             gui.search = query;
-            Task::none()
+            if restore {
+                restore_scroll(gui)
+            } else {
+                Task::none()
+            }
         }
         Message::KeyPressed(event) => shortcut(gui, event),
         Message::PickerToggle(target) => {
@@ -568,14 +646,19 @@ fn update(gui: &mut Gui, message: Message) -> Task<Message> {
 }
 
 /// Keyboard shortcuts: Ctrl+S save, Ctrl+R reset section, Ctrl+Shift+R
-/// reset all, Ctrl+F search, Ctrl+1-5 sections, Escape clears the search.
+/// reset all, Ctrl+F search, Ctrl+1..5 jumps to section N (the same path
+/// as a sidebar click), Escape clears the search.
 fn shortcut(gui: &mut Gui, event: keyboard::Event) -> Task<Message> {
     let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
         return Task::none();
     };
     if !modifiers.control() {
-        if matches!(key, keyboard::Key::Named(key::Named::Escape)) && !gui.search.is_empty() {
+        if matches!(key, keyboard::Key::Named(key::Named::Escape)) && !gui.search.trim().is_empty()
+        {
             gui.search.clear();
+            // D4: Esc empties the search, so land the one-pager back on
+            // its pre-search offset.
+            return restore_scroll(gui);
         }
         return Task::none();
     }
@@ -588,9 +671,9 @@ fn shortcut(gui: &mut Gui, event: keyboard::Event) -> Task<Message> {
         "r" => update(gui, Message::ResetSection(gui.section)),
         "f" => iced_runtime::widget::operation::focus(widget_id()),
         _ => match ch.parse::<usize>() {
-            // Ctrl+1..5 jump between sections.
+            // Ctrl+1..5 scroll the one-pager to the section's header.
             Ok(n) if (1..=Section::ALL.len()).contains(&n) => {
-                update(gui, Message::Section(Section::at(n - 1).unwrap()))
+                update(gui, Message::Navigate(Section::at(n - 1).unwrap()))
             }
             _ => Task::none(),
         },
@@ -599,6 +682,12 @@ fn shortcut(gui: &mut Gui, event: keyboard::Event) -> Task<Message> {
 
 fn widget_id() -> iced::widget::Id {
     iced::widget::Id::new(SEARCH_ID)
+}
+
+/// Id of the one-page content scrollable — the jump target for navigation
+/// and the widget the measure operation reads geometry from.
+fn content_scroll_id() -> Id {
+    Id::new(CONTENT_SCROLL_ID)
 }
 
 /// Commit one numeric value to the mirror and the daemon. The caller has
@@ -661,7 +750,9 @@ fn command_for(message: Message) -> Command {
         | Message::HueMove(..)
         | Message::PickerRelease
         | Message::Palette(_)
-        | Message::Section(_)
+        | Message::Navigate(_)
+        | Message::Scrolled(_)
+        | Message::Measured { .. }
         | Message::Search(_)
         | Message::KeyPressed(_)
         | Message::Save
@@ -681,12 +772,164 @@ fn command_for(message: Message) -> Command {
 }
 
 // ---------------------------------------------------------------------------
+// One-page navigation: measure, jump, scrollspy
+// ---------------------------------------------------------------------------
+
+/// Half a section-header height: how close a header must be to the top of
+/// the viewport before the scrollspy names its section. Small enough that
+/// the highlight only moves once a header actually arrives, big enough
+/// that a landed jump — which parks the header exactly at the top — keeps
+/// its own highlight.
+const SECTION_EPSILON: f32 = 16.0;
+
+/// Slack around the measured maximum scroll within which the page counts
+/// as scrolled to its end.
+const BOTTOM_SLACK: f32 = 1.0;
+
+/// The section whose header sits at or above `scroll_y` — the sidebar
+/// highlight for that scroll position: the last section whose measured
+/// header offset is within `scroll_y + SECTION_EPSILON`. The caller
+/// passes [`f32::INFINITY`] once the page has scrolled to its end,
+/// because the last header can never reach the viewport top itself.
+/// `offsets` must be the headers measured in [`Section::ALL`] order —
+/// one offset per section, at the same index.
+fn active_section_for(scroll_y: f32, offsets: &[f32; Section::ALL.len()]) -> Section {
+    let mut active = Section::ALL[0];
+    for (index, offset) in offsets.iter().enumerate() {
+        if *offset > scroll_y + SECTION_EPSILON {
+            break;
+        }
+        active = Section::ALL[index];
+    }
+    active
+}
+
+/// Where `header` sits inside the scrollable content, in px below the
+/// content's top. Both rects are window-space layout bounds, so the
+/// current scroll translation appears in both and cancels out.
+fn offset_within_content(header_bounds: Rectangle, content_bounds: Rectangle) -> f32 {
+    header_bounds.y - content_bounds.y
+}
+
+/// Measure the one-page content and report back as [`Message::Measured`].
+/// Widget operations run against the layout built from the very latest
+/// state, so the offsets are fresh even right after a search-clear
+/// re-render or a picker expansion changed heights.
+fn measure_sections(jump: Option<Section>) -> Task<Message> {
+    iced_runtime::task::widget(MeasureSections {
+        jump,
+        content: None,
+        offsets: [0.0; Section::ALL.len()],
+    })
+}
+
+/// Scroll the one-page content so `y` px into it sit at the viewport top;
+/// the horizontal offset is left alone.
+fn scroll_content_to(y: f32) -> Task<Message> {
+    iced_runtime::widget::operation::scroll_to(
+        content_scroll_id(),
+        iced::widget::scrollable::AbsoluteOffset {
+            x: None,
+            y: Some(y),
+        },
+    )
+}
+
+/// Scroll the one-pager so `section`'s header sits at the top of the
+/// viewport. `offsets` must come from a fresh measurement (see
+/// [`measure_sections`]); out-of-range targets clamp inside the
+/// scrollable.
+fn scroll_to_section(section: Section, offsets: [f32; Section::ALL.len()]) -> Task<Message> {
+    scroll_content_to(offsets[section.index()])
+}
+
+/// D4: land the one-pager back on the offset tracked before the search
+/// page replaced it. While the search page was up, nothing reported
+/// Scrolled, so [`Gui::last_scroll_y`] still holds that position.
+fn restore_scroll(gui: &Gui) -> Task<Message> {
+    scroll_content_to(gui.last_scroll_y)
+}
+
+/// Geometry the measure operation learns about the one-page scrollable.
+#[derive(Debug, Clone, Copy)]
+struct ContentMeasure {
+    viewport: Rectangle,
+    content: Rectangle,
+}
+
+impl ContentMeasure {
+    /// How far the content can scroll at all.
+    fn max_scroll(self) -> f32 {
+        (self.content.height - self.viewport.height).max(0.0)
+    }
+}
+
+/// Traverses the widget tree once, recording the one-page scrollable's
+/// geometry and every section header's offset within the content, then
+/// delivers them as [`Message::Measured`]. `jump` rides along so the
+/// receiver knows whether to scroll (navigation) or re-derive the
+/// highlight (scrollspy). When the one-pager is not in the tree (the
+/// search page is up), the operation produces nothing.
+struct MeasureSections {
+    jump: Option<Section>,
+    content: Option<ContentMeasure>,
+    offsets: [f32; Section::ALL.len()],
+}
+
+impl Operation<Message> for MeasureSections {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<Message>)) {
+        operate(self);
+    }
+
+    fn scrollable(
+        &mut self,
+        id: Option<&Id>,
+        bounds: Rectangle,
+        content_bounds: Rectangle,
+        _translation: Vector,
+        _state: &mut dyn Scrollable,
+    ) {
+        if id == Some(&content_scroll_id()) {
+            self.content = Some(ContentMeasure {
+                viewport: bounds,
+                content: content_bounds,
+            });
+        }
+    }
+
+    fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
+        // The scrollable hook fires before its children are traversed, so
+        // the content geometry is always known by the time a header anchor
+        // is visited.
+        let Some(content) = self.content else {
+            return;
+        };
+        for (index, section) in Section::ALL.into_iter().enumerate() {
+            if id == Some(&Id::new(section.anchor_id())) {
+                self.offsets[index] = offset_within_content(bounds, content.content);
+            }
+        }
+    }
+
+    fn finish(&self) -> Outcome<Message> {
+        let Some(content) = self.content else {
+            return Outcome::None;
+        };
+        Outcome::Some(Message::Measured {
+            offsets: self.offsets,
+            max_scroll: content.max_scroll(),
+            jump: self.jump,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // View
 // ---------------------------------------------------------------------------
 
 fn view(gui: &Gui) -> Element<'_, Message> {
     let content = if gui.search.trim().is_empty() {
-        section_page(gui, gui.section)
+        settings_page(gui)
     } else {
         search_page(gui)
     };
@@ -749,7 +992,7 @@ fn sidebar(gui: &Gui) -> Element<'_, Message> {
                 .align_y(Alignment::Center)
                 .width(Length::Fill),
             )
-            .on_press(Message::Section(*s))
+            .on_press(Message::Navigate(*s))
             .width(Length::Fill)
             .style(nav_style(selected)),
         );
@@ -1002,6 +1245,136 @@ mod tests {
     fn revert_commands_do_nothing_when_configs_match() {
         let cfg = Config::default();
         assert!(revert_commands(&cfg, &cfg).is_empty());
+    }
+
+    /// Realistic header offsets for the one-page view: five sections
+    /// stacked downward, the first header just below the page's top
+    /// padding, later ones several hundred px apart.
+    fn spy_offsets() -> [f32; Section::ALL.len()] {
+        [8.0, 900.0, 1500.0, 2100.0, 2600.0]
+    }
+
+    /// At the top of the page the first header is inside the epsilon, so
+    /// Position is highlighted; halfway into a section the highlight still
+    /// names that section.
+    #[test]
+    fn scrollspy_names_the_section_under_the_top_of_the_viewport() {
+        let offsets = spy_offsets();
+        assert_eq!(active_section_for(0.0, &offsets), Section::Position);
+        assert_eq!(active_section_for(1000.0, &offsets), Section::Layout);
+        assert_eq!(active_section_for(1900.0, &offsets), Section::Opacity);
+        assert_eq!(active_section_for(2400.0, &offsets), Section::Colors);
+    }
+
+    /// A header takes over the highlight once the viewport top is within
+    /// half a header height of it — this is what keeps a landed jump (which
+    /// parks the header exactly at the top) on its own section. 60 px above
+    /// the Layout header the highlight must still be Position; 10 px above
+    /// it, Layout already wins.
+    #[test]
+    fn scrollspy_flips_while_a_header_is_half_a_header_away() {
+        let offsets = spy_offsets();
+        assert_eq!(active_section_for(840.0, &offsets), Section::Position);
+        assert_eq!(active_section_for(890.0, &offsets), Section::Layout);
+    }
+
+    /// The last section's header can never reach the viewport top (the
+    /// Connection section is shorter than the viewport), so once the page
+    /// is scrolled to its end the caller passes INFINITY and the highlight
+    /// must clamp to Connection instead of staying on Colors.
+    #[test]
+    fn scrollspy_clamps_to_connection_at_the_end_of_the_page() {
+        let offsets = spy_offsets();
+        // Without the clamp, a bottom scroll (~2200 here) would highlight
+        // Colors although the user is looking at Connection.
+        assert_eq!(active_section_for(2200.0, &offsets), Section::Colors);
+        assert_eq!(
+            active_section_for(f32::INFINITY, &offsets),
+            Section::Connection
+        );
+    }
+
+    /// A page could in principle start with a tall top padding; before the
+    /// first measurement lands or before any header qualifies, the
+    /// highlight must fall back to the first section, never panic or wrap.
+    #[test]
+    fn scrollspy_falls_back_to_the_first_section_at_the_top() {
+        let offsets = [100.0, 900.0, 1500.0, 2100.0, 2600.0];
+        assert_eq!(active_section_for(0.0, &offsets), Section::Position);
+    }
+
+    /// Header offsets are read from window-space layout bounds while the
+    /// page may be scrolled; the jump math depends on the difference
+    /// between the two rects being independent of that translation.
+    #[test]
+    fn header_offset_is_its_distance_below_the_content_and_ignores_scroll() {
+        let content = Rectangle::new(Point::ORIGIN, iced::Size::new(600.0, 4000.0));
+        let header = Rectangle::new(Point::new(16.0, 908.0), iced::Size::new(568.0, 30.0));
+        assert_eq!(offset_within_content(header, content), 908.0);
+
+        // The same layout scrolled down by 250 px: both rects move, the
+        // offset within the content must not.
+        let scrolled_content = Rectangle::new(Point::new(16.0, -250.0), content.size());
+        let scrolled_header = Rectangle::new(Point::new(32.0, 658.0), header.size());
+        assert_eq!(
+            offset_within_content(scrolled_header, scrolled_content),
+            908.0
+        );
+    }
+
+    /// D3: a sidebar click or Ctrl+1..5 while a search is up first drops
+    /// the query (returning to the one-page view) and shows the target
+    /// section's highlight immediately, without waiting for the measure
+    /// round-trip.
+    #[test]
+    fn navigating_while_searching_clears_the_search_and_sets_the_section() {
+        let mut gui = gui_with_search("avatar");
+        // The returned Task carries the measure-then-jump round-trip; the
+        // state transition is what is asserted here.
+        let _ = update(&mut gui, Message::Navigate(Section::Colors));
+        assert!(gui.search.is_empty());
+        assert_eq!(gui.section, Section::Colors);
+    }
+
+    /// D4 mechanism: the restore on search-clear scrolls back to whatever
+    /// offset the scrollspy last tracked, so scrolling must keep that value
+    /// current, and emptying the search must not clobber it.
+    #[test]
+    fn scrolling_tracks_the_offset_that_the_search_restore_will_use() {
+        let mut gui = gui_with_search("dim");
+        // Both transitions return layout/scroll Tasks; only the tracked
+        // state matters here.
+        let _ = update(&mut gui, Message::Scrolled(412.5));
+        assert!((gui.last_scroll_y - 412.5).abs() < f32::EPSILON);
+
+        let _ = update(&mut gui, Message::Search(String::new()));
+        assert!(gui.search.is_empty());
+        assert!((gui.last_scroll_y - 412.5).abs() < f32::EPSILON);
+    }
+
+    /// Minimal `Gui` for state-transition tests: `boot()` touches the real
+    /// config file, so build the struct with test values instead. Only the
+    /// navigation fields matter here.
+    fn gui_with_search(query: &str) -> Gui {
+        Gui {
+            config: Config::default(),
+            drafts: HashMap::new(),
+            num_drafts: HashMap::new(),
+            last_reply: String::new(),
+            daemon_state: daemon::DaemonState::Connecting,
+            auto_start: daemon::AutoStart::watching(),
+            control: Arc::new(hyprlay_core::daemon_control::SystemControl),
+            dirty: false,
+            monitors: Vec::new(),
+            section: Section::Position,
+            search: query.to_string(),
+            last_scroll_y: 0.0,
+            picker: None,
+            picker_drag: false,
+            picker_pos: Point::ORIGIN,
+            auth_client_id: String::new(),
+            auth_client_secret: String::new(),
+        }
     }
 
     #[test]

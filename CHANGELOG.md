@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### GUI
+
+- Show all settings on one scrollable page
+
 ## 0.2.0 (2026-08-30)
 
 - Add tray menu

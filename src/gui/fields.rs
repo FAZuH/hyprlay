@@ -13,7 +13,9 @@ use iced::Alignment;
 use iced::Border;
 use iced::Color;
 use iced::Element;
+use iced::Font;
 use iced::Length;
+use iced::font::Weight;
 use iced::widget::Column;
 use iced::widget::button;
 use iced::widget::column;
@@ -42,6 +44,10 @@ use super::theme::scrollbar_style;
 const RESET: &str = "↺";
 
 pub(super) const SEARCH_ID: &str = "gui-search";
+
+/// Id of the one-page content scrollable: navigation scrolls it, the
+/// scrollspy listens to it, and the measure operation reads its geometry.
+pub(super) const CONTENT_SCROLL_ID: &str = "gui-content";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Section {
@@ -75,6 +81,14 @@ impl Section {
         Section::ALL.get(index).copied()
     }
 
+    /// Position of this section within [`Section::ALL`].
+    pub(super) fn index(self) -> usize {
+        Section::ALL
+            .iter()
+            .position(|s| *s == self)
+            .expect("section is in ALL")
+    }
+
     /// The GUI sections Position..Colors and the config/TOML groups are one
     /// and the same concept; this is the bridge for reset commands.
     /// `Connection` is not config at all — its credentials live in
@@ -86,6 +100,18 @@ impl Section {
             Self::Opacity => Some(hyprlay_core::domain::Group::Opacity),
             Self::Colors => Some(hyprlay_core::domain::Group::Colors),
             Self::Connection => None,
+        }
+    }
+
+    /// Widget id of this section header's anchor container — what the
+    /// measure operation looks for when mapping layout bounds to sections.
+    pub(super) fn anchor_id(self) -> &'static str {
+        match self {
+            Self::Position => "anchor-position",
+            Self::Layout => "anchor-layout",
+            Self::Opacity => "anchor-opacity",
+            Self::Colors => "anchor-colors",
+            Self::Connection => "anchor-connection",
         }
     }
 }
@@ -500,17 +526,21 @@ fn auth_apply_button() -> Element<'static, Message> {
         .into()
 }
 
-pub(super) fn section_page(gui: &Gui, section: Section) -> Element<'_, Message> {
-    let mut col = column![section_header(section)].spacing(12);
-    for field in FIELDS.iter().filter(|f| f.section == section) {
-        col = col.push(field_row(gui, field));
+/// Every section on one scrollable page. The sidebar buttons and
+/// Ctrl+1..5 are anchors into this page: the outer scrollable carries
+/// [`CONTENT_SCROLL_ID`] (the jump target) and reports its viewport
+/// offset through [`Message::Scrolled`] (the scrollspy), while each
+/// header sits in a container tagged with [`Section::anchor_id`] for the
+/// measure operation to find.
+pub(super) fn settings_page(gui: &Gui) -> Element<'_, Message> {
+    let mut sections = column![].spacing(24);
+    for section in Section::ALL {
+        sections = sections.push(section_block(gui, section));
     }
-    // Sections without a config group (Connection) have nothing to reset;
-    // their apply button commits the credential drafts instead.
-    if section.group().is_none() {
-        col = col.push(auth_apply_button());
-    }
-    scroll_page(col)
+    scroll_page(sections)
+        .id(iced::widget::Id::new(CONTENT_SCROLL_ID))
+        .on_scroll(|viewport| Message::Scrolled(viewport.absolute_offset().y))
+        .into()
 }
 
 pub(super) fn search_page(gui: &Gui) -> Element<'_, Message> {
@@ -530,7 +560,7 @@ pub(super) fn search_page(gui: &Gui) -> Element<'_, Message> {
     if hits == 0 {
         col = col.push(text("no settings match").color(MUTED));
     }
-    scroll_page(col)
+    scroll_page(col).into()
 }
 
 /// Search covers the label, the tooltip text, and the section name — so
@@ -545,7 +575,13 @@ pub(super) fn search_matches(field: &Field, query: &str) -> bool {
 
 fn section_header(section: Section) -> Element<'static, Message> {
     let mut header = row![
-        text(section.name().to_string()).size(15).color(BRIGHT),
+        text(section.name().to_string())
+            .size(18)
+            .font(Font {
+                weight: Weight::Bold,
+                ..Font::default()
+            })
+            .color(BRIGHT),
         iced::widget::Space::new().width(Length::Fill),
     ];
     // No config group means there is no per-section default to restore,
@@ -557,7 +593,43 @@ fn section_header(section: Section) -> Element<'static, Message> {
                 .style(plain_style()),
         );
     }
-    header.spacing(8).align_y(Alignment::Center).into()
+    let header_row = header.spacing(8).align_y(Alignment::Center);
+    column![
+        header_row,
+        container(iced::widget::Space::new().height(Length::Fixed(1.0)))
+            .width(Length::Fill)
+            .style(|_t| container::Style {
+                background: Some(Color::from_rgba(0.50, 0.51, 0.55, 0.18).into()),
+                ..container::Style::default()
+            })
+    ]
+    .spacing(8)
+    .into()
+}
+
+/// One section's header (with its per-section reset — or, for Connection,
+/// the apply button) plus its fields, as rendered on the one-page view.
+fn section_block(gui: &Gui, section: Section) -> Element<'_, Message> {
+    let mut col = column![section_anchor(section)].spacing(12);
+    for field in FIELDS.iter().filter(|f| f.section == section) {
+        col = col.push(field_row(gui, field));
+    }
+    // Sections without a config group (Connection) have nothing to reset;
+    // their apply button commits the credential drafts instead.
+    if section.group().is_none() {
+        col = col.push(auth_apply_button());
+    }
+    col.into()
+}
+
+/// The section header wrapped in an anchor container: the container's
+/// widget id is what the measure operation records the header's offset
+/// from, and the jump scrolls exactly to it.
+fn section_anchor(section: Section) -> Element<'static, Message> {
+    container(section_header(section))
+        .id(iced::widget::Id::new(section.anchor_id()))
+        .width(Length::Fill)
+        .into()
 }
 
 fn field_row<'a>(gui: &'a Gui, field: &Field) -> Element<'a, Message> {
@@ -597,7 +669,11 @@ fn label_tip_lookup(label: &str) -> &'static str {
         .unwrap_or("")
 }
 
-fn scroll_page(content: Column<'_, Message>) -> Element<'_, Message> {
+/// The dressed scrollable every page rides on: padding, scrollbar, style,
+/// and fill height. Callers attach what makes the page addressable before
+/// `.into()` — the one-pager adds [`CONTENT_SCROLL_ID`] and the
+/// [`Message::Scrolled`] hook; the search page needs neither.
+fn scroll_page(content: Column<'_, Message>) -> iced::widget::Scrollable<'_, Message> {
     let page_padding = iced::Padding {
         top: 8.0,
         right: 16.0,
@@ -610,7 +686,6 @@ fn scroll_page(content: Column<'_, Message>) -> Element<'_, Message> {
         ))
         .style(scrollbar_style)
         .height(Length::Fill)
-        .into()
 }
 
 fn toggle(is_on: bool, on_toggle: impl Fn(bool) -> Message + 'static) -> Element<'static, Message> {
