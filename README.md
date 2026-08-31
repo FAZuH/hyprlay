@@ -24,6 +24,59 @@ cargo build --release
 # then copy target/release/hyprlay{,d,-gui,-tray} to $PATH
 ```
 
+## Preview
+
+<table>
+<tr>
+<td width="50%" valign="middle">
+
+### Highly Configurable
+
+Highly configurable overlay — position, anchors, offsets, size, spacing, opacity, palettes, and colors — from the GUI or `hyprlay set` to integrate with scripts or keybinds.
+
+</td>
+<td width="50%">
+  <img src="docs/assets/configurable.png" alt="Highly configurable settings" width="100%" />
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### Dim on Hover
+
+Auto-dims to your chosen opacity the moment the cursor passes over the overlay.
+
+</td>
+<td width="50%">
+  <img src="docs/assets/dim-on-hover.png" alt="Dim on hover preview" width="100%" />
+</td>
+</tr>
+<td width="50%" valign="middle">
+
+### Small
+
+Total application size is only ≈30MB.
+
+</td>
+<td width="50%">
+  <img src="docs/assets/small.png" alt="Small binaries on disk" width="100%" />
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### Lightweight
+
+Idles at a few percent CPU and tens of megabytes RAM.
+
+</td>
+<td width="50%">
+  <img src="docs/assets/lightweight.png" alt="Lightweight resource usage" width="100%" />
+</td>
+</tr>
+<tr>
+</table>
+
 ## Setup
 
 1. Install the app with `hyprlay install`.
