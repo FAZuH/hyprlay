@@ -5,11 +5,11 @@
 <hr>
 
 <div align="center">
-● <a href="#installation">Installation</a> ﻿ ● <a href="#preview">Preview</a> ﻿ ● <a href="#setup">Setup</a><br>
+● <a href="#installation">⭐ Installation</a> ﻿ ● <a href="#preview">Preview</a> ﻿ ● <a href="#setup">⭐ Setup</a><br>
 ● <a href="#usage">Usage</a> ﻿ ● <a href="#documentation">Documentation</a> ﻿ ● <a href="#license">License</a>
 </div>
 
-## Installation
+## ⭐ Installation
 
 Download the latest binaries from [releases page](https://github.com/FAZuH/hyprlay/releases/latest) and move all four (`hyprlay`, `hyprlayd`, `hyprlay-gui`, `hyprlay-tray`) to a directory on your `$PATH` (e.g. `~/.local/bin`).
 
@@ -75,7 +75,7 @@ Idles at a few percent CPU and tens of megabytes RAM.
 <tr>
 </table>
 
-## Setup
+## ⭐ Setup
 
 1. Install the app with `hyprlay install`.
 2. Follow [Token Exchange](docs/token-exchange.md) guide to connect your Discord account with the app.
