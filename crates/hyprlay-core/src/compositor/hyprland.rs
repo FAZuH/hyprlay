@@ -40,7 +40,7 @@ pub fn cursor_pos() -> Option<(i32, i32)> {
     cursor_pos_via_hyprctl()
 }
 
-pub(crate) fn has_socket() -> bool {
+pub fn has_socket() -> bool {
     candidate_socket_paths().iter().any(|p| p.exists())
 }
 

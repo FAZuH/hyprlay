@@ -3,9 +3,10 @@
 //! about outputs goes through [`Compositor`], so adding another
 //! compositor means adding one adapter — no call-site changes.
 
-mod hyprland;
+pub mod hyprland;
 
 pub use hyprland::Hyprland;
+pub use hyprland::has_socket as hyprland_has_socket;
 
 /// One connected output as reported by the compositor.
 #[derive(Debug, Clone, PartialEq)]
