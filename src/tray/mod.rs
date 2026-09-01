@@ -218,9 +218,28 @@ async fn poll_state() -> TrayState {
 /// Perform one user action, then the loop forces a refresh.
 async fn perform(action: MenuAction, state: Option<&TrayState>) {
     match action {
-        MenuAction::OpenSettings => {
-            let _ = tokio::task::spawn_blocking(spawn_sibling_gui).await;
-        }
+        MenuAction::OpenSettings => match tokio::task::spawn_blocking(spawn_sibling_gui).await {
+            Ok(Ok(())) => {
+                tracing::info!(
+                    event = "tray_open_settings",
+                    "spawned or focused hyprlay-gui"
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    event = "tray_open_settings_failed",
+                    error = %e,
+                    "could not open settings"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    event = "tray_open_settings_join_failed",
+                    error = %e,
+                    "spawn_blocking for hyprlay-gui failed"
+                );
+            }
+        },
         MenuAction::ToggleVisible => {
             let visible = state.map(|s| s.visible).unwrap_or(false);
             let command = Command::Set(Key::Visible, Value::Flag(!visible));
