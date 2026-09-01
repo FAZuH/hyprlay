@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Tray
+
+- Fixed Open settings button not opening settings window
+
 ## 0.2.1 (2026-08-31)
 
 ### GUI
