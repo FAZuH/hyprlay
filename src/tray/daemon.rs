@@ -42,20 +42,21 @@ pub fn spawn_sibling_gui() -> Result<(), String> {
     // If the tray has no WAYLAND_DISPLAY but we are on Hyprland, the child
     // would inherit a headless env and fail to open a window. Route the
     // launch through the compositor so it gets the right environment.
-    if std::env::var_os("WAYLAND_DISPLAY").is_none() && is_hyprland() {
-        if let Ok(path) = sibling_path(GUI_BIN) {
-            match exec_via_hyprctl(&path) {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    // Fall through to direct spawn; the hyprctl failure is
-                    // already descriptive but direct spawn may still succeed
-                    // (e.g. X11 fallback).
-                    tracing::warn!(
-                        event = "tray_hyprctl_exec_failed",
-                        error = %e,
-                        "hyprctl dispatch exec failed, falling back to direct spawn"
-                    );
-                }
+    if std::env::var_os("WAYLAND_DISPLAY").is_none()
+        && is_hyprland()
+        && let Ok(path) = sibling_path(GUI_BIN)
+    {
+        match exec_via_hyprctl(&path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                // Fall through to direct spawn; the hyprctl failure is
+                // already descriptive but direct spawn may still succeed
+                // (e.g. X11 fallback).
+                tracing::warn!(
+                    event = "tray_hyprctl_exec_failed",
+                    error = %e,
+                    "hyprctl dispatch exec failed, falling back to direct spawn"
+                );
             }
         }
     }
