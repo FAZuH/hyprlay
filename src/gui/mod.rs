@@ -199,7 +199,7 @@ pub struct Gui {
 pub fn run() -> i32 {
     // Single-instance guard: a second GUI must not open over a running one.
     // The lock self-releases when this process exits.
-    let _lock = match hyprlay_core::singleton::acquire("hyprlay-gui") {
+    let _lock = match hyprlay_core::singleton::acquire(hyprlay_core::bins::GUI_LOCK) {
         Ok(lock) => lock,
         Err(AcquireError::AlreadyHeld) => {
             eprintln!("hyprlay-gui: another instance is already running");
@@ -216,6 +216,10 @@ pub fn run() -> i32 {
             size: iced::Size::new(800.0, 620.0),
             min_size: Some(iced::Size::new(640.0, 480.0)),
             resizable: true,
+            platform_specific: iced::window::settings::PlatformSpecific {
+                application_id: hyprlay_core::bins::GUI_APP_ID.to_string(),
+                ..Default::default()
+            },
             ..Default::default()
         })
         // Fixed dark theme, Discord-flavored; never follows the system.
