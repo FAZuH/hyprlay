@@ -19,6 +19,7 @@ const DAEMON_RELOAD: &str = "systemctl --user daemon-reload";
 const ENABLE_NOW: &str = "systemctl --user enable --now hyprlay";
 const ENABLE_NOW_TRAY: &str = "systemctl --user enable --now hyprlay-tray";
 const DISABLE_NOW: &str = "systemctl --user disable --now hyprlay";
+const DISABLE_NOW_TRAY: &str = "systemctl --user disable --now hyprlay-tray";
 const TRAY_BIN: &str = "hyprlay-tray";
 const DAEMON_BIN: &str = "hyprlayd";
 const GUI_BIN: &str = "hyprlay-gui";
@@ -121,7 +122,8 @@ impl World {
     }
 
     /// Independently written truth for the tray unit, mirroring the daemon
-    /// template (Restart=on-failure, EnvironmentFile, WantedBy=default.target).
+    /// template (Restart=on-failure, PassEnvironment, EnvironmentFile,
+    /// WantedBy=default.target).
     fn expected_tray_unit(&self) -> String {
         format!(
             "[Unit]\n\
@@ -130,6 +132,7 @@ impl World {
              [Service]\n\
              ExecStart={}/{}\n\
              Restart=on-failure\n\
+             PassEnvironment=WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR HYPRLAND_INSTANCE_SIGNATURE\n\
              EnvironmentFile=-%h/.config/hyprlay/service.env\n\
              \n\
              [Install]\n\
@@ -370,8 +373,12 @@ fn uninstall_disables_then_removes_both_files() {
     uninstall(&world.config_base, &world.data_base, &spy).expect("uninstall succeeds");
 
     assert!(!world.unit().exists());
+    assert!(!world.tray_unit().exists());
     assert!(!world.desktop().exists());
-    assert_eq!(spy.lines(), vec![DISABLE_NOW.to_string()]);
+    assert_eq!(
+        spy.lines(),
+        vec![DISABLE_NOW.to_string(), DISABLE_NOW_TRAY.to_string()]
+    );
 }
 
 #[test]
@@ -380,6 +387,7 @@ fn uninstall_tolerates_a_failed_disable_call_and_still_removes_files() {
     std::fs::create_dir_all(world.unit().parent().unwrap()).unwrap();
     std::fs::create_dir_all(world.desktop().parent().unwrap()).unwrap();
     std::fs::write(world.unit(), b"[unit]").unwrap();
+    std::fs::write(world.tray_unit(), b"[tray]").unwrap();
     std::fs::write(world.desktop(), b"[entry]").unwrap();
     let spy = Spy::failing_at(DISABLE_NOW);
 
@@ -387,8 +395,12 @@ fn uninstall_tolerates_a_failed_disable_call_and_still_removes_files() {
         .expect("uninstall tolerates the disable failure");
 
     assert!(!world.unit().exists(), "unit still removed");
+    assert!(!world.tray_unit().exists(), "tray unit still removed");
     assert!(!world.desktop().exists(), "desktop still removed");
-    assert_eq!(spy.lines(), vec![DISABLE_NOW.to_string()]);
+    assert_eq!(
+        spy.lines(),
+        vec![DISABLE_NOW.to_string(), DISABLE_NOW_TRAY.to_string()]
+    );
     assert!(
         report
             .iter()
@@ -404,7 +416,10 @@ fn uninstall_succeeds_when_nothing_is_installed() {
 
     uninstall(&world.config_base, &world.data_base, &spy).expect("uninstall succeeds");
 
-    assert_eq!(spy.lines(), vec![DISABLE_NOW.to_string()]);
+    assert_eq!(
+        spy.lines(),
+        vec![DISABLE_NOW.to_string(), DISABLE_NOW_TRAY.to_string()]
+    );
 }
 
 #[test]

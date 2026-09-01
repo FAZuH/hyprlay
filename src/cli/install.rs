@@ -97,6 +97,8 @@ fn desktop_text(exe_dir: &Path) -> String {
 /// Second systemd user unit, mirroring the daemon template
 /// (`Restart=on-failure`, `EnvironmentFile`, `WantedBy=default.target`) so a
 /// late-starting waybar still gets its tray. Runs the resident tray binary.
+/// `PassEnvironment` ensures the tray (and any GUI it spawns) inherits the
+/// compositor environment even when started early by systemd.
 fn tray_unit_text(exe_dir: &Path) -> String {
     format!(
         "[Unit]\n\
@@ -105,6 +107,7 @@ fn tray_unit_text(exe_dir: &Path) -> String {
          [Service]\n\
          ExecStart={}/{}\n\
          Restart=on-failure\n\
+         PassEnvironment=WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR HYPRLAND_INSTANCE_SIGNATURE\n\
          EnvironmentFile=-%h/.config/hyprlay/service.env\n\
          \n\
          [Install]\n\
@@ -183,7 +186,7 @@ pub fn install(
     Ok(report)
 }
 
-/// Stop + disable the unit (a missing unit is fine), then delete both
+/// Stop + disable the units (a missing unit is fine), then delete the
 /// files. Uninstalling twice succeeds identically.
 pub fn uninstall(
     config_base: &Path,
@@ -197,7 +200,14 @@ pub fn uninstall(
             "systemctl --user disable --now hyprlay: tolerated ({e})"
         )),
     }
+    match systemctl.run(&["disable", "--now", "hyprlay-tray"]) {
+        Ok(()) => report.push("systemctl --user disable --now hyprlay-tray: ok".to_string()),
+        Err(e) => report.push(format!(
+            "systemctl --user disable --now hyprlay-tray: tolerated ({e})"
+        )),
+    }
     remove_reported(&unit_path(config_base), &mut report)?;
+    remove_reported(&tray_unit_path(config_base), &mut report)?;
     remove_reported(&desktop_path(data_base), &mut report)?;
     Ok(report)
 }
