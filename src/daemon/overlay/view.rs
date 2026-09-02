@@ -15,7 +15,6 @@ use iced::widget::image;
 use iced::widget::row;
 use iced::widget::text;
 
-use crate::daemon::Message;
 use crate::daemon::adapters::discord::Participant;
 use crate::daemon::overlay::state::Overlay;
 
@@ -43,13 +42,13 @@ fn scaled(state: &Overlay, v: u32) -> f32 {
     v as f32 * state.config().scale_f32()
 }
 
-pub fn view<'a>(state: &'a Overlay) -> Element<'a, Message> {
+pub fn view<'a, M: 'static>(state: &'a Overlay) -> Element<'a, M> {
     // Four knobs: overall opacity multiplies into the profile picture, the
     // username text, and the username background. At 100/100/100/100 nothing
     // is transparent anywhere.
     let alphas = state.effective_alphas();
 
-    let rows: Vec<Element<Message>> = state
+    let rows: Vec<Element<M>> = state
         .displayed()
         .into_iter()
         .map(|p| participant_row(state, p, alphas))
@@ -63,15 +62,15 @@ pub fn view<'a>(state: &'a Overlay) -> Element<'a, Message> {
         .into()
 }
 
-fn participant_row<'a>(
+fn participant_row<'a, M: 'static>(
     state: &'a Overlay,
     p: &'a Participant,
     alphas: Alphas,
-) -> Element<'a, Message> {
+) -> Element<'a, M> {
     let avatar_px = scaled(state, state.config().avatar_size);
     let speaking = p.speaking;
 
-    let avatar: Element<'_, Message> = match state.avatar(&p.id) {
+    let avatar: Element<'_, M> = match state.avatar(&p.id) {
         Some(handle) => image::Image::new(handle.clone())
             .width(Length::Fixed(avatar_px))
             .height(Length::Fixed(avatar_px))
@@ -97,7 +96,7 @@ fn participant_row<'a>(
         width: 2.0,
         radius: iced::border::Radius::from((avatar_px + 8.0) / 2.0),
     };
-    let avatar: Element<'_, Message> = container(avatar)
+    let avatar: Element<'_, M> = container(avatar)
         .padding(2.0)
         .style(move |_t| ContainerStyle {
             border: ring,
@@ -122,7 +121,7 @@ fn participant_row<'a>(
         ..color_of(state.config().box_color)
     };
     let chip_radius = iced::border::Radius::from(scaled(state, state.config().text_size) * 0.6);
-    let name_area: Element<'_, Message> = container(name_el)
+    let name_area: Element<'_, M> = container(name_el)
         .padding([2, 8])
         .style(move |_t| ContainerStyle {
             background: Some(chip_bg.into()),
@@ -162,10 +161,7 @@ fn participant_row<'a>(
 }
 
 /// In RTL mode the name hugs the avatar: right-aligned inside a filling row.
-fn name_right_aligned<'a>(
-    state: &Overlay,
-    name_area: Element<'a, Message>,
-) -> Element<'a, Message> {
+fn name_right_aligned<'a, M: 'a>(state: &Overlay, name_area: Element<'a, M>) -> Element<'a, M> {
     let text_size = scaled(state, state.config().text_size);
     container(name_area)
         .width(Length::Fill)
@@ -177,13 +173,13 @@ fn name_right_aligned<'a>(
         .into()
 }
 
-fn badge(
+fn badge<M: 'static>(
     label: &str,
     color: Color,
     alpha: f32,
     bg_alpha: f32,
     state: &Overlay,
-) -> Element<'static, Message> {
+) -> Element<'static, M> {
     let size = scaled(state, state.config().text_size) * 0.7;
     let bg = Color {
         a: bg_alpha,
@@ -205,7 +201,7 @@ fn badge(
     .into()
 }
 
-fn fallback_avatar(id: &str, name: &str, px: f32, alpha: f32) -> Element<'static, Message> {
+fn fallback_avatar<M: 'static>(id: &str, name: &str, px: f32, alpha: f32) -> Element<'static, M> {
     let color = FALLBACK_COLORS[id.bytes().map(usize::from).sum::<usize>() % FALLBACK_COLORS.len()];
     let bg = Color { a: alpha, ..color };
     let initial = name

@@ -1,22 +1,26 @@
-//! iced adapter: wires the deep modules (discord RPC, commands, geometry,
-//! state) into the layer-shell application and translates their outputs
-//! into iced Tasks. Domain logic lives in the other modules, not here.
-//! This is the daemon frontend (`hyprlayd` bin); the `hyprlay` launcher
-//! execs into it, and all other CLI commands are served by the `hyprlay`
-//! binary over the control socket. The wire vocabulary lives in
-//! `hyprlay-core::ctl`; only this listener side is daemon-specific.
+//! Daemon frontend (`hyprlayd` bin): wires the deep modules (discord RPC,
+//! commands, geometry, state) into a platform-selected surface host and
+//! translates their outputs into that host's iced Tasks. Domain logic lives
+//! in the other modules, not here. This module owns the daemon lifecycle
+//! (logging, single-instance probe, credential detection) and the
+//! command-resolution logic shared by both surface hosts; the actual iced
+//! shell (layer-shell on Linux, winit on Windows/macOS/X11) lives in
+//! `surface_host/`. The `hyprlay` launcher execs into this bin, and all other
+//! CLI commands are served by the `hyprlay` binary over the control socket.
+//! The wire vocabulary lives in `hyprlay-core::ctl`.
 
 mod ctl_server;
 mod overlay;
 
 pub mod adapters;
+pub mod surface_host;
 
-use std::os::unix::process::CommandExt;
+use std::hash::Hash;
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use adapters::auth::OwnAppAuth;
-use adapters::avatar;
-use adapters::discord;
+use hyprlay_core::compositor::Monitor;
 use hyprlay_core::ctl;
 use hyprlay_core::domain::Command;
 use hyprlay_core::domain::Effect;
@@ -24,51 +28,25 @@ use hyprlay_core::domain::Group;
 use hyprlay_core::domain::Key;
 use hyprlay_core::domain::MonitorTarget;
 use hyprlay_core::domain::Value;
-use iced::Color;
-use iced::Subscription;
-use iced::Task;
-use iced_layershell::application;
-use iced_layershell::reexport::KeyboardInteractivity;
-use iced_layershell::reexport::Layer;
-use iced_layershell::settings::LayerShellSettings;
-use iced_layershell::settings::Settings;
-use iced_layershell::settings::StartMode;
-use iced_layershell::to_layer_message;
-use overlay::geometry;
-use overlay::state;
 use overlay::state::Overlay;
-use overlay::view;
-use tokio::sync::oneshot;
 
-#[to_layer_message]
-#[derive(Debug)]
-enum Message {
-    Discord(discord::DiscordEvent),
-    AvatarResult {
-        user_id: String,
-        data: Option<Vec<u8>>,
-    },
-    Ctl {
-        command: String,
-        reply: oneshot::Sender<String>,
-    },
-    HoverCursor(Option<(i32, i32)>),
-}
-
-/// Daemon entry point, called by the thin `src/bin/hyprlayd.rs` main.
-pub fn run() -> iced_layershell::Result {
+/// Daemon entry point, called by the thin `src/bin/hyprlayd.rs` main. Runs
+/// the platform-independent lifecycle (logging, single-instance guard,
+/// config load, credential detection) then hands off to the platform-selected
+/// surface host.
+pub fn run() -> ExitCode {
     init_logging();
 
     // Single-instance guard: a second daemon exits before it creates a
-    // layer surface or steals the control socket, with a visible stderr
-    // error and exit code 1 — an explicit launch that cannot run is a
-    // failed request (D7), while autostart `&` users are unaffected by a
-    // nonzero exit of the loser. The JSON event is kept for log-based
-    // diagnosis. The probe and the later listener bind are not atomic —
-    // two daemons launched in the same instant can both see "free" and
-    // race the bind; the loser only warns and runs without remote control,
-    // which is acceptable for that pathological simultaneous launch.
-    match ctl::probe_socket(&ctl::socket_path()) {
+    // surface or steals the control socket, with a visible stderr error and
+    // exit code 1 — an explicit launch that cannot run is a failed request
+    // (D7), while autostart `&` users are unaffected by a nonzero exit of
+    // the loser. The JSON event is kept for log-based diagnosis. The probe
+    // and the later listener bind are not atomic — two daemons launched in
+    // the same instant can both see "free" and race the bind; the loser only
+    // warns and runs without remote control, which is acceptable for that
+    // pathological simultaneous launch.
+    match ctl::probe_socket(&crate::platform::ipc::control::Control, &ctl::socket_path()) {
         ctl::SocketProbe::AlreadyRunning => {
             tracing::info!(
                 event = "daemon_already_running",
@@ -89,65 +67,18 @@ pub fn run() -> iced_layershell::Result {
     let cfg = hyprlay_core::config::load();
 
     // Credentials are a per-process choice: detected exactly once here and
-    // shared with the Discord subscription, so changed credentials only
-    // take effect through the `restart` command. With none present,
-    // detect() logs the single `credentials_missing` event and the rpc
-    // task parks until a restart starts a fresh process.
+    // shared with the Discord subscription, so changed credentials only take
+    // effect through the `restart` command. With none present, detect() logs
+    // the single `credentials_missing` event and the rpc task parks until a
+    // restart starts a fresh process.
     let auth = adapters::auth::detect();
 
-    // No text input in the overlay; skip the always-on clipboard worker.
-    iced_layershell::disable_clipboard();
-
-    let size = (cfg.width, 64);
-    let offset = geometry::offset(&cfg);
-    let anchor = geometry::anchor(&cfg);
-    let layer = if cfg.show_on_fullscreen {
-        Layer::Overlay
-    } else {
-        Layer::Top
-    };
-    let start_mode = match cfg.monitor.as_deref() {
-        Some(name) => StartMode::TargetScreen(name.to_string()),
-        None => StartMode::Active,
-    };
-    let rpc_auth = DiscordRpc(auth.map(Arc::new));
-
-    application(
-        move || {
-            let mut overlay = Overlay::new(cfg.clone());
-            overlay.hydrate_roster();
-            (overlay, Task::none())
-        },
-        "hyprlay",
-        update,
-        view::view,
-    )
-    .style(|_state, _theme| iced::theme::Style {
-        background_color: Color::TRANSPARENT,
-        text_color: Color::WHITE,
-    })
-    .subscription(move |state| subscription(state, &rpc_auth))
-    .settings(Settings {
-        layer_settings: LayerShellSettings {
-            anchor,
-            layer,
-            exclusive_zone: 0,
-            size: Some(size),
-            margin: offset,
-            keyboard_interactivity: KeyboardInteractivity::None,
-            // The overlay is pure display: every pointer event passes
-            // through to whatever is below, unconditionally.
-            events_transparent: true,
-            start_mode,
-        },
-        ..Default::default()
-    })
-    .run()
+    surface_host::run(cfg, auth)
 }
 
 /// Two outputs: machine-readable JSON wide events under
-/// `$XDG_STATE_HOME/hyprlay/logs/` (per the logging guidelines), and
-/// a human-friendly stream on stderr showing only our lifecycle messages and
+/// `$XDG_STATE_HOME/hyprlay/logs/` (per the logging guidelines), and a
+/// human-friendly stream on stderr showing only our lifecycle messages and
 /// real errors — library noise (wgpu, layershellev) stays in the file.
 fn init_logging() {
     use tracing_subscriber::EnvFilter;
@@ -189,239 +120,151 @@ fn init_logging() {
 
 /// Subscription payload for the Discord RPC stream. iced identifies
 /// subscriptions by hash and the credentials carry no meaningful hash, but
-/// they are fixed for the whole daemon lifetime — so hashing only the
-/// stable id keeps the stream identity (and its connection) unchanged
-/// across UI updates.
+/// they are fixed for the whole daemon lifetime — so hashing only the stable
+/// id keeps the stream identity (and its connection) unchanged across UI
+/// updates. Shared by both surface hosts; moving it out of the layer-shell
+/// module keeps the subscription key identical between arms.
 #[derive(Clone)]
-struct DiscordRpc(Option<Arc<OwnAppAuth>>);
+pub(crate) struct DiscordRpc(pub(crate) Option<Arc<OwnAppAuth>>);
 
-impl std::hash::Hash for DiscordRpc {
+impl Hash for DiscordRpc {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         "discord-rpc".hash(state);
     }
 }
 
-fn hover_poll_enabled(state: &Overlay) -> bool {
+/// A lifecycle action a command requests, decoupled from any shell task so
+/// both surface hosts interpret it the same way (`restart` is a re-exec and
+/// `quit` is a clean shutdown).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Lifecycle {
+    Restart,
+    Quit,
+}
+
+/// The outcome of resolving a control command against live daemon state,
+/// before any shell tasks are produced: the reply to send back, the domain
+/// effects to translate, and any lifecycle action to run.
+pub(crate) struct CommandOutcome {
+    pub reply: String,
+    pub effects: Vec<Effect>,
+    pub lifecycle: Option<Lifecycle>,
+}
+
+/// Whether there is a monitor-aware placement for the overlay right now.
+/// Shared by both arms' hover paths.
+pub(crate) fn monitor_for_overlay(cfg: &hyprlay_core::config::Config) -> Option<Monitor> {
+    let monitors = crate::platform::compositor::detect().monitors();
+    crate::daemon::overlay::geometry::pick_monitor(&monitors, cfg.monitor.as_deref()).cloned()
+}
+
+pub(crate) fn hover_poll_enabled(state: &Overlay) -> bool {
     state.config().dim_on_hover
         && state.config().visible
         && !state.displayed().is_empty()
         && state.status() == hyprlay_core::domain::ConnectionStatus::Connected
 }
 
-fn subscription(state: &Overlay, auth: &DiscordRpc) -> Subscription<Message> {
-    let hover = if hover_poll_enabled(state) {
-        Subscription::run(hover_subscription)
-    } else {
-        Subscription::none()
-    };
-    Subscription::batch([
-        Subscription::run_with(auth.clone(), discord_subscription),
-        Subscription::run(ctl_subscription),
-        hover,
-    ])
-}
-
-fn discord_subscription(rpc: &DiscordRpc) -> impl futures_util::Stream<Item = Message> + use<> {
-    // `use<>`: the stream owns a backend clone, so the opaque type must
-    // stay 'static instead of capturing the `&rpc` borrow (edition 2024).
-    use futures_util::StreamExt;
-    let backend = rpc.0.clone();
-    iced::stream::channel(64, move |sender| async move {
-        discord::run(sender, backend).await;
-    })
-    .map(Message::Discord)
-}
-
-fn ctl_subscription() -> impl futures_util::Stream<Item = Message> {
-    use futures_util::StreamExt;
-    ctl_server::incoming().map(|req| Message::Ctl {
-        command: req.command,
-        reply: req.reply,
-    })
-}
-
-fn hover_subscription() -> impl futures_util::Stream<Item = Message> {
-    use futures_util::SinkExt;
-    iced::stream::channel(
-        64,
-        |mut sender: iced::futures::channel::mpsc::Sender<Message>| async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
-            loop {
-                interval.tick().await;
-                let pos = tokio::task::spawn_blocking(hyprlay_core::compositor::cursor_pos)
-                    .await
-                    .unwrap_or(None);
-                let _ = sender.send(Message::HoverCursor(pos)).await;
-            }
-        },
-    )
-}
-
-fn update(state: &mut Overlay, message: Message) -> Task<Message> {
-    match message {
-        Message::Discord(ev) => {
-            let change = state.apply_discord(ev);
-            if !hover_poll_enabled(state) && state.is_hovered() {
-                state.set_hovered(false);
-            }
-            match change {
-                state::RosterChange::Changed => {
-                    Task::batch([resize_task(state), avatar_tasks(state)])
-                }
-                state::RosterChange::Unchanged => Task::none(),
-            }
-        }
-        Message::AvatarResult { user_id, data } => {
-            if let Some(data) = data {
-                state.insert_avatar(user_id, data);
-            }
-            Task::none()
-        }
-        Message::Ctl { command, reply } => handle_ctl(state, command, reply),
-        Message::HoverCursor(pos) => {
-            if !state.config().dim_on_hover
-                || !state.config().visible
-                || state.displayed().is_empty()
-                || state.status() != hyprlay_core::domain::ConnectionStatus::Connected
-            {
-                if state.is_hovered() {
-                    state.set_hovered(false);
-                }
-                return Task::none();
-            }
-            let Some((x, y)) = pos else {
-                if state.is_hovered() {
-                    state.set_hovered(false);
-                }
-                return Task::none();
-            };
-            let monitor = monitor_for_overlay(state.config());
-            let rect = geometry::overlay_rect(
-                state.config(),
-                state.size(),
-                state.offset(),
-                monitor.as_ref(),
-            );
-            let now_hovered = rect.contains((x, y));
-            tracing::debug!(
-                event = "hover_tick",
-                pos = ?pos,
-                rect = ?rect,
-                hovered = now_hovered,
-                dim_on_hover = state.config().dim_on_hover
-            );
-            if now_hovered != state.is_hovered() {
-                state.set_hovered(now_hovered);
-            }
-            Task::none()
-        }
-        // Variants generated by #[to_layer_message] are sent as Tasks and
-        // consumed by the layershell runtime, never re-delivered here.
-        _ => Task::none(),
-    }
-}
-
-fn monitor_for_overlay(
-    cfg: &hyprlay_core::config::Config,
-) -> Option<hyprlay_core::compositor::Monitor> {
-    let monitors = hyprlay_core::compositor::detect().monitors();
-    if monitors.is_empty() {
-        return None;
-    }
-    if let Some(name) = cfg.monitor.as_deref()
-        && let Some(m) = monitors.iter().find(|m| m.name == name)
-    {
-        return Some(m.clone());
-    }
-    monitors.into_iter().find(|m| m.active).or(None)
-}
-
-/// Control-socket entry point: the command line is parsed once into a typed
-/// [`Command`]; daemon-side commands are answered here, everything else goes
-/// through `apply_config` and the resulting effects are translated into Tasks.
-fn handle_ctl(
-    state: &mut Overlay,
-    command: String,
-    reply: oneshot::Sender<String>,
-) -> Task<Message> {
-    let cmd: Command = match command.parse() {
-        Ok(cmd) => cmd,
-        Err(err) => {
-            let _ = reply.send(err);
-            return Task::none();
-        }
-    };
-
+/// Control-socket command resolution. The command line is parsed once into a
+/// typed [`Command`]; daemon-side commands are answered here, everything else
+/// goes through `apply_config`. Returns the reply, the domain effects, and
+/// any lifecycle action — each surface host turns those into its own Tasks.
+/// This is the single source of truth for what each command *means*; only the
+/// shell-specific emission of the effects differs between arms.
+pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutcome {
     // Daemon-side commands need live state or IO; answer them directly.
     match cmd {
         Command::Save => {
             state.config_mut().save();
-            let _ = reply.send("saved".to_string());
-            return Task::none();
+            return CommandOutcome {
+                reply: "saved".to_string(),
+                effects: Vec::new(),
+                lifecycle: None,
+            };
         }
         Command::Dump => {
-            let _ = reply.send(toml::to_string(state.config()).unwrap_or_default());
-            return Task::none();
+            return CommandOutcome {
+                reply: toml::to_string(state.config()).unwrap_or_default(),
+                effects: Vec::new(),
+                lifecycle: None,
+            };
         }
         Command::Status => {
             let cfg = state.config();
             let corner = hyprlay_core::domain::corner_of(cfg.horizontal, cfg.vertical);
-            let _ = reply.send(format!(
-                "status={} channel={} participants={} position={} rtl={} visible={} anchor={} scale={} opacity={} offset=({},{}) monitor={monitor} auth={auth} show-on-fullscreen={show_on} dim-on-hover={dim_on} hover-opacity={hover}",
-                state.status(),
-                state.channel_name().unwrap_or("-"),
-                state.displayed().len(),
-                hyprlay_core::domain::corner_word(corner),
-                if cfg.rtl { "on" } else { "off" },
-                if cfg.visible { "on" } else { "off" },
-                cfg.anchor,
-                cfg.scale,
-                cfg.opacity,
-                cfg.offset_x,
-                cfg.offset_y,
-                monitor = cfg.monitor.as_deref().unwrap_or("active"),
-                auth = state.auth_label(),
-                show_on = if cfg.show_on_fullscreen { "on" } else { "off" },
-                dim_on = if cfg.dim_on_hover { "on" } else { "off" },
-                hover = cfg.hover_opacity,
-            ));
-            return Task::none();
+            return CommandOutcome {
+                reply: format!(
+                    "status={} channel={} participants={} position={} rtl={} visible={} anchor={} scale={} opacity={} offset=({},{}) monitor={monitor} auth={auth} show-on-fullscreen={show_on} dim-on-hover={dim_on} hover-opacity={hover}",
+                    state.status(),
+                    state.channel_name().unwrap_or("-"),
+                    state.displayed().len(),
+                    hyprlay_core::domain::corner_word(corner),
+                    if cfg.rtl { "on" } else { "off" },
+                    if cfg.visible { "on" } else { "off" },
+                    cfg.anchor,
+                    cfg.scale,
+                    cfg.opacity,
+                    cfg.offset_x,
+                    cfg.offset_y,
+                    monitor = cfg.monitor.as_deref().unwrap_or("active"),
+                    auth = state.auth_label(),
+                    show_on = if cfg.show_on_fullscreen { "on" } else { "off" },
+                    dim_on = if cfg.dim_on_hover { "on" } else { "off" },
+                    hover = cfg.hover_opacity,
+                ),
+                effects: Vec::new(),
+                lifecycle: None,
+            };
         }
         Command::Help => {
-            let _ = reply.send(ctl::usage());
-            return Task::none();
+            return CommandOutcome {
+                reply: ctl::usage(),
+                effects: Vec::new(),
+                lifecycle: None,
+            };
         }
         Command::Get(key) => {
-            let _ = reply.send(key.get(state.config()));
-            return Task::none();
+            return CommandOutcome {
+                reply: key.get(state.config()),
+                effects: Vec::new(),
+                lifecycle: None,
+            };
         }
         // Layer-shell surfaces bind to an output at creation, so a monitor
         // change re-creates the surface via exec-restart. Bare `set monitor`
         // cycles active -> each detected output.
         Command::Restart => {
-            // The GUI sends this after writing new credentials: only a
-            // fresh process re-runs detect() and picks the new backend.
-            // Promise the restart only when the re-exec target exists,
-            // mirroring the monitor-change guard below.
+            // The GUI sends this after writing new credentials: only a fresh
+            // process re-runs detect() and picks the new backend. Promise the
+            // restart only when the re-exec target exists, mirroring the
+            // monitor-change guard below.
             if !can_reexec() {
                 tracing::error!(
                     event = "daemon_restart_failed",
                     "aborting restart: daemon binary unavailable"
                 );
-                let _ =
-                    reply.send("error: could not restart daemon: binary is missing".to_string());
-                return Task::none();
+                return CommandOutcome {
+                    reply: "error: could not restart daemon: binary is missing".to_string(),
+                    effects: Vec::new(),
+                    lifecycle: None,
+                };
             }
-            let _ = reply.send("restarting".to_string());
-            return restart_daemon();
+            return CommandOutcome {
+                reply: "restarting".to_string(),
+                effects: Vec::new(),
+                lifecycle: Some(Lifecycle::Restart),
+            };
         }
         Command::Quit => {
             // Same reply-then-act shape as restart: the oneshot wakes the
-            // connection writer first, then the runtime exits cleanly (layer
-            // surface dropped, ctl listener dies with the event loop, exit
+            // connection writer first, then the runtime exits cleanly
+            // (surface dropped, ctl listener dies with the event loop, exit
             // code 0).
-            let _ = reply.send(Command::QUIT_REPLY.to_string());
-            return clean_shutdown();
+            return CommandOutcome {
+                reply: Command::QUIT_REPLY.to_string(),
+                effects: Vec::new(),
+                lifecycle: Some(Lifecycle::Quit),
+            };
         }
         Command::Set(Key::Monitor, value) => {
             let target = match value {
@@ -430,19 +273,23 @@ fn handle_ctl(
                 _ => None,
             };
             let Some(target) = target else {
-                let _ = reply.send("error: no monitors reported".to_string());
-                return Task::none();
+                return CommandOutcome {
+                    reply: "error: no monitors reported".to_string(),
+                    effects: Vec::new(),
+                    lifecycle: None,
+                };
             };
             // An unknown output would restart into whatever fallback the
             // shell picks for it — reject instead of moving somewhere the
             // user did not ask for.
             if let MonitorTarget::Named(name) = &target {
-                let known = monitor_known(name, &hyprlay_core::compositor::detect().monitors());
+                let known = monitor_known(name, &crate::platform::compositor::detect().monitors());
                 if !known {
-                    let _ = reply.send(format!(
-                        "error: no output named {name} (try 'hyprlay monitors')"
-                    ));
-                    return Task::none();
+                    return CommandOutcome {
+                        reply: format!("error: no output named {name} (try 'hyprlay monitors')"),
+                        effects: Vec::new(),
+                        lifecycle: None,
+                    };
                 }
             }
             // Same-output requests must not cost a surface re-creation and
@@ -452,72 +299,91 @@ fn handle_ctl(
                     MonitorTarget::Active => "the active monitor".to_string(),
                     MonitorTarget::Named(name) => name.clone(),
                 };
-                let _ = reply.send(format!("already on {where_at}"));
-                return Task::none();
+                return CommandOutcome {
+                    reply: format!("already on {where_at}"),
+                    effects: Vec::new(),
+                    lifecycle: None,
+                };
             }
             let text = match &target {
                 MonitorTarget::Active => "restarting on the active monitor".to_string(),
                 MonitorTarget::Named(name) => format!("restarting on {name}"),
             };
             // The reply promises a restart — promise it only while the
-            // re-exec target provably exists. exec() used to fail with
-            // ENOENT after this point (binary rebuilt away under a running
-            // daemon), reporting success while the old surface stayed put.
+            // re-exec target provably exists. exec() used to fail with ENOENT
+            // after this point (binary rebuilt away under a running daemon),
+            // reporting success while the old surface stayed put.
             if !can_reexec() {
                 tracing::error!(
                     event = "daemon_restart_failed",
                     "aborting monitor change: daemon binary unavailable"
                 );
-                let _ = reply.send(
-                    "error: could not relocate overlay: daemon binary is missing".to_string(),
-                );
-                return Task::none();
+                return CommandOutcome {
+                    reply: "error: could not relocate overlay: daemon binary is missing"
+                        .to_string(),
+                    effects: Vec::new(),
+                    lifecycle: None,
+                };
             }
             state.config_mut().monitor = match target {
                 MonitorTarget::Active => None,
                 MonitorTarget::Named(name) => Some(name),
             };
-            // Deliberate exception to should_persist/autosave: this process
-            // is about to be replaced and the fresh one re-reads config.toml
-            // to decide where to bind, so skipping the write would silently
-            // lose the monitor choice.
+            // Deliberate exception to should_persist/autosave: this process is
+            // about to be replaced and the fresh one re-reads config.toml to
+            // decide where to bind, so skipping the write would silently lose
+            // the monitor choice.
             state.config_mut().save();
-            let _ = reply.send(text);
-            return restart_daemon();
+            return CommandOutcome {
+                reply: text,
+                effects: Vec::new(),
+                lifecycle: Some(Lifecycle::Restart),
+            };
         }
         Command::Set(Key::ShowOnFullscreen, value) => {
             let requested = match value {
                 Value::Flag(b) => b,
                 Value::Cycle => !state.config().show_on_fullscreen,
                 _ => {
-                    let _ = reply.send("error: show-on-fullscreen <on|off>".to_string());
-                    return Task::none();
+                    return CommandOutcome {
+                        reply: "error: show-on-fullscreen <on|off>".to_string(),
+                        effects: Vec::new(),
+                        lifecycle: None,
+                    };
                 }
             };
             if !show_on_fullscreen_change_restarts(state.config().show_on_fullscreen, requested) {
-                let _ = reply.send(format!(
-                    "already show-on-fullscreen={}",
-                    if requested { "on" } else { "off" }
-                ));
-                return Task::none();
+                return CommandOutcome {
+                    reply: format!(
+                        "already show-on-fullscreen={}",
+                        if requested { "on" } else { "off" }
+                    ),
+                    effects: Vec::new(),
+                    lifecycle: None,
+                };
             }
             if !can_reexec() {
                 tracing::error!(
                     event = "daemon_restart_failed",
                     "aborting show-on-fullscreen change: daemon binary unavailable"
                 );
-                let _ = reply.send(
-                    "error: could not change overlay layer: daemon binary is missing".to_string(),
-                );
-                return Task::none();
+                return CommandOutcome {
+                    reply: "error: could not change overlay layer: daemon binary is missing"
+                        .to_string(),
+                    effects: Vec::new(),
+                    lifecycle: None,
+                };
             }
             state.config_mut().show_on_fullscreen = requested;
             state.config_mut().save();
-            let _ = reply.send(format!(
-                "restarting (show-on-fullscreen={})",
-                if requested { "on" } else { "off" }
-            ));
-            return restart_daemon();
+            return CommandOutcome {
+                reply: format!(
+                    "restarting (show-on-fullscreen={})",
+                    if requested { "on" } else { "off" }
+                ),
+                effects: Vec::new(),
+                lifecycle: Some(Lifecycle::Restart),
+            };
         }
         Command::ResetAll if reset_needs_restart(state, &cmd) => {
             if !can_reexec() {
@@ -525,20 +391,25 @@ fn handle_ctl(
                     event = "daemon_restart_failed",
                     "aborting reset: daemon binary unavailable"
                 );
-                let _ = reply
-                    .send("error: could not reset overlay: daemon binary is missing".to_string());
-                return Task::none();
+                return CommandOutcome {
+                    reply: "error: could not reset overlay: daemon binary is missing".to_string(),
+                    effects: Vec::new(),
+                    lifecycle: None,
+                };
             }
             let requested = hyprlay_core::config::Config::default().show_on_fullscreen;
             let monitor = state.config().monitor.clone();
             *state.config_mut() = hyprlay_core::config::Config::default();
             state.config_mut().monitor = monitor;
             state.config_mut().save();
-            let _ = reply.send(format!(
-                "restarting (reset show-on-fullscreen={})",
-                if requested { "on" } else { "off" }
-            ));
-            return restart_daemon();
+            return CommandOutcome {
+                reply: format!(
+                    "restarting (reset show-on-fullscreen={})",
+                    if requested { "on" } else { "off" }
+                ),
+                effects: Vec::new(),
+                lifecycle: Some(Lifecycle::Restart),
+            };
         }
         Command::ResetGroup(group)
             if group == Group::Layout && reset_needs_restart(state, &cmd) =>
@@ -548,9 +419,11 @@ fn handle_ctl(
                     event = "daemon_restart_failed",
                     "aborting reset layout: daemon binary unavailable"
                 );
-                let _ = reply
-                    .send("error: could not reset layout: daemon binary is missing".to_string());
-                return Task::none();
+                return CommandOutcome {
+                    reply: "error: could not reset layout: daemon binary is missing".to_string(),
+                    effects: Vec::new(),
+                    lifecycle: None,
+                };
             }
             let requested = hyprlay_core::config::Config::default().show_on_fullscreen;
             let defaults = hyprlay_core::config::Config::default();
@@ -565,11 +438,14 @@ fn handle_ctl(
                 key.apply(state.config_mut(), key.value_of(&defaults));
             }
             state.config_mut().save();
-            let _ = reply.send(format!(
-                "restarting (reset layout show-on-fullscreen={})",
-                if requested { "on" } else { "off" }
-            ));
-            return restart_daemon();
+            return CommandOutcome {
+                reply: format!(
+                    "restarting (reset layout show-on-fullscreen={})",
+                    if requested { "on" } else { "off" }
+                ),
+                effects: Vec::new(),
+                lifecycle: Some(Lifecycle::Restart),
+            };
         }
         _ => {}
     }
@@ -586,33 +462,20 @@ fn handle_ctl(
     if persists && !result.reply.starts_with("error:") {
         state.config().save();
     }
-    let mut tasks: Vec<Task<Message>> = Vec::new();
-
-    for effect in result.effects {
-        match effect {
-            Effect::Resize => tasks.push(resize_task(state)),
-            Effect::Reanchor => {
-                state.reanchor();
-                let anchor = geometry::anchor(state.config());
-                tasks.push(Task::done(Message::AnchorChange(anchor)));
-                tasks.push(Task::done(Message::MarginChange(state.offset())));
-            }
-            Effect::Nudge(dx, dy) => {
-                state.nudge(dx, dy);
-                tasks.push(Task::done(Message::MarginChange(state.offset())));
-            }
-        }
+    CommandOutcome {
+        reply: result.reply,
+        effects: result.effects,
+        lifecycle: None,
     }
-
-    let _ = reply.send(result.reply);
-    Task::batch(tasks)
 }
 
 /// Whether switching to `requested` needs a fresh surface. Layer-shell
 /// surfaces bind to an output at creation and cannot move at runtime, so a
-/// real change re-creates the whole daemon; asking for the output already
-/// in effect must not churn the ctl socket and flicker the overlay.
-fn monitor_change_restarts(current: Option<&str>, requested: &MonitorTarget) -> bool {
+/// real change re-creates the whole daemon; asking for the output already in
+/// effect must not churn the ctl socket and flicker the overlay. On the winit
+/// arm, the window can move, but the same policy keeps the arms' UX
+/// consistent (a monitor change re-runs the daemon process).
+pub(crate) fn monitor_change_restarts(current: Option<&str>, requested: &MonitorTarget) -> bool {
     match requested {
         // Started without a pin already: re-exec would resolve "active" to
         // whatever is focused after the restart, not move anything now.
@@ -621,11 +484,11 @@ fn monitor_change_restarts(current: Option<&str>, requested: &MonitorTarget) -> 
     }
 }
 
-fn show_on_fullscreen_change_restarts(current: bool, requested: bool) -> bool {
+pub(crate) fn show_on_fullscreen_change_restarts(current: bool, requested: bool) -> bool {
     current != requested
 }
 
-fn reset_needs_restart(state: &Overlay, cmd: &Command) -> bool {
+pub(crate) fn reset_needs_restart(state: &Overlay, cmd: &Command) -> bool {
     match cmd {
         Command::ResetAll => show_on_fullscreen_change_restarts(
             state.config().show_on_fullscreen,
@@ -644,16 +507,16 @@ fn reset_needs_restart(state: &Overlay, cmd: &Command) -> bool {
 /// The requested output exists right now? Guards against restarting into
 /// whatever fallback the shell picks for an unknown name — descriptions are
 /// deliberately not accepted, only connector-style names from `monitors`.
-fn monitor_known(name: &str, monitors: &[hyprlay_core::compositor::Monitor]) -> bool {
+pub(crate) fn monitor_known(name: &str, monitors: &[Monitor]) -> bool {
     monitors.iter().any(|m| m.name == name)
 }
 
 /// The next entry in the [active, monitor1, monitor2, ...] cycle after the
 /// currently configured target; `None` when no outputs are reported.
-fn next_monitor_target(current: Option<&str>) -> Option<MonitorTarget> {
+pub(crate) fn next_monitor_target(current: Option<&str>) -> Option<MonitorTarget> {
     let mut options: Vec<Option<String>> = vec![None];
     options.extend(
-        hyprlay_core::compositor::detect()
+        crate::platform::compositor::detect()
             .monitors()
             .into_iter()
             .map(|m| Some(m.name)),
@@ -672,39 +535,11 @@ fn next_monitor_target(current: Option<&str>) -> Option<MonitorTarget> {
     }
 }
 
-/// Match the surface size to the current roster; emits SizeChange only when
-/// it actually changed.
-fn resize_task(state: &mut Overlay) -> Task<Message> {
-    state
-        .take_size_change()
-        .map(|size| Task::done(Message::SizeChange(size)))
-        .unwrap_or_else(Task::none)
-}
-
-/// Kick off fetches for any participant avatars we don't have yet.
-fn avatar_tasks(state: &mut Overlay) -> Task<Message> {
-    let missing = state.claim_missing_avatars();
-    Task::batch(missing.into_iter().map(|(user_id, hash, url)| {
-        Task::perform(avatar::fetch(user_id.clone(), hash, url), move |data| {
-            Message::AvatarResult {
-                user_id: user_id.clone(),
-                data,
-            }
-        })
-    }))
-}
-
-/// Re-exec the daemon detached so the new process recreates its layer
-/// surface (and picks up the new `monitor` config), then exit this one.
-/// Replace this process image with a fresh daemon so the layer surface is
-/// recreated against the new monitor. `exec()` keeps our PID, which is what
-/// makes this safe under supervisors: a systemd unit (e.g. `bgrun`) tracks
-/// us by cgroup, and a fork+exit here would get the replacement child torn
-/// down together with the old unit's cgroup.
-/// True while the on-disk image `restart_daemon` would exec into still
-/// exists. A running daemon outlives rebuilds that delete its binary, and
-/// exec() then fails with ENOENT — callers check here first so they can
-/// answer honestly instead of promising a restart that cannot happen.
+/// True while the on-disk image a restart would re-exec into still exists.
+/// A running daemon outlives rebuilds that delete its binary, and exec() then
+/// fails with ENOENT — callers check here first so they can answer honestly
+/// instead of promising a restart that cannot happen. (On the winit arm the
+/// restart is a spawn+exit rather than an exec, but the guard is the same.)
 fn can_reexec() -> bool {
     std::env::current_exe()
         .and_then(|exe| std::fs::metadata(exe).map(|_| ()))
@@ -712,38 +547,10 @@ fn can_reexec() -> bool {
 }
 
 /// The visible second-daemon failure line (D7). Kept pure so the exact
-/// wording is pinned by a test; main.rs wiring (stderr + exit 1) is
-/// verified live.
+/// wording is pinned by a test; main.rs wiring (stderr + exit 1) is verified
+/// live.
 fn already_running_message(path: &std::path::Path) -> String {
     format!("error: daemon already running ({})", path.display())
-}
-
-/// Clean shutdown for `quit`: the exit task makes the runtime stop its
-/// event loop, which drops the layer surface and ends `main` normally with
-/// exit code 0. The ctl listener lives inside a subscription stream and is
-/// torn down with the loop. This is the one piece of the quit path without
-/// an in-process pin — it is a single runtime call, verified by live smoke.
-fn clean_shutdown() -> Task<Message> {
-    iced::exit()
-}
-
-fn restart_daemon() -> Task<Message> {
-    match std::env::current_exe() {
-        Ok(exe) => {
-            let err = std::process::Command::new(&exe).arg("daemon").exec();
-            tracing::error!(
-                event = "daemon_restart_failed",
-                error = %err,
-                "could not re-exec daemon"
-            );
-        }
-        Err(e) => {
-            tracing::error!(event = "daemon_restart_failed", error = %e, "could not resolve current_exe");
-        }
-    }
-    // exec() never returns; reaching this line means restart failed, so keep
-    // the current surface alive rather than dropping the overlay entirely.
-    Task::none()
 }
 
 #[cfg(test)]
