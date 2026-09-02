@@ -29,8 +29,27 @@ env:
 
 jobs:
   build-binary:
-    name: Build Binary (Linux)
-    runs-on: ubuntu-latest
+    name: Build Binary (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            platform: linux-x64
+            exe: ''
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            platform: windows-x64
+            exe: .exe
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            platform: macos-x64
+            exe: ''
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            platform: macos-arm64
+            exe: ''
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,15 +61,21 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          targets: ${{ matrix.target }}
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "ci"
+          shared-key: "ci-${{ matrix.target }}"
           add-job-id-key: false
 
-      - name: Install dependencies
+      - name: Install dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libxkbcommon-dev
+
+      - name: Install dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install pkg-config
 
       - name: Download Patched Cargo.toml
         id: download-cargo
@@ -67,6 +92,7 @@ jobs:
           exit 1
 
       - name: Verify workspace dependency consistency
+        if: matrix.os == 'ubuntu-latest'
         run: |
           if ! grep -q '^\[workspace\]' Cargo.toml; then
             echo "No workspace — skipping consistency check"
@@ -104,37 +130,55 @@ jobs:
           fi
 
       - name: Build
-        run: cargo build ${{ inputs.cargo-build-args }}
+        run: cargo build --target ${{ matrix.target }} ${{ inputs.cargo-build-args }}
 
-      - name: Prepare Artifacts
-        if: inputs.upload-binary
+      - name: Prepare Artifact (Unix)
+        if: matrix.os != 'windows-latest' && inputs.upload-binary
         run: |
           mkdir -p artifacts
-          for b in hyprlay hyprlayd hyprlay-gui; do
-            cp "target/${{ inputs.release && 'release' || 'debug' }}/$b" "artifacts/$b"
-            chmod +x "artifacts/$b"
+          PROFILE=${{ inputs.release && 'release' || 'debug' }}
+          for b in hyprlay hyprlayd hyprlay-gui hyprlay-tray; do
+            cp "target/${{ matrix.target }}/$PROFILE/$b" "artifacts/$b-${{ matrix.platform }}"
+            chmod +x "artifacts/$b-${{ matrix.platform }}"
           done
+
+      - name: Prepare Artifact (Windows)
+        if: matrix.os == 'windows-latest' && inputs.upload-binary
+        run: |
+          mkdir artifacts
+          copy "target\${{ matrix.target }}\${{ inputs.release && 'release' || 'debug' }}\hyprlay.exe" "artifacts\hyprlay-${{ matrix.platform }}.exe"
+          copy "target\${{ matrix.target }}\${{ inputs.release && 'release' || 'debug' }}\hyprlayd.exe" "artifacts\hyprlayd-${{ matrix.platform }}.exe"
+          copy "target\${{ matrix.target }}\${{ inputs.release && 'release' || 'debug' }}\hyprlay-gui.exe" "artifacts\hyprlay-gui-${{ matrix.platform }}.exe"
+          copy "target\${{ matrix.target }}\${{ inputs.release && 'release' || 'debug' }}\hyprlay-tray.exe" "artifacts\hyprlay-tray-${{ matrix.platform }}.exe"
 
       - name: Upload Binary Artifact (hyprlay)
         if: inputs.upload-binary
         uses: actions/upload-artifact@v4
         with:
-          name: hyprlay-linux-x64
-          path: artifacts/hyprlay
+          name: hyprlay-${{ matrix.platform }}${{ matrix.exe }}
+          path: artifacts/hyprlay-${{ matrix.platform }}${{ matrix.exe }}
           retention-days: 3
 
       - name: Upload Binary Artifact (hyprlayd)
         if: inputs.upload-binary
         uses: actions/upload-artifact@v4
         with:
-          name: hyprlayd-linux-x64
-          path: artifacts/hyprlayd
+          name: hyprlayd-${{ matrix.platform }}${{ matrix.exe }}
+          path: artifacts/hyprlayd-${{ matrix.platform }}${{ matrix.exe }}
           retention-days: 3
 
       - name: Upload Binary Artifact (hyprlay-gui)
         if: inputs.upload-binary
         uses: actions/upload-artifact@v4
         with:
-          name: hyprlay-gui-linux-x64
-          path: artifacts/hyprlay-gui
+          name: hyprlay-gui-${{ matrix.platform }}${{ matrix.exe }}
+          path: artifacts/hyprlay-gui-${{ matrix.platform }}${{ matrix.exe }}
+          retention-days: 3
+
+      - name: Upload Binary Artifact (hyprlay-tray)
+        if: inputs.upload-binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: hyprlay-tray-${{ matrix.platform }}${{ matrix.exe }}
+          path: artifacts/hyprlay-tray-${{ matrix.platform }}${{ matrix.exe }}
           retention-days: 3

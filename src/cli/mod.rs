@@ -286,7 +286,7 @@ pub fn run(args: &[String]) -> i32 {
 /// Compositor outputs, answered locally: detection needs no daemon and
 /// `monitors` exists to help pick a value for `set monitor`.
 fn list_monitors() -> i32 {
-    let monitors = hyprlay_core::compositor::detect().monitors();
+    let monitors = crate::platform::compositor::detect().monitors();
     if monitors.is_empty() {
         eprintln!("error: no monitors reported (is a supported compositor running?)");
         return 1;
@@ -305,7 +305,7 @@ fn list_monitors() -> i32 {
 /// The daemon owns persistence (autosave, default on): the CLI just relays
 /// one command line and prints the reply byte-for-byte.
 fn relay(line: &str) -> i32 {
-    match hyprlay_core::ctl::send_command_line(line) {
+    match hyprlay_core::ctl::send_command_line(&crate::platform::ipc::control::Control, line) {
         Some(reply) => {
             print!("{reply}");
             0

@@ -7,7 +7,6 @@
 //! retried on every boot.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -92,7 +91,7 @@ pub fn save_to(path: &Path, token: &str, client_id: &str) {
         tracing::warn!(event = "token_save_failed", error = %e, "could not write token");
         return;
     }
-    if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
+    if let Err(e) = hyprlay_core::platform::secure_perms(path) {
         tracing::warn!(
             event = "token_chmod_failed",
             error = %e,

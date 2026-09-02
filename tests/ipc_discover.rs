@@ -1,5 +1,6 @@
 //! Integration tests for Discord IPC socket discovery: each test plants
 //! real socket files under a temp runtime dir and checks the probe order.
+#![cfg(unix)]
 
 mod common;
 

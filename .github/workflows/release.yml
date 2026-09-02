@@ -15,7 +15,7 @@ jobs:
     uses: ./.github/workflows/_release.yml
     with:
       binary-name: hyprlay
-      platforms: linux
+      platforms: multi
       build-binaries: true
       publish-crates: false
       artifact-pattern: 'hyprlay*-*'

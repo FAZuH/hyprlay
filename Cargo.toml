@@ -2,7 +2,7 @@
 name = "hyprlay"
 version = "0.2.2"
 edition = "2024"
-description = "A lightweight Linux Discord voice chat overlay for Wayland compositors"
+description = "A lightweight Discord voice chat overlay; Wayland layer-shell on Linux, winit window on Windows/macOS/X11"
 authors = ["FAZuH <mail@fazuh.com>"]
 license = "MIT"
 repository = "https://github.com/FAZuH/hyprlay"
@@ -17,14 +17,21 @@ exclude = ["scripts"]
 [workspace.dependencies]
 hyprlay-core = { version = "0.1.0", path = "crates/hyprlay-core" }
 ksni = "0.3"
+tray-icon = "0.24"
 libc = "0.2"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
+objc2-app-kit = { version = "0.3", features = ["NSEvent"] }
+core-graphics = "0.23"
+x11rb = "0.13"
 iced = { version = "0.14", default-features = false, features = [
     "wgpu",
     "tiny-skia",
     "crisp",
     "image-without-codecs",
     "tokio",
-    "wayland",
 ] }
 iced_layershell = "0.19.1"
 iced_runtime = "0.14"
@@ -38,6 +45,8 @@ ureq = { version = "2", features = ["json"] }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
 dirs = "6"
+fd-lock = "4.0"
+interprocess = { version = "2", features = ["tokio"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
@@ -51,10 +60,8 @@ clap = { version = "4.5", default-features = false, features = [
 
 [dependencies]
 hyprlay-core = { workspace = true }
-ksni = { workspace = true }
 clap = { workspace = true }
 iced = { workspace = true }
-iced_layershell = { workspace = true }
 iced_runtime = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
@@ -69,6 +76,47 @@ dirs = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
+
+# The system-tray backend is target-specific: `ksni` (D-Bus StatusNotifierItem)
+# on Linux, `tray-icon` (Shell_NotifyIcon / NSStatusItem) on Windows/macOS.
+# `tray-icon` is deliberately *not* on Linux — its Linux backend cannot deliver
+# icon-click events (the libappindicator limitation) and pulls GTK link deps the
+# tray does not otherwise need. Workspace dependency tables cannot be cfg-gated,
+# so the platform crates live in target-specific tables below.
+[target.'cfg(target_os = "windows")'.dependencies]
+tray-icon = { workspace = true }
+windows-sys = { workspace = true }
+interprocess = { workspace = true }
+
+# Windows-only build-dependency: embeds the app icon into the .exe resource
+# (Explorer/taskbar icon) via `winresource`, which shells out to the Windows
+# Resource Compiler. The block is gated on `cfg(windows)` (the host) in
+# build.rs, so a Linux host cross-building to a windows-* triple never
+# references or compiles it.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tray-icon = { workspace = true }
+objc2-app-kit = { workspace = true }
+core-graphics = { workspace = true }
+
+# Linux-only deps: the SNI tray backend + the layer-shell surface shell (and
+# iced's Wayland backend), a Linux-only concern: the winit arm builds on
+# Windows/macOS/X11 with plain iced. `x11rb` covers the X11 cursor query (the
+# Linux cursor path falls back from the Hyprland socket to X11, then no-ops on
+# Wayland). Feature sets on Linux are unchanged from a feature-complete build;
+# only non-Linux targets drop the Wayland crates.
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { workspace = true }
+x11rb = { workspace = true }
+iced = { workspace = true, features = ["wayland"] }
+iced_layershell = { workspace = true }
+
+# `libc` is used for `getuid` on unix (the Hyprland socket path resolution and
+# the launchd adapter's `gui/<uid>` domain); Windows needs neither.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 
 # Release tuning: trade build time for a smaller, faster binary.
 # lto = cross-crate optimization at link time; codegen-units = 1 gives the

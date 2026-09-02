@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 128 128">
+  <rect x="0" y="0" width="128" height="128" rx="24" fill="#000000"/>
+  <!-- Bold centered "H" -->
+  <path d="M 40 32
+           L 50 32
+           L 50 56
+           L 78 56
+           L 78 32
+           L 88 32
+           L 88 96
+           L 78 96
+           L 78 66
+           L 50 66
+           L 50 96
+           L 40 96
+           Z"
+        fill="#ffffff"/>
+</svg>

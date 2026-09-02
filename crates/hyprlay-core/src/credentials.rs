@@ -74,7 +74,6 @@ pub fn load() -> Option<AppCredentials> {
 
 /// Core of [`save`] with the path injected; see [`load_from`].
 pub fn save_to(path: &std::path::Path, creds: &AppCredentials) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     if !creds.complete() {
         return match std::fs::remove_file(path) {
             Ok(()) => Ok(()),
@@ -88,7 +87,7 @@ pub fn save_to(path: &std::path::Path, creds: &AppCredentials) -> std::io::Resul
     let payload = serde_json::to_string_pretty(creds)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(path, payload)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    crate::platform::secure_perms(path)?;
     Ok(())
 }
 
