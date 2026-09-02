@@ -1,6 +1,6 @@
 [package]
 name = "hyprlay"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 description = "A lightweight Discord voice chat overlay; Wayland layer-shell on Linux, winit window on Windows/macOS/X11"
 authors = ["FAZuH <mail@fazuh.com>"]
