@@ -1,6 +1,6 @@
-//! System tray front: a resident `hyprlay-tray` process that registers a
-//! system tray so the user can see daemon state and drive hyprlay without a
-//! terminal.
+//! System tray front: a resident tray process (`hyprlay tray`) that
+//! registers a system tray so the user can see daemon state and drive
+//! hyprlay without a terminal.
 //!
 //! Design (see the tray-menu spec):
 //! - One process, one thing: the tray outlives the daemon, which is what
@@ -45,7 +45,8 @@ const LOCK_NAME: &str = "hyprlay-tray";
 /// Poll cadence, matching the GUI refresh interval.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Entry point for the `hyprlay-tray` binary. Returns the process exit code.
+/// Entry point for the tray front (`hyprlay tray`). Returns the process
+/// exit code.
 pub fn run() -> i32 {
     // Single-instance guard held for the whole process: bind the guard to an
     // outer variable so it is not dropped at the end of the match arm. The
@@ -154,7 +155,7 @@ async fn perform(action: MenuAction, state: Option<&TrayState>) {
             Ok(Ok(())) => {
                 tracing::info!(
                     event = "tray_open_settings",
-                    "spawned or focused hyprlay-gui"
+                    "spawned or focused hyprlay gui"
                 );
             }
             Ok(Err(e)) => {
@@ -168,7 +169,7 @@ async fn perform(action: MenuAction, state: Option<&TrayState>) {
                 tracing::error!(
                     event = "tray_open_settings_join_failed",
                     error = %e,
-                    "spawn_blocking for hyprlay-gui failed"
+                    "spawn_blocking for hyprlay gui failed"
                 );
             }
         },

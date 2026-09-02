@@ -2,10 +2,13 @@
 //! three frontends into one package, `cargo` no longer stops `src/cli`
 //! from importing `crate::gui` or `crate::daemon` — that compiler wall is
 //! gone. Isolation is now a convention: the fronts may only meet at
-//! `hyprlay-core`. This test re-arms the boundary on every plain
-//! `cargo test` run (no CI change needed): it scans `src/{cli,daemon,gui}`
-//! for `use crate::<other-front>` style paths and fails listing each
-//! violation, so an accidental cross-front import turns red immediately.
+//! `hyprlay-core` and at the crate-root composition root (the `hyprlay::run`
+//! function in `src/lib.rs`, which routes `gui`/`tray` in-process and is
+//! outside the directories scanned here). This test re-arms the boundary on
+//! every plain `cargo test` run (no CI change needed): it scans
+//! `src/{cli,daemon,gui,tray}` for `use crate::<other-front>` style paths
+//! and fails listing each violation, so an accidental cross-front import
+//! turns red immediately.
 
 use std::path::Path;
 

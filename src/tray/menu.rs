@@ -33,7 +33,7 @@ impl TrayState {
 /// channel by the menu's activate closures; the poll loop performs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
-    /// Spawn the sibling `hyprlay-gui`.
+    /// Open the settings window (`hyprlay gui`).
     OpenSettings,
     /// Flip the overlay visibility over the ctl socket.
     ToggleVisible,

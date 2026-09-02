@@ -1,5 +1,5 @@
-//! Sibling-binary resolution and exec. The four hyprlay binaries are
-//! installed side by side; the launcher finds them next to its own image
+//! Sibling-binary resolution and exec. Only the daemon is a separate
+//! binary now; the launcher (`hyprlay`) finds it next to its own image
 //! (via `current_exe().parent()`), never on `$PATH`, so a partially
 //! upgraded install fails loudly instead of mixing versions.
 
@@ -7,8 +7,6 @@ use std::path::Path;
 use std::path::PathBuf;
 
 pub use hyprlay_core::bins::DAEMON_BIN;
-pub use hyprlay_core::bins::GUI_BIN;
-pub use hyprlay_core::bins::TRAY_BIN;
 
 /// Resolve `name` inside `exe_dir`, demanding that the file exists so a
 /// broken install reports here instead of exec-failing with a bare ENOENT.

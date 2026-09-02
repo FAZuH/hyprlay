@@ -21,9 +21,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
 
+use hyprlay_core::bins::CLI_BIN;
 use hyprlay_core::bins::DAEMON_BIN;
-use hyprlay_core::bins::GUI_BIN;
-use hyprlay_core::bins::TRAY_BIN;
 use hyprlay_core::daemon_control::Action;
 use hyprlay_core::daemon_control::DaemonControl;
 use hyprlay_core::daemon_control::SERVICE_UNIT;
@@ -213,26 +212,26 @@ fn desktop_text(exe_dir: &Path) -> String {
         "[Desktop Entry]\n\
          Type=Application\n\
          Name=hyprlay\n\
-         Exec={}/{}\n\
+         Exec={}/{} gui\n\
          Icon=hyprlay\n\
          Terminal=false\n",
         exe_dir.display(),
-        GUI_BIN
+        CLI_BIN
     )
 }
 
 /// Second systemd user unit, mirroring the daemon template
 /// (`Restart=on-failure`, `EnvironmentFile`, `WantedBy=default.target`) so a
-/// late-starting waybar still gets its tray. Runs the resident tray binary.
-/// `PassEnvironment` ensures the tray (and any GUI it spawns) inherits the
-/// compositor environment even when started early by systemd.
+/// late-starting waybar still gets its tray. Runs the resident tray via
+/// `hyprlay tray`. `PassEnvironment` ensures the tray (and any GUI it spawns)
+/// inherits the compositor environment even when started early by systemd.
 fn tray_unit_text(exe_dir: &Path) -> String {
     format!(
         "[Unit]\n\
          Description=hyprlay system tray menu\n\
          \n\
          [Service]\n\
-         ExecStart={}/{}\n\
+         ExecStart={}/{} tray\n\
          Restart=on-failure\n\
          PassEnvironment=WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR HYPRLAND_INSTANCE_SIGNATURE\n\
          EnvironmentFile=-%h/.config/hyprlay/service.env\n\
@@ -240,13 +239,13 @@ fn tray_unit_text(exe_dir: &Path) -> String {
          [Install]\n\
          WantedBy=default.target\n",
         exe_dir.display(),
-        TRAY_BIN
+        CLI_BIN
     )
 }
 
 /// The sibling binaries that must all be present before anything is written.
 /// A partial install would otherwise reference missing executables.
-const REQUIRED_BINS: &[&str] = &[DAEMON_BIN, GUI_BIN, TRAY_BIN];
+const REQUIRED_BINS: &[&str] = &[DAEMON_BIN];
 
 /// Names of the required sibling binaries missing from `exe_dir`.
 fn missing_bins(exe_dir: &Path) -> Vec<&'static str> {
