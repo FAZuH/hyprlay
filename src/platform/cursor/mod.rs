@@ -15,6 +15,7 @@
 use std::sync::OnceLock;
 
 use hyprlay_core::compositor::CursorSource;
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 use hyprlay_core::compositor::NoCursor;
 
 #[cfg(target_os = "linux")]

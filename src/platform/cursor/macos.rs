@@ -19,7 +19,10 @@ pub struct Macos;
 impl CursorSource for Macos {
     fn cursor_pos(&self) -> Option<(i32, i32)> {
         let p = NSEvent::mouseLocation(); // bottom-left Y-up global points
-        let bounds = CGDisplayBounds(CGMainDisplayID());
+        // Safety: display queries take no pointers and return plain values
+        // (`CGMainDisplayID` the main display id, `CGDisplayBounds` its
+        // bounds); core-graphics marks every C function `unsafe` because FFI.
+        let bounds = unsafe { CGDisplayBounds(CGMainDisplayID()) };
         let screen_h = bounds.size.height as i32;
         Some(normalize_cursor_pos(
             (p.x as i32, p.y as i32),

@@ -1,6 +1,7 @@
-//! Windows/macOS/X11 surface host: a frameless, transparent, always-on-top
-//! `iced` window moved to the computed on-screen position. This is the sole
-//! winit arm for targets without a Wayland layer-shell (not Linux); it shares
+//! Windows/macOS surface host: a frameless, transparent, always-on-top
+//! `iced` window moved to the computed on-screen position. This arm
+//! compiles only off-Linux — the layer-shell arm serves every Linux
+//! target, so X11 sessions get no overlay host; it shares
 //! the roster view, the pure state machine, and the geometry math with the
 //! layer-shell arm, and only differs in how the surface is created, placed,
 //! resized, and how hover is detected.

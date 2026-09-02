@@ -7,7 +7,7 @@
 //! - `layershell` (Linux/Wayland): the existing `iced_layershell` shell, kept
 //!   byte-identical. It anchors a layer surface to a screen edge with
 //!   margins.
-//! - `winit` (Windows/macOS/X11): a frameless, transparent, always-on-top
+//! - `winit` (Windows/macOS): a frameless, transparent, always-on-top
 //!   `iced` window moved to the computed on-screen position.
 //!
 //! The domain logic (command resolution, subscriptions, the singleton probe,

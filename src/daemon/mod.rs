@@ -4,7 +4,7 @@
 //! in the other modules, not here. This module owns the daemon lifecycle
 //! (logging, single-instance probe, credential detection) and the
 //! command-resolution logic shared by both surface hosts; the actual iced
-//! shell (layer-shell on Linux, winit on Windows/macOS/X11) lives in
+//! shell (layer-shell on Linux, winit on Windows/macOS) lives in
 //! `surface_host/`. The `hyprlay` launcher execs into this bin, and all other
 //! CLI commands are served by the `hyprlay` binary over the control socket.
 //! The wire vocabulary lives in `hyprlay-core::ctl`.

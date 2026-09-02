@@ -11,11 +11,12 @@ four binaries (`hyprlay`, `hyprlayd`, `hyprlay-gui`, `hyprlay-tray`) as thin
 `src/bin/` mains over the shared modules `src/cli`, `src/daemon`, `src/gui`, and
 `src/tray`; `crates/hyprlay-core` is the separate pure-lib crate. The
 package renders a Discord voice-channel roster on a transparent overlay
-surface — a Wayland layer-shell surface on Linux/Hyprland, a plain
-frameless always-on-top `winit` window on Windows/macOS/X11 — plus two
-control surfaces (CLI over the platform control transport,
-settings GUI) that mutate a shared runtime config. Cross-platform:
-Linux (Hyprland, other Wayland compositors, X11), Windows, macOS.
+surface — a Wayland layer-shell surface on Linux, a plain frameless
+always-on-top `winit` window on Windows/macOS — plus two control
+surfaces (CLI over the platform control transport, settings GUI) that
+mutate a shared runtime config. Cross-platform: Linux (Hyprland
+first-class; the Linux arm is layer-shell only, so X11 has no overlay
+host), Windows, macOS.
 Platform mechanics live behind ports in `src/platform/`; see
 [docs/adr/004-cross-platform-ports.md](docs/adr/004-cross-platform-ports.md).
 

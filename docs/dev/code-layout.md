@@ -46,7 +46,7 @@ other. `tests/front_isolation.rs` enforces that encapsulation boundary.
 | `src/daemon/mod.rs` | daemon shell (`run()`, effect → `Task` translation, subscription wiring, logging init) | Shell-answered commands, single-instance guard, re-exec paths, command resolution shared by both surface hosts; domain logic lives in the modules below |
 | `src/daemon/surface_host/mod.rs` | `run(cfg, auth) -> ExitCode` | `#[cfg]` dispatch between the two overlay shells; roster state and domain logic stay in the parent `daemon` module |
 | `src/daemon/surface_host/layershell.rs` | Linux/Wayland overlay shell | The existing `iced_layershell` app, behaviour byte-identical: edge anchoring with margins, hover polling |
-| `src/daemon/surface_host/winit.rs` | Windows/macOS/X11 overlay shell | Frameless, transparent, always-on-top `iced` window moved to the computed on-screen position; same shared logic and hover poll |
+| `src/daemon/surface_host/winit.rs` | Windows/macOS overlay shell | Frameless, transparent, always-on-top `iced` window moved to the computed on-screen position; same shared logic and hover poll |
 | `src/daemon/ctl_server.rs` | `incoming()` stream of `CtlRequest` | Serves the core `ControlListener` on a dedicated thread (accept loop never stalls the async host), one thread per connection; the wire vocabulary itself lives in core (single source of truth) |
 | `src/daemon/overlay/state.rs` | `Overlay` model methods (`desired_size`, `displayed`, `apply_discord`) | Roster filtering, sizing, avatar cache/dedup |
 | `src/daemon/overlay/geometry.rs` | `anchor/margin/drag(cfg, …)` | All screen-placement math |

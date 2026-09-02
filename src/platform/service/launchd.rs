@@ -40,8 +40,9 @@ impl Launchd {
     }
 
     fn uid() -> u32 {
-        // Real user id on macOS; safe (no pointer return, no args).
-        libc::getuid()
+        // Real user id on macOS. Safety: `getuid` takes no arguments and
+        // returns a plain value; libc declares it `unsafe` because FFI.
+        unsafe { libc::getuid() }
     }
 
     /// The plist: run the sibling daemon at login and keep it alive.

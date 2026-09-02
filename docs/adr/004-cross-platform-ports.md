@@ -163,3 +163,9 @@ the composition points (`src/daemon/surface_host/mod.rs`,
   for symmetry with its tokio consumer (the async daemon protocol code;
   core stays sync and runtime-free). Both keep the hexagonal shape — a
   port beside the adapters and consumer that serve it.
+- X11 has no overlay host. The `SurfaceHost` dispatch is
+  `#[cfg(target_os)]`, so every Linux target — X11 included — takes the
+  layer-shell arm, and the winit arm compiles only off-Linux. X11 keeps
+  only the `XQueryPointer` cursor adapter (dormant until an X11 host
+  exists). Runtime session-type dispatch (Wayland versus X11) is a
+  possible follow-up, not part of this port.
