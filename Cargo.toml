@@ -88,6 +88,14 @@ tray-icon = { workspace = true }
 windows-sys = { workspace = true }
 interprocess = { workspace = true }
 
+# Windows-only build-dependency: embeds the app icon into the .exe resource
+# (Explorer/taskbar icon) via `winresource`, which shells out to the Windows
+# Resource Compiler. The block is gated on `cfg(windows)` (the host) in
+# build.rs, so a Linux host cross-building to a windows-* triple never
+# references or compiles it.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 tray-icon = { workspace = true }
 objc2-app-kit = { workspace = true }

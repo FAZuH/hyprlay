@@ -7,6 +7,7 @@
 pub mod compositor;
 pub mod cursor;
 pub mod host;
+pub mod icon;
 pub mod ipc;
 pub mod service;
 pub mod tray;
