@@ -28,8 +28,6 @@ pub fn resolve_sibling(exe_dir: &Path, name: &str) -> Result<PathBuf, String> {
 /// never returns (the image becomes the sibling's); on failure it prints
 /// the resolution/exec error and returns exit code 1.
 pub fn exec_sibling(name: &str) -> i32 {
-    use std::os::unix::process::CommandExt;
-
     // exec() keeps our PID, so supervisors that track the launcher by PID
     // or cgroup keep tracking the daemon/GUI it becomes.
     let exe = match std::env::current_exe() {
@@ -45,9 +43,28 @@ pub fn exec_sibling(name: &str) -> i32 {
     };
     match resolve_sibling(dir, name) {
         Ok(path) => {
-            let err = std::process::Command::new(path).exec();
-            eprintln!("error: could not start {name}: {err}");
-            1
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                let err = std::process::Command::new(path).exec();
+                eprintln!("error: could not start {name}: {err}");
+                1
+            }
+            #[cfg(not(unix))]
+            {
+                // Windows has no `exec`. Approximate re-exec by spawning the
+                // sibling detached and exiting, so the launcher is a short
+                // stepping stone. The child inherits the launcher's stdio
+                // handles; the PID changes (no exec), which a PID- or
+                // cgroup-tracking supervisor would notice.
+                match std::process::Command::new(path).spawn() {
+                    Ok(_child) => std::process::exit(0),
+                    Err(e) => {
+                        eprintln!("error: could not start {name}: {e}");
+                        1
+                    }
+                }
+            }
         }
         Err(message) => {
             eprintln!("{message}");

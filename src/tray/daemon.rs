@@ -8,11 +8,10 @@
 //! `DAEMON_BIN` / `GUI_BIN` consts and the generic `spawn_sibling`) with the
 //! other fronts is tracked separately.
 
-use std::process::Stdio;
-
 use hyprlay_core::bins::GUI_APP_ID;
 use hyprlay_core::bins::GUI_BIN;
 use hyprlay_core::bins::GUI_LOCK;
+use hyprlay_core::platform::Platform;
 use hyprlay_core::singleton::AcquireError;
 
 /// Spawn the sibling `hyprlay-gui` (Open settings).
@@ -120,8 +119,15 @@ fn hyprctl_focus(ident: &str) -> Result<(), String> {
 }
 
 fn is_hyprland() -> bool {
-    std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some()
-        || hyprlay_core::compositor::hyprland::has_socket()
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some()
+            || crate::platform::compositor::hyprland::has_socket()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
 }
 
 fn sibling_path(name: &str) -> Result<std::path::PathBuf, String> {
@@ -185,14 +191,11 @@ pub fn spawn_sibling(name: &str) -> Result<(), String> {
             path.display()
         ));
     }
-    use std::os::unix::process::CommandExt;
-    std::process::Command::new(&path)
-        .process_group(0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(|_| ())
+    let mut cmd = std::process::Command::new(&path);
+    // Own process group + null stdio + no wait: the child must outlive the
+    // tray and never hold its terminal.
+    crate::platform::host::host()
+        .spawn(&mut cmd)
         .map_err(|e| format!("error: could not start {name}: {e}"))
 }
 

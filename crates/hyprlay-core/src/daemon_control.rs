@@ -5,17 +5,19 @@
 //! one source of truth. Each front keeps its own `DaemonState` / poll state
 //! machine; what is shared is the *decision*: given a [`Toggle`] and whether
 //! the systemd user unit is installed, which [`Action`] should run, and how
-//! each action is performed by [`SystemControl`].
+//! each action is performed through a [`DaemonControl`] (backed by a
+//! [`ServiceManager`]).
 //!
 //! The Stop policy differs per front: the GUI stops via `systemctl stop`
 //! when the unit is installed, while the tray always quits over the ctl
 //! socket (`quit`) so it can tear down a daemon started by any supervisor,
 //! sibling, or socket-activated unit. [`StopPolicy`] carries that choice.
+//!
+//! This module is platform-neutral: the concrete systemctl / spawn / socket
+//! primitives live in the host package's `src/platform/service/` adapters.
+//! Only the decision logic and the port traits are here.
 
-use std::process::Stdio;
-
-use crate::ctl;
-use crate::domain::Command;
+use std::path::Path;
 
 /// Which direction a toggle press drives the daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,9 +51,50 @@ pub trait DaemonControl: Send + Sync {
     fn perform(&self, action: Action) -> Result<(), String>;
 }
 
+/// The service-management boundary behind a [`DaemonControl`]: the systemctl
+/// invocations, the detached sibling daemon spawn, the socket quit, and the
+/// install/uninstall of the autostart config. The host package implements it
+/// per OS (systemd on Linux, launchd on macOS, Windows startup on Windows).
+///
+/// [`install`](Self::install) and [`uninstall`](Self::uninstall) default to a
+/// clear "unsupported" error so an OS that cannot host the hyprlay service
+/// reports the gap instead of failing opaquely; each real backend overrides
+/// them. The install payload (unit / plist / Run-key) is backend-specific, so
+/// the caller only supplies the paths and whether to start right away and
+/// receives the human-readable report lines back.
+pub trait ServiceManager: Send + Sync {
+    /// Whether the user service unit for the daemon is installed.
+    fn unit_installed(&self) -> bool;
+    /// Run `systemctl --user <subcommand> <SERVICE_UNIT>`.
+    fn systemctl(&self, subcommand: &str) -> Result<(), String>;
+    /// Detached spawn of the sibling daemon binary.
+    fn spawn_daemon(&self) -> Result<(), String>;
+    /// Quit the running daemon over the control socket.
+    fn quit_via_socket(&self) -> Result<(), String>;
+    /// Install the autostart service config next to `exe_dir` and register
+    /// it; `start` controls whether it begins running immediately. Returns
+    /// one human-readable line per step.
+    fn install(
+        &self,
+        exe_dir: &Path,
+        config_base: &Path,
+        data_base: &Path,
+        start: bool,
+    ) -> Result<Vec<String>, String> {
+        let _ = (exe_dir, config_base, data_base, start);
+        Err("install is not supported on this platform".to_string())
+    }
+    /// Uninstall the autostart service config and deregister it. Returns one
+    /// human-readable line per step.
+    fn uninstall(&self, config_base: &Path, data_base: &Path) -> Result<Vec<String>, String> {
+        let _ = (config_base, data_base);
+        Err("uninstall is not supported on this platform".to_string())
+    }
+}
+
 /// systemd user unit name. Its presence routes Start/Stop through systemctl;
 /// its absence falls back to spawn/socket-quit.
-const SERVICE_UNIT: &str = "hyprlay";
+pub const SERVICE_UNIT: &str = "hyprlay";
 
 /// Map a toggle + unit presence to the mechanism.
 ///
@@ -84,90 +127,58 @@ pub fn execute_toggle(
     control.perform(action).err()
 }
 
-/// Real boundary: systemctl for the unit paths, detached sibling spawn and
-/// the control socket otherwise.
-pub struct SystemControl;
+#[cfg(test)]
+mod tests {
+    use super::Action;
+    use super::StopPolicy;
+    use super::Toggle;
+    use super::plan_action;
 
-impl DaemonControl for SystemControl {
-    fn unit_installed(&self) -> bool {
-        // Exit success is the whole verdict; the printed unit is noise.
-        std::process::Command::new("systemctl")
-            .args(["--user", "cat", SERVICE_UNIT])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-    }
-
-    fn perform(&self, action: Action) -> Result<(), String> {
-        match action {
-            Action::SystemctlStart => systemctl("start"),
-            Action::SystemctlStop => systemctl("stop"),
-            Action::SpawnDaemon => spawn_sibling_daemon(),
-            Action::SocketQuit => quit_via_socket(),
+    /// The full decision matrix for one toggle press. `plan_action` is the
+    /// single source of truth for every front (GUI, tray, CLI) and every
+    /// backend (systemd, launchd, Windows startup), so no platform input is
+    /// needed: the shape of the plan is decided purely by the toggle, the
+    /// unit presence, and the stop policy.
+    #[test]
+    fn start_with_unit_installed_plans_service_start() {
+        for stop in [StopPolicy::ViaSystemctl, StopPolicy::ViaSocket] {
+            assert_eq!(
+                plan_action(Toggle::Start, true, stop),
+                Action::SystemctlStart,
+            );
         }
     }
-}
 
-/// Run one systemctl subcommand on our user unit; failure text carries
-/// systemctl's own stderr so the caller can explain what went wrong.
-pub fn systemctl(subcommand: &str) -> Result<(), String> {
-    let output = std::process::Command::new("systemctl")
-        .args(["--user", subcommand, SERVICE_UNIT])
-        .output()
-        .map_err(|e| format!("error: could not run systemctl: {e}"))?;
-    if output.status.success() {
-        return Ok(());
+    #[test]
+    fn start_without_unit_plans_a_spawn() {
+        for stop in [StopPolicy::ViaSystemctl, StopPolicy::ViaSocket] {
+            assert_eq!(plan_action(Toggle::Start, false, stop), Action::SpawnDaemon,);
+        }
     }
-    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let detail = if detail.is_empty() {
-        format!("exit {}", output.status)
-    } else {
-        detail
-    };
-    Err(format!("error: systemctl {subcommand} failed: {detail}"))
-}
 
-/// Detached sibling spawn of `hyprlayd` next to this binary. A gui→cli
-/// dependency would drag clap into this binary, so the resolution is kept
-/// here, next to the toggle routing it serves. The generic "spawn any
-/// sibling" helper (used by the tray's Open-settings action) is intentionally
-/// not here — that sibling-binary surface is unified separately.
-fn spawn_sibling_daemon() -> Result<(), String> {
-    use crate::bins::DAEMON_BIN;
-
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("error: could not locate the running hyprlay binary: {e}"))?;
-    let Some(dir) = exe.parent() else {
-        return Err(format!(
-            "error: could not find the directory of {}",
-            exe.display()
-        ));
-    };
-    let path = dir.join(DAEMON_BIN);
-    if !path.exists() {
-        return Err(format!(
-            "error: {DAEMON_BIN} not found next to the running hyprlay binary (expected {})\n\
-             the hyprlay binaries must be installed together",
-            path.display()
-        ));
+    #[test]
+    fn systemctl_stop_only_when_the_unit_is_the_supervisor() {
+        assert_eq!(
+            plan_action(Toggle::Stop, true, StopPolicy::ViaSystemctl),
+            Action::SystemctlStop
+        );
     }
-    use std::os::unix::process::CommandExt;
-    // Own process group + null stdio + no wait: the daemon must outlive this
-    // binary and never hold its terminal. A double start is already guarded
-    // daemon-side by the socket probe.
-    std::process::Command::new(&path)
-        .process_group(0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("error: could not start {DAEMON_BIN}: {e}"))
-}
 
-fn quit_via_socket() -> Result<(), String> {
-    ctl::send_command_line(&Command::Quit.to_string())
-        .map(|_| ())
-        .ok_or_else(|| "error: daemon unreachable".to_string())
+    #[test]
+    fn systemctl_stop_falls_back_to_socket_when_no_unit() {
+        assert_eq!(
+            plan_action(Toggle::Stop, false, StopPolicy::ViaSystemctl),
+            Action::SocketQuit
+        );
+    }
+
+    #[test]
+    fn socket_stop_always_quits_over_the_socket() {
+        for installed in [true, false] {
+            assert_eq!(
+                plan_action(Toggle::Stop, installed, StopPolicy::ViaSocket),
+                Action::SocketQuit
+            );
+        }
+    }
 }
