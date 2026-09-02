@@ -45,7 +45,6 @@ use hyprlay_core::credentials::AppCredentials;
 use hyprlay_core::ctl;
 use hyprlay_core::daemon_control::DaemonControl;
 use hyprlay_core::daemon_control::StopPolicy;
-use hyprlay_core::daemon_control::SystemControl;
 use hyprlay_core::daemon_control::Toggle;
 use hyprlay_core::domain::Command;
 use hyprlay_core::domain::HexColor;
@@ -87,6 +86,8 @@ use theme::panel;
 use theme::plain_style;
 use theme::primary_style;
 use theme::theme_for;
+
+use crate::platform::service::SystemControl;
 
 #[derive(Debug, Clone)]
 enum Message {
@@ -212,16 +213,7 @@ pub fn run() -> i32 {
     };
 
     iced::application(boot, update, view)
-        .window(iced::window::Settings {
-            size: iced::Size::new(800.0, 620.0),
-            min_size: Some(iced::Size::new(640.0, 480.0)),
-            resizable: true,
-            platform_specific: iced::window::settings::PlatformSpecific {
-                application_id: hyprlay_core::bins::GUI_APP_ID.to_string(),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
+        .window(window_settings())
         // Fixed dark theme, Discord-flavored; never follows the system.
         .theme(theme_for)
         .subscription(subscribe)
@@ -231,6 +223,37 @@ pub fn run() -> i32 {
             eprintln!("gui failed to start: {e}");
             1
         })
+}
+
+/// The GUI window settings. `application_id` is a Linux-only (Wayland/X11)
+/// `PlatformSpecific` field; other platforms get the default settings so the
+/// winit window still builds.
+fn window_settings() -> iced::window::Settings {
+    iced::window::Settings {
+        size: iced::Size::new(800.0, 620.0),
+        min_size: Some(iced::Size::new(640.0, 480.0)),
+        resizable: true,
+        platform_specific: platform_specific(),
+        ..Default::default()
+    }
+}
+
+/// The platform-specific window settings. `PlatformSpecific` is a different
+/// struct per target: on Linux it carries the Wayland/X11 `application_id`;
+/// elsewhere it is the winit variant and we keep the defaults.
+fn platform_specific() -> iced::window::settings::PlatformSpecific {
+    #[cfg(target_os = "linux")]
+    {
+        use iced::window::settings::PlatformSpecific;
+        PlatformSpecific {
+            application_id: hyprlay_core::bins::GUI_APP_ID.to_string(),
+            ..Default::default()
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        iced::window::settings::PlatformSpecific::default()
+    }
 }
 
 fn boot() -> (Gui, Task<Message>) {
@@ -264,7 +287,7 @@ fn boot() -> (Gui, Task<Message>) {
             Task::perform(send(Command::Dump.to_string()), Message::Applied),
             Task::perform(
                 async {
-                    hyprlay_core::compositor::detect()
+                    crate::platform::compositor::detect()
                         .monitors()
                         .into_iter()
                         .map(|m| m.name)
@@ -288,7 +311,8 @@ fn subscribe(_gui: &Gui) -> Subscription<Message> {
 /// Blocking socket round-trip off the UI thread.
 async fn send(command: String) -> String {
     tokio::task::spawn_blocking(move || {
-        ctl::send_command_line(&command).unwrap_or_else(|| "error: daemon unreachable".into())
+        ctl::send_command_line(&crate::platform::ipc::control::Control, &command)
+            .unwrap_or_else(|| "error: daemon unreachable".into())
     })
     .await
     .unwrap_or_else(|_| "error: command task failed".into())
@@ -1367,7 +1391,7 @@ mod tests {
             last_reply: String::new(),
             daemon_state: daemon::DaemonState::Connecting,
             auto_start: daemon::AutoStart::watching(),
-            control: Arc::new(hyprlay_core::daemon_control::SystemControl),
+            control: Arc::new(crate::platform::service::SystemControl),
             dirty: false,
             monitors: Vec::new(),
             section: Section::Position,
