@@ -100,6 +100,7 @@ pub(crate) fn run(cfg: Config, auth: Option<OwnAppAuth>) -> ExitCode {
         transparent: true,
         resizable: false,
         visible: true,
+        icon: Some(crate::platform::icon::window_icon()),
         level: iced::window::Level::AlwaysOnTop,
         ..Default::default()
     })

@@ -8,6 +8,7 @@
 - Added tray menu support on Windows and macOS
 - Added install and uninstall on Windows and macOS
 - Added hyprlay-tray binary to release downloads
+- Added an app icon shown in launchers, the window titlebar, and the Explorer/taskbar icon
 
 ## 0.2.2 (2026-09-01)
 

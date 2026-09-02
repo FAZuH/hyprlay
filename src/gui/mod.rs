@@ -233,6 +233,7 @@ fn window_settings() -> iced::window::Settings {
         size: iced::Size::new(800.0, 620.0),
         min_size: Some(iced::Size::new(640.0, 480.0)),
         resizable: true,
+        icon: Some(crate::platform::icon::window_icon()),
         platform_specific: platform_specific(),
         ..Default::default()
     }

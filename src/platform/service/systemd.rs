@@ -10,6 +10,10 @@
 //! sequence. Only the location moved (host CLI + core → this host adapter) so
 //! `hyprlay-core` stays platform-neutral and every OS's install/autostart
 //! routes through the same `ServiceManager` port.
+//!
+//! One addition on top of the ported behaviour: the desktop entry now carries
+//! `Icon=hyprlay` and install/uninstall also manage the hicolor theme icon
+//! files (SVG + PNG raster sizes) so the launcher shows the brand mark.
 
 use std::fs;
 use std::path::Path;
@@ -168,6 +172,19 @@ fn desktop_path(data_base: &Path) -> PathBuf {
     data_base.join("applications/hyprlay.desktop")
 }
 
+/// The hicolor sizes installed for the app icon. `scalable` carries the SVG;
+/// each raster size carries a PNG. XDG icon launchers look up `Icon=hyprlay`
+/// under `hicolor/<size>/apps/hyprlay.<ext>`.
+const ICON_SIZES: &[u32] = &[48, 64, 128, 256];
+
+fn icon_svg_path(data_base: &Path) -> PathBuf {
+    data_base.join("icons/hicolor/scalable/apps/hyprlay.svg")
+}
+
+fn icon_png_path(data_base: &Path, size: u32) -> PathBuf {
+    data_base.join(format!("icons/hicolor/{size}x{size}/apps/hyprlay.png"))
+}
+
 fn tray_unit_path(config_base: &Path) -> PathBuf {
     config_base.join("systemd/user/hyprlay-tray.service")
 }
@@ -197,6 +214,7 @@ fn desktop_text(exe_dir: &Path) -> String {
          Type=Application\n\
          Name=hyprlay\n\
          Exec={}/{}\n\
+         Icon=hyprlay\n\
          Terminal=false\n",
         exe_dir.display(),
         GUI_BIN
@@ -275,6 +293,8 @@ pub fn install(
         format!("wrote {}", desktop.display()),
     ];
 
+    install_icon(data_base, &mut report)?;
+
     systemctl
         .run(&["daemon-reload"])
         .map_err(|e| format!("systemctl --user daemon-reload failed: {e}"))?;
@@ -318,6 +338,7 @@ pub fn uninstall(
     remove_reported(&unit_path(config_base), &mut report)?;
     remove_reported(&tray_unit_path(config_base), &mut report)?;
     remove_reported(&desktop_path(data_base), &mut report)?;
+    uninstall_icon(data_base, &mut report)?;
     Ok(report)
 }
 
@@ -327,6 +348,47 @@ fn write_file(path: &Path, contents: &str) -> Result<(), String> {
             .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
     }
     fs::write(path, contents).map_err(|e| format!("could not write {}: {e}", path.display()))
+}
+
+fn write_bytes(path: &Path, contents: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+    }
+    fs::write(path, contents).map_err(|e| format!("could not write {}: {e}", path.display()))
+}
+
+/// Install the app icon into the user's hicolor theme so the `Icon=hyprlay`
+/// desktop entry resolves to a real image. The SVG scales to any size; the
+/// PNG raster sizes cover launchers that do not read SVG. Bytes are bundled
+/// into the binary (same pattern as the tray icons). Returns the paths written.
+fn install_icon(data_base: &Path, report: &mut Vec<String>) -> Result<(), String> {
+    let svg = icon_svg_path(data_base);
+    write_bytes(&svg, include_bytes!("../../../assets/hyprlay.svg"))?;
+    report.push(format!("wrote {}", svg.display()));
+
+    for size in ICON_SIZES {
+        let png = icon_png_path(data_base, *size);
+        let bytes: &[u8] = match *size {
+            48 => include_bytes!("../../../assets/hyprlay-48.png"),
+            64 => include_bytes!("../../../assets/hyprlay-64.png"),
+            128 => include_bytes!("../../../assets/hyprlay-128.png"),
+            256 => include_bytes!("../../../assets/hyprlay-256.png"),
+            _ => unreachable!(),
+        };
+        write_bytes(&png, bytes)?;
+        report.push(format!("wrote {}", png.display()));
+    }
+    Ok(())
+}
+
+/// Remove the installed app icon files. `scalable` SVG plus each raster size.
+fn uninstall_icon(data_base: &Path, report: &mut Vec<String>) -> Result<(), String> {
+    remove_reported(&icon_svg_path(data_base), report)?;
+    for size in ICON_SIZES {
+        remove_reported(&icon_png_path(data_base, *size), report)?;
+    }
+    Ok(())
 }
 
 fn remove_reported(path: &Path, report: &mut Vec<String>) -> Result<(), String> {
