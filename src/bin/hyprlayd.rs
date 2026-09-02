@@ -1,6 +1,6 @@
-//! Thin daemon main: the layer-shell application shell lives in the
+//! Thin daemon main: the platform-selected surface-host shell lives in the
 //! `hyprlay` lib (`daemon` module).
 
-fn main() -> iced_layershell::Result {
+fn main() -> std::process::ExitCode {
     hyprlay::daemon::run()
 }

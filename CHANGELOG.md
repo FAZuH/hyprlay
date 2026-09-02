@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Platforms
+
+- Added Windows and macOS support
+- Added tray menu support on Windows and macOS
+- Added install and uninstall on Windows and macOS
+- Added hyprlay-tray binary to release downloads
+
 ## 0.2.2 (2026-09-01)
 
 ### Tray

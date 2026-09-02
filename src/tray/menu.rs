@@ -1,8 +1,9 @@
 //! Pure tray menu model and status-reply parsing.
 //!
-//! Everything here is free of `ksni` and DBus so it can be unit-tested in
-//! isolation. The [`ksni`] [`Tray`](crate::tray::Tray) impl in `mod.rs`
-//! maps [`build_menu`] onto real menu items.
+//! Everything here is free of `ksni`, `tray-icon`, and any concrete backend so
+//! it can be unit-tested in isolation. The platform adapters in
+//! [`crate::platform::tray`] map [`build_menu`] onto real menu items, all
+//! driven through the shared [`Tray`](crate::tray::Tray) port.
 
 /// A snapshot of daemon state the tray renders. Doubles as the diff-gate
 /// key: two identical snapshots must not trigger a `handle.update`.

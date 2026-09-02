@@ -2,11 +2,11 @@
 //! drag deltas move it. Pure functions over (Config, margins) — no runtime
 //! state, no iced types beyond the Wayland anchor vocabulary.
 
+use hyprlay_core::compositor::Monitor;
 use hyprlay_core::config::AnchorMode;
 use hyprlay_core::config::Config;
 use hyprlay_core::config::HorizontalAnchor;
 use hyprlay_core::config::VerticalAnchor;
-use iced_layershell::reexport::Anchor;
 
 /// Margins are clamped so a long drag session can't overflow i32 or push
 /// the surface into undefined compositor territory.
@@ -30,7 +30,13 @@ fn effective_vertical(cfg: &Config) -> VerticalAnchor {
 /// The `anchor` config overrides the vertical glue edge — anchored top the
 /// list grows downward as users join, anchored bottom it grows upward, so
 /// the overlay never runs off screen.
-pub fn anchor(cfg: &Config) -> Anchor {
+///
+/// Linux/Wayland-only: this returns the layer-shell `Anchor` type, which does
+/// not exist on the winit arm. The winit arm positions the window absolutely
+/// via [`winit_frame`] instead.
+#[cfg(target_os = "linux")]
+pub fn anchor(cfg: &Config) -> iced_layershell::reexport::Anchor {
+    use iced_layershell::reexport::Anchor;
     let horizontal = match cfg.horizontal {
         HorizontalAnchor::Left => Anchor::Left,
         HorizontalAnchor::Right => Anchor::Right,
@@ -76,14 +82,7 @@ pub fn overlay_rect(
 ) -> Rect {
     let (top, right, bottom, left) = offset;
     let (w, h) = size;
-    let (mx, my, mw, mh) = monitor
-        .map(|m| {
-            let scale = if m.scale == 0.0 { 1.0 } else { m.scale };
-            let mw = (m.width as f32 / scale) as i32;
-            let mh = (m.height as f32 / scale) as i32;
-            (m.x, m.y, mw, mh)
-        })
-        .unwrap_or((0, 0, 0, 0));
+    let (mx, my, mw, mh) = monitor.map(monitor_logical).unwrap_or((0, 0, 0, 0));
     let x = match cfg.horizontal {
         HorizontalAnchor::Left => mx + left,
         HorizontalAnchor::Right => {
@@ -114,6 +113,60 @@ pub fn overlay_rect(
     Rect { x, y, w, h }
 }
 
+/// The monitor the overlay should sit on: the named one if configured and
+/// present, else the currently-active output, else none. Pure so the winit
+/// arm can resolve a target from either the [`Compositor`] port or an
+/// iced/winit monitor list with the same rules (and the same unit tests).
+pub fn pick_monitor<'a>(monitors: &'a [Monitor], name: Option<&str>) -> Option<&'a Monitor> {
+    if let Some(name) = name
+        && let Some(m) = monitors.iter().find(|m| m.name == name)
+    {
+        return Some(m);
+    }
+    monitors.iter().find(|m| m.active)
+}
+
+/// One monitor's logical (scale-corrected) extent in global screen coords:
+/// its origin plus its width/height divided by the scale factor. Layer-shell
+/// and winit both reason about logical pixels, so a scaled output's physical
+/// geometry is normalised here before any placement math.
+pub fn monitor_logical(m: &Monitor) -> (i32, i32, i32, i32) {
+    let scale = if m.scale == 0.0 { 1.0 } else { m.scale };
+    let w = (m.width as f32 / scale) as i32;
+    let h = (m.height as f32 / scale) as i32;
+    (m.x, m.y, w, h)
+}
+
+/// The winit arm's on-screen frame: the top-left corner and size of the
+/// overlay window in logical pixels, for a given monitor. Reuses the same
+/// anchor/margin placement math as [`overlay_rect`] — the two arms agree on
+/// where the overlay sits, only how it is *applied* to the surface differs.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+pub fn winit_frame(
+    cfg: &Config,
+    size: (u32, u32),
+    offset: (i32, i32, i32, i32),
+    monitor: Option<&Monitor>,
+) -> WinitFrame {
+    let rect = overlay_rect(cfg, size, offset, monitor);
+    WinitFrame {
+        x: rect.x as f32,
+        y: rect.y as f32,
+        w: rect.w as f32,
+        h: rect.h as f32,
+    }
+}
+
+/// A pure, renderer-free description of where a winit window belongs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+pub struct WinitFrame {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
 /// Apply a drag delta: anchored sides absorb the motion. Center-horizontal
 /// uses both sides inversely so the surface stays between them.
 pub fn drag(margin: (i32, i32, i32, i32), cfg: &Config, dx: i32, dy: i32) -> (i32, i32, i32, i32) {
@@ -135,6 +188,9 @@ pub fn drag(margin: (i32, i32, i32, i32), cfg: &Config, dx: i32, dy: i32) -> (i3
 
 #[cfg(test)]
 mod tests {
+    use hyprlay_core::compositor::macos_flip_y;
+    use hyprlay_core::compositor::physical_to_logical;
+
     use super::*;
 
     fn cfg(h: HorizontalAnchor, v: VerticalAnchor) -> Config {
@@ -147,8 +203,10 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn anchor_combines_configured_edges() {
+        use iced_layershell::reexport::Anchor;
         assert_eq!(
             anchor(&cfg(HorizontalAnchor::Left, VerticalAnchor::Top)),
             Anchor::Top | Anchor::Left
@@ -163,8 +221,10 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn anchor_override_decides_the_glue_edge() {
+        use iced_layershell::reexport::Anchor;
         // Auto follows the position's vertical edge...
         assert!(anchor(&cfg(HorizontalAnchor::Left, VerticalAnchor::Top)).contains(Anchor::Top));
         // ...an explicit anchor overrides it.
@@ -385,5 +445,89 @@ mod tests {
         let rect = overlay_rect(&cfg, (300, 100), (12, 16, 12, 16), Some(&m));
         // logical height 960 → y = 960 -100 -12 =848
         assert_eq!(rect.y, 848);
+    }
+
+    #[test]
+    fn pick_monitor_prefers_named_then_active() {
+        let monitors = vec![
+            Monitor {
+                name: "test".to_string(),
+                active: false,
+                ..Monitor::default()
+            },
+            Monitor {
+                name: "HDMI-A-1".to_string(),
+                active: false,
+                ..Monitor::default()
+            },
+            Monitor {
+                name: "eDP-1".to_string(),
+                active: true,
+                ..Monitor::default()
+            },
+        ];
+        // Always names the requested output even when it is not active.
+        assert_eq!(
+            pick_monitor(&monitors, Some("HDMI-A-1")).map(|m| m.name.as_str()),
+            Some("HDMI-A-1")
+        );
+        // Unknown name falls back to the active one.
+        assert_eq!(
+            pick_monitor(&monitors, Some("DP-9")).map(|m| m.name.as_str()),
+            Some("eDP-1")
+        );
+        // No name → active.
+        assert_eq!(
+            pick_monitor(&monitors, None).map(|m| m.name.as_str()),
+            Some("eDP-1")
+        );
+        // Empty list → none.
+        assert_eq!(pick_monitor(&[], None), None);
+    }
+
+    #[test]
+    fn monitor_logical_resolves_scale_to_logical_pixels() {
+        // 1920x1200 @1.25 → logical 1536x960, origin preserved.
+        let m = monitor_scaled(10, 20, 1920, 1200, 1.25);
+        assert_eq!(monitor_logical(&m), (10, 20, 1536, 960));
+        // A 0 scale is degenerate → treated as 1.0.
+        let zero = Monitor {
+            scale: 0.0,
+            ..monitor(0, 0, 1920, 1080)
+        };
+        assert_eq!(monitor_logical(&zero), (0, 0, 1920, 1080));
+    }
+
+    #[test]
+    fn physical_to_logical_rounds_to_nearest_logical_pixel() {
+        assert_eq!(physical_to_logical(1920, 1.25), 1536);
+        assert_eq!(physical_to_logical(1920, 1.0), 1920);
+        assert_eq!(physical_to_logical(1920, 0.0), 1920); // degenerate scale
+        assert_eq!(physical_to_logical(-100, 2.0), -50);
+    }
+
+    #[test]
+    fn macos_flip_y_converts_top_left_to_bottom_left_origin() {
+        // A point 100px from the top of a 1080 logical space is 980 from the
+        // bottom under the macOS Y-up convention.
+        assert_eq!(macos_flip_y(100, 1080), 980);
+        assert_eq!(macos_flip_y(0, 1080), 1080);
+        assert_eq!(macos_flip_y(1080, 1080), 0);
+    }
+
+    #[test]
+    fn winit_frame_matches_the_layershell_overlay_rect() {
+        let cfg = cfg(HorizontalAnchor::Left, VerticalAnchor::Top);
+        let m = monitor(10, 20, 1920, 1080);
+        let frame = winit_frame(&cfg, (300, 100), (24, 16, 24, 16), Some(&m));
+        assert_eq!(
+            frame,
+            WinitFrame {
+                x: 26.0,
+                y: 44.0,
+                w: 300.0,
+                h: 100.0
+            }
+        );
     }
 }

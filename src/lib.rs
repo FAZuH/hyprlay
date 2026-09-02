@@ -8,6 +8,12 @@
 //! the fronts must only meet at `hyprlay-core`. `tests/front_isolation.rs`
 //! enforces it on every `cargo test`.
 
+//! The platform-crust adapters live outside the fronts (see `src/platform/`);
+//! the isolation scanner only sweeps the four front modules.
+
+#[doc(hidden)]
+pub mod platform;
+
 #[doc(hidden)]
 pub mod cli;
 #[doc(hidden)]

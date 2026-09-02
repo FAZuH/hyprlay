@@ -4,6 +4,7 @@
 //! (ticket 02 test hygiene). systemctl itself is never shelled out to: the
 //! flow takes an injectable [`install::Systemctl`] runner and the spy below
 //! records every call.
+#![cfg(target_os = "linux")]
 
 mod common;
 
@@ -11,9 +12,9 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 
 use common::unique_temp_dir;
-use hyprlay::cli::install::Systemctl;
-use hyprlay::cli::install::install;
-use hyprlay::cli::install::uninstall;
+use hyprlay::platform::service::systemd::Systemctl;
+use hyprlay::platform::service::systemd::install;
+use hyprlay::platform::service::systemd::uninstall;
 
 const DAEMON_RELOAD: &str = "systemctl --user daemon-reload";
 const ENABLE_NOW: &str = "systemctl --user enable --now hyprlay";
@@ -169,9 +170,9 @@ fn install_writes_the_unit_file_with_pinned_contents() {
     world.with_sibling_bins();
 
     install(
+        &world.bin_dir,
         &world.config_base,
         &world.data_base,
-        &world.bin_dir,
         true,
         &Spy::recording(),
     )
@@ -189,9 +190,9 @@ fn install_writes_the_desktop_entry_with_pinned_contents() {
     world.with_sibling_bins();
 
     install(
+        &world.bin_dir,
         &world.config_base,
         &world.data_base,
-        &world.bin_dir,
         true,
         &Spy::recording(),
     )
@@ -210,9 +211,9 @@ fn install_runs_daemon_reload_then_enable_now_both_units_in_order() {
     let spy = Spy::recording();
 
     install(
+        &world.bin_dir,
         &world.config_base,
         &world.data_base,
-        &world.bin_dir,
         true,
         &spy,
     )
@@ -234,9 +235,9 @@ fn install_writes_the_tray_unit_file_with_pinned_contents() {
     world.with_sibling_bins();
 
     install(
+        &world.bin_dir,
         &world.config_base,
         &world.data_base,
-        &world.bin_dir,
         true,
         &Spy::recording(),
     )
@@ -255,9 +256,9 @@ fn no_start_still_writes_files_but_skips_the_enable_call() {
     let spy = Spy::recording();
 
     install(
+        &world.bin_dir,
         &world.config_base,
         &world.data_base,
-        &world.bin_dir,
         false,
         &spy,
     )
@@ -285,16 +286,16 @@ fn install_overwrites_existing_files_idempotently() {
     std::fs::write(world.desktop(), b"[stale]").unwrap();
 
     let first = install(
+        &world.bin_dir,
         &world.config_base,
         &world.data_base,
-        &world.bin_dir,
         true,
         &Spy::recording(),
     );
     let second = install(
+        &world.bin_dir,
         &world.config_base,
         &world.data_base,
-        &world.bin_dir,
         true,
         &Spy::recording(),
     );
@@ -320,9 +321,9 @@ fn failed_daemon_reload_reports_the_step_and_never_enables() {
     let spy = Spy::failing_at(DAEMON_RELOAD);
 
     let err = install(
+        &world.bin_dir,
         &world.config_base,
         &world.data_base,
-        &world.bin_dir,
         true,
         &spy,
     )
@@ -339,9 +340,9 @@ fn failed_enable_now_reports_the_step_after_writing_both_files() {
     let spy = Spy::failing_at(ENABLE_NOW);
 
     let err = install(
+        &world.bin_dir,
         &world.config_base,
         &world.data_base,
-        &world.bin_dir,
         true,
         &spy,
     )
@@ -361,9 +362,9 @@ fn uninstall_disables_then_removes_both_files() {
     let world = World::new("uninstall");
     world.with_sibling_bins();
     install(
+        &world.bin_dir,
         &world.config_base,
         &world.data_base,
-        &world.bin_dir,
         false,
         &Spy::recording(),
     )
@@ -428,9 +429,9 @@ fn install_aborts_before_any_write_when_bins_are_missing() {
     // No sibling binaries present at all.
 
     let err = install(
+        &world.bin_dir,
         &world.config_base,
         &world.data_base,
-        &world.bin_dir,
         true,
         &Spy::recording(),
     )
@@ -456,9 +457,9 @@ fn install_aborts_and_names_only_the_bins_that_are_absent() {
     std::fs::write(world.bin_dir.join(DAEMON_BIN), b"").unwrap();
 
     let err = install(
+        &world.bin_dir,
         &world.config_base,
         &world.data_base,
-        &world.bin_dir,
         true,
         &Spy::recording(),
     )

@@ -1,4 +1,5 @@
-//! Single-instance guard via `flock(LOCK_EX | LOCK_NB)`.
+//! Single-instance guard via an advisory cross-platform file lock
+//! (`fd_lock::RwLock` — `flock` on unix, `LockFileEx` on Windows).
 //!
 //! The GUI and tray fronts each take one at startup so a second copy fails
 //! fast instead of silently competing for the same DBus name / overlay. The
@@ -7,14 +8,21 @@
 
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::path::PathBuf;
 
-/// A held single-instance lock. The open file is kept for the process
-/// lifetime; dropping it closes the file, which releases the flock.
+use fd_lock::RwLock;
+use fd_lock::RwLockWriteGuard;
+
+/// A held single-instance lock. The lock guard is kept for the process
+/// lifetime; dropping it releases the lock, which is exactly how the tests
+/// drive contention.
 pub struct Singleton {
-    _file: File,
+    // The lock guard is kept alive for the process lifetime. The underlying
+    // `RwLock` is leaked to give the guard a `'static` borrow without a
+    // self-reference; that is one extra fd held as long as the singleton
+    // itself, closed at process exit.
+    _guard: RwLockWriteGuard<'static, File>,
     #[allow(dead_code)]
     path: PathBuf,
 }
@@ -24,7 +32,7 @@ pub struct Singleton {
 pub enum AcquireError {
     /// Another process already holds the lock: a live instance is running.
     AlreadyHeld,
-    /// The lock file could not be opened or `flock` failed for a reason
+    /// The lock file could not be opened or the lock failed for a reason
     /// other than contention.
     Io(std::io::Error),
 }
@@ -62,8 +70,8 @@ impl Singleton {
 /// Acquire the singleton lock at `<runtime_dir>/<name>.lock`.
 ///
 /// Opens (creating if needed) the lock file and takes a non-blocking
-/// exclusive `flock`. Returns [`AcquireError::AlreadyHeld`] if another
-/// process owns it; otherwise the held [`Singleton`] keeps it until dropped.
+/// exclusive lock. Returns [`AcquireError::AlreadyHeld`] if another process
+/// owns it; otherwise the held [`Singleton`] keeps it until dropped.
 ///
 /// The lock is keyed on the open file description, so two independent opens
 /// of the same path — even inside one process — contend correctly. That is
@@ -77,23 +85,24 @@ pub fn acquire_at(runtime_dir: &Path, name: &str) -> Result<Singleton, AcquireEr
         .truncate(false)
         .open(&path)
         .map_err(AcquireError::Io)?;
-    // SAFETY: `fd` is a valid, owned file descriptor for the lifetime of
-    // `file`. `flock` is async-signal-safe and we only read its return.
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            return Err(AcquireError::AlreadyHeld);
-        }
-        return Err(AcquireError::Io(err));
+    // Leak the lock so its guard can borrow it for `'static`: the singleton
+    // lives as long as the process, so the extra fd is intended (it is what
+    // keeps the lock held until exit).
+    let lock: &'static mut RwLock<File> = Box::leak(Box::new(RwLock::new(file)));
+    match lock.try_write() {
+        Ok(guard) => Ok(Singleton {
+            _guard: guard,
+            path,
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Err(AcquireError::AlreadyHeld),
+        Err(e) => Err(AcquireError::Io(e)),
     }
-    Ok(Singleton { _file: file, path })
 }
 
 /// Acquire the singleton lock under the platform runtime dir
 /// (`$XDG_RUNTIME_DIR`, falling back to `$TMPDIR`), the production path.
 pub fn acquire(name: &str) -> Result<Singleton, AcquireError> {
-    let dir = dirs::runtime_dir().unwrap_or_else(std::env::temp_dir);
+    let dir = crate::platform::runtime_dir();
     acquire_at(&dir, name)
 }
 
@@ -104,7 +113,7 @@ mod tests {
     use super::*;
 
     /// A fresh, call-unique tempdir so no two tests share a lock-file path
-    /// (flock contention is the behavior under test; a shared path would let
+    /// (lock contention is the behavior under test; a shared path would let
     /// a parallel test's held lock wrongly fail another test's reacquire).
     fn scratch() -> PathBuf {
         use std::sync::atomic::AtomicU64;
@@ -133,7 +142,7 @@ mod tests {
             matches!(acquire_at(&dir, "gui"), Err(AcquireError::AlreadyHeld)),
             "second acquire on a held name must be AlreadyHeld"
         );
-        // Dropping the first must release the underlying flock.
+        // Dropping the first must release the underlying lock.
         drop(first);
     }
 
