@@ -11,7 +11,7 @@
 
 ## ⭐ Installation
 
-Download the latest binaries from [releases page](https://github.com/FAZuH/hyprlay/releases/latest) and move all four (`hyprlay`, `hyprlayd`, `hyprlay-gui`, `hyprlay-tray`) to a directory on your `$PATH` (e.g. `~/.local/bin`).
+Download the latest binaries from [releases page](https://github.com/FAZuH/hyprlay/releases/latest) and move both (`hyprlay`, `hyprlayd`) to a directory on your `$PATH` (e.g. `~/.local/bin`).
 
 Or install with [Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html):
 ```sh
@@ -19,7 +19,7 @@ cargo install --git https://github.com/FAZuH/hyprlay
 
 # Or build from source:
 cargo build --release
-# then copy target/release/hyprlay{,d,-gui,-tray} to $PATH
+# then copy target/release/hyprlay{,d} to $PATH
 ```
 
 ## Preview

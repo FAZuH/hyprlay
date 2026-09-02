@@ -14,7 +14,7 @@ binary package.
 
 | Path | Targets | Role |
 |---|---|---|
-| `Cargo.toml` + `src/` | 4 bins + doc-hidden lib | Everything user-facing: the `hyprlay`, `hyprlayd`, `hyprlay-gui`, and `hyprlay-tray` binaries plus their shared code. A bare `cargo install --git <repo>` installs all four |
+| `Cargo.toml` + `src/` | 2 bins + doc-hidden lib | Everything user-facing: the `hyprlay` and `hyprlayd` binaries plus their shared code. The launcher runs its `gui`/`tray` fronts in-process (`hyprlay gui`, `hyprlay tray`) through the composition root in `src/lib.rs`. A bare `cargo install --git <repo>` installs both |
 | `crates/hyprlay-core` | lib | Shared foundation: domain vocabulary (commands, keys, replies), persisted config with its bounds table (single source of truth), framework-free color math, Discord credential storage, compositor/cursor port traits, the `Platform` facade, ctl socket protocol |
 | `scripts/` | examples only | Standalone debug probes (`wsprobe`, `ipcprobe`) for raw Discord traffic; run via `cargo run -p hyprlay-scripts --example <name>` from that directory |
 
@@ -32,14 +32,18 @@ never on a platform crate (Interface Segregation).
 
 `src/lib.rs` is the doc-hidden library surface: it exposes the four
 fronts (`cli`, `daemon`, `gui`, `tray`) to the thin mains and to
-integration tests under `tests/`. The fronts achieve low coupling by
-depending only on the shared abstraction `hyprlay-core`, never on each
-other. `tests/front_isolation.rs` enforces that encapsulation boundary.
+integration tests under `tests/`, and hosts the composition root
+`run(args)` that routes `hyprlay gui` / `hyprlay tray` in-process. The
+fronts achieve low coupling by depending only on the shared abstraction
+`hyprlay-core`, never on each other; the fronts meet at `hyprlay-core`
+and at that composition root, which sits outside the scanned front
+directories. `tests/front_isolation.rs` enforces that encapsulation
+boundary.
 
 | Module | Public interface | Encapsulated responsibility |
 |---|---|---|
-| `src/bin/hyprlay.rs` | thin main → `cli::run(&args)` | Process entry and exit status only |
-| `src/cli/mod.rs` | clap tree + `classify -> Outcome`, `run(args) -> i32` | Argv shape: help/version answered locally, unknown commands and wrong arity rejected as clap-owned (unpinned) text, bad values rejected locally with the daemon's own wording |
+| `src/bin/hyprlay.rs` | thin main → `run(&args)` in `src/lib.rs` | Process entry and exit status only; the composition root in `lib.rs` classifies argv and routes `gui`/`tray` in-process, everything else to `cli::execute` |
+| `src/cli/mod.rs` | clap tree + `classify -> Outcome`, `execute(outcome) -> i32` | Argv shape: help/version answered locally, unknown commands and wrong arity rejected as clap-owned (unpinned) text, bad values rejected locally with the daemon's own wording |
 | `src/cli/dispatch.rs` | `exec_sibling(name)` | Sibling-binary resolution via `current_exe().parent()`; exec keeps the PID so supervisors keep tracking |
 | `src/cli/install.rs` | `run_install`/`run_uninstall` | Thin resolver: real config/data/exe dirs in, the platform's install/uninstall flow out (`src/platform/service/`), report printed; the unit/registry writing lives in the platform adapters |
 | `src/bin/hyprlayd.rs` | thin main → `daemon::run()` | Process entry only |
@@ -55,8 +59,6 @@ other. `tests/front_isolation.rs` enforces that encapsulation boundary.
 | `src/daemon/adapters/ipc.rs` | transport-agnostic `IpcStream` + `DiscordTransport` port | Discord's local IPC wire format: 8-byte LE header, handshake, PING/PONG; per-OS discovery + connect (unix socket / named pipe) behind the package-local `DiscordTransport` port (Adapter) |
 | `src/daemon/adapters/auth.rs` | `detect() -> Option<OwnAppAuth>`, `exchange(code)` | Credential resolution (env → auth.json) and the OAuth code exchange |
 | `src/daemon/adapters/{cache,avatar,token}.rs` | roster/avatar/token stores | On-disk persistence with tracing on real failures |
-| `src/bin/hyprlay-gui.rs` | thin main → `gui::run()` | Process entry and exit status only |
-| `src/bin/hyprlay-tray.rs` | thin main → `tray::run()` | Process entry and exit status only |
 | `src/gui/mod.rs` | iced app `Gui::run()` | Window layout (header / sidebar / content / status bar), field registry, search; every change becomes a `Command` |
 | `src/gui/fields.rs` | per-key field registry | Section, label, tooltip, and control rendering for each setting |
 | `src/gui/daemon.rs` | `DaemonState` machine | Status chip states (connecting… / up / daemon not active) and the Start/Stop toggle plumbing (systemctl vs spawn vs `quit`) |

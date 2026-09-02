@@ -70,6 +70,10 @@ Two systemd user units now exist: `hyprlay.service` and
 `hyprlay-tray.service` (`Restart=on-failure`). Install verifies every sibling
 binary before it writes any unit. It aborts and names the missing binaries.
 
+Amended by ADR-005: the tray is still a separate resident process, but it
+is no longer a separate binary — it runs as `hyprlay tray` inside the
+launcher.
+
 `tests/front_isolation.rs` now scans `src/tray` for cross-front imports.
 
 The wire protocol does not change. The tray reuses `Command::Status`,

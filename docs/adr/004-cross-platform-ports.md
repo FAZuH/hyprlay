@@ -80,7 +80,8 @@ seam — never on a platform crate.
    target-specific dependencies. Plain `iced` (winit) builds everywhere;
    the GUI front already does.
 9. **Release CI.** Only local no-underscore workflows change: `build.yml`
-   gains a 4-target × 4-binary matrix; `release.yml` gets
+   gains a 4-target × 2-binary matrix (`hyprlay`, `hyprlayd`; see
+   ADR-005); `release.yml` gets
    `platforms: multi`. Underscore-prefixed workflows are synced
    byte-identical from the project-ops repo and are never edited here.
 10. **Secure file permissions.** `chmod 0600` on unix. On Windows, rely on
