@@ -15,7 +15,7 @@ binary package.
 | Path | Targets | Role |
 |---|---|---|
 | `Cargo.toml` + `src/` | 4 bins + doc-hidden lib | Everything user-facing: the `hyprlay`, `hyprlayd`, `hyprlay-gui`, and `hyprlay-tray` binaries plus their shared code. A bare `cargo install --git <repo>` installs all four |
-| `crates/hyprlay-core` | lib | Shared foundation: domain vocabulary (commands, keys, replies), persisted config with its bounds table (single source of truth), framework-free color math, Discord credential storage, compositor discovery, ctl socket protocol |
+| `crates/hyprlay-core` | lib | Shared foundation: domain vocabulary (commands, keys, replies), persisted config with its bounds table (single source of truth), framework-free color math, Discord credential storage, compositor/cursor port traits, the `Platform` facade, ctl socket protocol |
 | `scripts/` | examples only | Standalone debug probes (`wsprobe`, `ipcprobe`) for raw Discord traffic; run via `cargo run -p hyprlay-scripts --example <name>` from that directory |
 
 ## Module interfaces
@@ -25,7 +25,8 @@ implementation behind a narrow public interface (Encapsulation).
 High-level policy depends on abstractions in `hyprlay-core`
 (Dependency Inversion). The interfaces below enforce high cohesion
 within each module and low coupling between modules. Fronts depend only
-on the core abstraction (Interface Segregation).
+on the core abstractions plus the `src/platform/` adapter factories —
+never on a platform crate (Interface Segregation).
 
 ### hyprlay package
 
@@ -40,15 +41,18 @@ other. `tests/front_isolation.rs` enforces that encapsulation boundary.
 | `src/bin/hyprlay.rs` | thin main → `cli::run(&args)` | Process entry and exit status only |
 | `src/cli/mod.rs` | clap tree + `classify -> Outcome`, `run(args) -> i32` | Argv shape: help/version answered locally, unknown commands and wrong arity rejected as clap-owned (unpinned) text, bad values rejected locally with the daemon's own wording |
 | `src/cli/dispatch.rs` | `exec_sibling(name)` | Sibling-binary resolution via `current_exe().parent()`; exec keeps the PID so supervisors keep tracking |
-| `src/cli/install.rs` | `install/uninstall(...)` + `Systemctl` trait | Unit and desktop file contents and the exact systemctl call sequence; injectable collaborator for tests (Dependency Injection) |
+| `src/cli/install.rs` | `run_install`/`run_uninstall` | Thin resolver: real config/data/exe dirs in, the platform's install/uninstall flow out (`src/platform/service/`), report printed; the unit/registry writing lives in the platform adapters |
 | `src/bin/hyprlayd.rs` | thin main → `daemon::run()` | Process entry only |
-| `src/daemon/mod.rs` | iced_layershell app shell (`run()`, effect → `Task` translation, subscription wiring, logging init) | Shell-answered commands, single-instance guard, re-exec paths; domain logic lives in the modules below |
-| `src/daemon/ctl_server.rs` | `incoming()` stream of `CtlRequest` | Tokio unix-socket listener; the wire vocabulary itself lives in core (single source of truth) |
+| `src/daemon/mod.rs` | daemon shell (`run()`, effect → `Task` translation, subscription wiring, logging init) | Shell-answered commands, single-instance guard, re-exec paths, command resolution shared by both surface hosts; domain logic lives in the modules below |
+| `src/daemon/surface_host/mod.rs` | `run(cfg, auth) -> ExitCode` | `#[cfg]` dispatch between the two overlay shells; roster state and domain logic stay in the parent `daemon` module |
+| `src/daemon/surface_host/layershell.rs` | Linux/Wayland overlay shell | The existing `iced_layershell` app, behaviour byte-identical: edge anchoring with margins, hover polling |
+| `src/daemon/surface_host/winit.rs` | Windows/macOS/X11 overlay shell | Frameless, transparent, always-on-top `iced` window moved to the computed on-screen position; same shared logic and hover poll |
+| `src/daemon/ctl_server.rs` | `incoming()` stream of `CtlRequest` | Serves the core `ControlListener` on a dedicated thread (accept loop never stalls the async host), one thread per connection; the wire vocabulary itself lives in core (single source of truth) |
 | `src/daemon/overlay/state.rs` | `Overlay` model methods (`desired_size`, `displayed`, `apply_discord`) | Roster filtering, sizing, avatar cache/dedup |
 | `src/daemon/overlay/geometry.rs` | `anchor/margin/drag(cfg, …)` | All screen-placement math |
 | `src/daemon/overlay/view.rs` | `view(&Overlay)` | Widget construction only |
-| `src/daemon/adapters/discord.rs` | `run(sender, auth) -> DiscordEvent` | Local IPC protocol (unix socket), OAuth token exchange, reconnection, voice subscriptions (Adapter to external Discord API) |
-| `src/daemon/adapters/ipc.rs` | framed unix-socket client | Discord's local IPC wire format: 8-byte LE header, handshake, socket discovery (Adapter) |
+| `src/daemon/adapters/discord.rs` | `run(sender, auth) -> DiscordEvent` | Local IPC protocol over `IpcStream`, OAuth token exchange, reconnection, voice subscriptions (Adapter to external Discord API) |
+| `src/daemon/adapters/ipc.rs` | transport-agnostic `IpcStream` + `DiscordTransport` port | Discord's local IPC wire format: 8-byte LE header, handshake, PING/PONG; per-OS discovery + connect (unix socket / named pipe) behind the package-local `DiscordTransport` port (Adapter) |
 | `src/daemon/adapters/auth.rs` | `detect() -> Option<OwnAppAuth>`, `exchange(code)` | Credential resolution (env → auth.json) and the OAuth code exchange |
 | `src/daemon/adapters/{cache,avatar,token}.rs` | roster/avatar/token stores | On-disk persistence with tracing on real failures |
 | `src/bin/hyprlay-gui.rs` | thin main → `gui::run()` | Process entry and exit status only |
@@ -58,10 +62,18 @@ other. `tests/front_isolation.rs` enforces that encapsulation boundary.
 | `src/gui/daemon.rs` | `DaemonState` machine | Status chip states (connecting… / up / daemon not active) and the Start/Stop toggle plumbing (systemctl vs spawn vs `quit`) |
 | `src/gui/picker.rs` | color picker widget | Color selection UI |
 | `src/gui/theme.rs` | theme | Look and feel constants |
-| `src/tray/mod.rs` | `Tray::run()` via `ksni` | Tray icon lifecycle and D-Bus registration |
+| `src/tray/mod.rs` | `run()` + shared poll loop | Tray icon lifecycle: 2 s diff-gated status poll, action handling, platform backend dispatch (`ksni` / `tray-icon`) behind the `Tray` port |
+| `src/tray/port.rs` | `Tray` trait (`update`, `shutdown`) | The tray backend port — package-local so the `image` codec behind `IconData` stays out of the framework-free core |
 | `src/tray/menu.rs` | menu builder | Menu structure and action routing |
 | `src/tray/icon.rs` | icon resolver | Icon selection and loading |
 | `src/tray/daemon.rs` | `DaemonState` bridge | Daemon status observation for tray |
+| `src/platform/` | `detect()` factories, `SystemControl`, `Control`, `host()` | The only adapter layer: every platform crate import lives here, `#[cfg]`-gated per target; fronts call these factories instead of naming an OS |
+| `src/platform/compositor/` | `detect() -> Box<dyn Compositor>` | Compositor adapter selection per session (Hyprland today, `Unknown` no-op otherwise) |
+| `src/platform/cursor/` | `detect()`, `cursor_pos()` | Global-cursor adapters: Hyprland socket fast path, X11, Win32, macOS; `NoCursor` where no portable read exists |
+| `src/platform/ipc/` | `Control` (`ControlEndpoint` + `ControlListener`) | Unix-socket / named-pipe transport for the ctl channel |
+| `src/platform/service/` | `SystemControl`, `install_service`/`uninstall_service` | systemd / launchd / Windows backends behind the core `ServiceManager` port; owns the unit/registry writing and the exact systemctl calls |
+| `src/platform/tray/` | `ksni::run`, `tray_icon::run` | Tray backends behind the package-local `Tray` port |
+| `src/platform/host.rs` | `host()` | The core `Platform` port: detached child spawn per OS |
 
 ### hyprlay-core
 
@@ -75,8 +87,9 @@ and a single reason to change.
 | `config.rs` | `load/save/clamp`, `Bounds` | TOML persistence and the single source of truth for every numeric bound (the former `toolkit` `Bounds` dissolved here) |
 | `color.rs` | `Rgb`, `Hsv`, conversions | Framework-free HSV/RGB color math (the former toolkit color primitives) |
 | `credentials.rs` | `AppCredentials`, auth.json load/save | Discord own-app credential storage; no network IO, never travels the ctl socket |
-| `ctl.rs` | socket path, `probe_socket`, `send_command_line`, help/KEYS/FILES/EXAMPLES formatters | Client side of the control protocol plus the shared help text used by both the wire `help` reply and the CLI help |
-| `compositor/hyprland.rs` | `Compositor::monitors()` via `detect()` | `hyprctl monitors -j` invocation and JSON parsing (Adapter to compositor) |
+| `ctl.rs` | `ControlStream`/`ControlEndpoint`/`ControlListener` transport ports, socket path, `probe_socket`, `send_command_line`, help/KEYS/FILES/EXAMPLES formatters | Both ends of the control protocol as transport-agnostic ports plus the pure framing/decision logic and the shared help text; the unix-socket / named-pipe adapters live in the host package's `src/platform/` |
+| `compositor/` | `Compositor` + `CursorSource` traits, `parse_cursor_reply`, cursor coordinate converters | Ports only: monitor and global-cursor reads behind two traits plus pure parsing/coordinate math; the concrete adapters live in the host package's `src/platform/` |
+| `platform.rs` | `Platform` trait, `runtime_dir`/`state_dir`/`secure_perms` | The OS facts the pure core needs, as pure helpers; detached spawn stays behind the `Platform` port, implemented by the host package's `src/platform/host.rs` |
 
 ## Tests layout
 

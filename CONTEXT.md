@@ -10,20 +10,26 @@ A two-crate Rust workspace. One multi-bin package, `hyprlay`, ships all
 four binaries (`hyprlay`, `hyprlayd`, `hyprlay-gui`, `hyprlay-tray`) as thin
 `src/bin/` mains over the shared modules `src/cli`, `src/daemon`, `src/gui`, and
 `src/tray`; `crates/hyprlay-core` is the separate pure-lib crate. The
-package renders a Discord voice-channel roster on a transparent Wayland
-layer-shell surface, plus two control surfaces (CLI over a unix socket,
-settings GUI) that mutate a shared runtime config. Linux / Hyprland
-only.
+package renders a Discord voice-channel roster on a transparent overlay
+surface — a Wayland layer-shell surface on Linux/Hyprland, a plain
+frameless always-on-top `winit` window on Windows/macOS/X11 — plus two
+control surfaces (CLI over the platform control transport,
+settings GUI) that mutate a shared runtime config. Cross-platform:
+Linux (Hyprland, other Wayland compositors, X11), Windows, macOS.
+Platform mechanics live behind ports in `src/platform/`; see
+[docs/adr/004-cross-platform-ports.md](docs/adr/004-cross-platform-ports.md).
 
 ## Vocabulary
 
 - **Daemon** — the `hyprlayd` process: owns the Discord RPC connection,
   the overlay window, and the runtime `Config`. Started explicitly
   (`hyprlay daemon`, direct `hyprlayd`) or automatically: opening the
-  settings GUI starts it when it is down, or it runs as the systemd user
-  service. Bare `hyprlay` prints help and starts nothing. Closing the
+  settings GUI starts it when it is down, or it runs as the platform
+  service (systemd user unit / LaunchAgent / Startup item). Bare `hyprlay` prints help and starts nothing. Closing the
   GUI never stops it — daemon lifetime is never tied to a client's.
-- **Tray** — the `hyprlay-tray` process: a resident StatusNotifierItem (system tray) menu. It shows daemon state and sends control commands over the control socket. It outlives the daemon and runs as its own systemd user unit. It depends only on `hyprlay-core` plus a flock lock helper. It adds only the `ksni` crate for the SNI over DBus.
+- **Tray** — the `hyprlay-tray` process: a resident system-tray menu
+  (StatusNotifierItem over DBus on Linux via `ksni`; `tray-icon`
+  NSStatusItem/Shell_NotifyIcon on macOS/Windows). It shows daemon state and sends control commands over the control socket. It outlives the daemon and runs as its own service unit (systemd user unit on Linux, LaunchAgent on macOS, Startup item on Windows). It depends only on `hyprlay-core` plus a lock helper.
 - **Client** — any short-lived invocation of the CLI bin (`hyprlay
   <command>`) or the settings GUI bin (`hyprlay-gui`); both send commands
   to the daemon over **the control socket**
@@ -55,9 +61,13 @@ only.
 - **Dim on hover** — when `dim-on-hover` is on, a pointer inside the
   overlay's geometry switches the rendered overall opacity from `opacity`
   to `hover-opacity`. Detection keeps `events_transparent:true` (full
-  click-through) and polls the Hyprland cursor position over its IPC
+  click-through) and polls the platform's global cursor position —
+  Hyprland's IPC socket on Hyprland, an OS query (`GetCursorPos`,
+  `NSEvent.mouseLocation`, `XQueryPointer`) on Windows/macOS/X11 —
   socket vs the overlay rect; it is a no-op when `visible` is off or the
-  roster is empty. Hyprland-only.
+  roster is empty. Requires a global cursor source: on Hyprland via its
+  socket, Windows/macOS/X11 via OS queries; a no-op on non-Hyprland
+  Wayland.
 - **Hover opacity** — target overall opacity (0..100, default 40) while
   hovered. It replaces `opacity` in `Alphas` during hover and multiplies
   into avatar/text/box.
@@ -88,7 +98,10 @@ only.
   per-crate boundary, so `tests/front_isolation.rs` re-arms it by
   scanning `src/{cli,daemon,gui,tray}` for cross-front imports on every
   `cargo test`. The CLI adds only clap; the GUI adds iced; the tray adds
-  only ksni; adapters never import UI modules.
+  ksni (Linux) or tray-icon (Windows/macOS); adapters never import UI
+  modules. Platform adapters live in `src/platform/` (not a front) and
+  are the only place platform crates are imported; fronts reach them
+  through `hyprlay-core` ports and the platform module's factories.
 - Daemon-side commands (`save`, `dump`, `status`, `help`, `get`,
   `restart`, `quit`, `set monitor`, `set show-on-fullscreen`) are
   answered by the shell before reaching `apply_config` (they re-bind the
