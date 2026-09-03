@@ -28,6 +28,7 @@ use hyprlay_core::domain::Group;
 use hyprlay_core::domain::Key;
 use hyprlay_core::domain::MonitorTarget;
 use hyprlay_core::domain::Value;
+use hyprlay_core::status::StatusFields;
 use overlay::state::Overlay;
 
 /// Daemon entry point, called by the thin `src/bin/hyprlayd.rs` main. Runs
@@ -192,26 +193,26 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
         Command::Status => {
             let cfg = state.config();
             let corner = hyprlay_core::domain::corner_of(cfg.horizontal, cfg.vertical);
+            let fields = StatusFields {
+                status_word: state.status().to_string(),
+                channel: state.channel_name().unwrap_or("-").to_string(),
+                participants: state.displayed().len(),
+                position: hyprlay_core::domain::corner_word(corner).to_string(),
+                rtl: cfg.rtl,
+                visible: cfg.visible,
+                anchor: cfg.anchor.to_string(),
+                scale: cfg.scale,
+                opacity: cfg.opacity,
+                offset_x: cfg.offset_x,
+                offset_y: cfg.offset_y,
+                monitor: cfg.monitor.clone(),
+                auth: state.auth_label().to_string(),
+                show_on_fullscreen: cfg.show_on_fullscreen,
+                dim_on_hover: cfg.dim_on_hover,
+                hover_opacity: cfg.hover_opacity,
+            };
             return CommandOutcome {
-                reply: format!(
-                    "status={} channel={} participants={} position={} rtl={} visible={} anchor={} scale={} opacity={} offset=({},{}) monitor={monitor} auth={auth} show-on-fullscreen={show_on} dim-on-hover={dim_on} hover-opacity={hover}",
-                    state.status(),
-                    state.channel_name().unwrap_or("-"),
-                    state.displayed().len(),
-                    hyprlay_core::domain::corner_word(corner),
-                    if cfg.rtl { "on" } else { "off" },
-                    if cfg.visible { "on" } else { "off" },
-                    cfg.anchor,
-                    cfg.scale,
-                    cfg.opacity,
-                    cfg.offset_x,
-                    cfg.offset_y,
-                    monitor = cfg.monitor.as_deref().unwrap_or("active"),
-                    auth = state.auth_label(),
-                    show_on = if cfg.show_on_fullscreen { "on" } else { "off" },
-                    dim_on = if cfg.dim_on_hover { "on" } else { "off" },
-                    hover = cfg.hover_opacity,
-                ),
+                reply: fields.to_wire(),
                 effects: Vec::new(),
                 lifecycle: None,
             };

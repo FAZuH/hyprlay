@@ -15,6 +15,7 @@
 //! daemon state and the boot auto-start watcher.
 
 use hyprlay_core::daemon_control::Toggle;
+use hyprlay_core::status::StatusFields;
 
 /// Chip text before the first probe has answered.
 pub(super) const CONNECTING_TEXT: &str = "connecting…";
@@ -37,7 +38,7 @@ impl DaemonState {
     /// failure texts prove nothing does, and everything else is an ordinary
     /// reply that must not disturb the chip.
     pub(super) fn advance(self, reply: &str) -> Self {
-        if reply.starts_with("status=") {
+        if StatusFields::is_status_line(reply) {
             Self::Up(reply.to_string())
         } else if is_probe_failure(reply) {
             Self::Unreachable
@@ -110,7 +111,7 @@ impl AutoStart {
     pub(super) fn observe(&mut self, state: &mut DaemonState, reply: &str) -> Option<Toggle> {
         if self.0 == Phase::Running {
             // Hold the connecting line until the launch settles.
-            if reply.starts_with("status=") {
+            if StatusFields::is_status_line(reply) {
                 *state = state.clone().advance(reply);
                 self.0 = Phase::Done;
             }

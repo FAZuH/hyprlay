@@ -86,6 +86,7 @@ and a single reason to change.
 | Module | Public interface | Encapsulated responsibility |
 |---|---|---|
 | `domain.rs` | `Command::from_str` + `apply_config -> CommandResult`, `Key::ALL` | The whole CLI vocabulary, wire-protocol replies, typed status/colors — pure, no framework types; single source of truth for commands |
+| `status.rs` | `StatusFields` + `to_wire`/`parse_wire`/`is_status_line` | The `status` reply wire contract in both directions — build and parse live together so field order and spelling change in one place |
 | `config.rs` | `load/save/clamp`, `Bounds` | TOML persistence and the single source of truth for every numeric bound (the former `toolkit` `Bounds` dissolved here) |
 | `color.rs` | `Rgb`, `Hsv`, conversions | Framework-free HSV/RGB color math (the former toolkit color primitives) |
 | `credentials.rs` | `AppCredentials`, auth.json load/save | Discord own-app credential storage; no network IO, never travels the ctl socket |
