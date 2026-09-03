@@ -5,6 +5,8 @@
 //! [`crate::platform::tray`] map [`build_menu`] onto real menu items, all
 //! driven through the shared [`Tray`](crate::tray::Tray) port.
 
+use hyprlay_core::status::StatusFields;
+
 /// A snapshot of daemon state the tray renders. Doubles as the diff-gate
 /// key: two identical snapshots must not trigger a `handle.update`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +27,44 @@ impl TrayState {
             up: false,
             visible: false,
             summary: "daemon: down".to_string(),
+        }
+    }
+
+    /// Snapshot from a parsed status reply. Field semantics used:
+    /// - `status` word — `connected` (and anything non-empty besides `off` /
+    ///   `disconnected`) means up; `off` / `disconnected` means down.
+    /// - `visible` — `on` / `off`.
+    /// - `channel` / `participants` — feed the compact summary.
+    fn from_fields(fields: &StatusFields) -> Self {
+        let up = !fields.status_word.is_empty()
+            && fields.status_word != "off"
+            && fields.status_word != "disconnected";
+        let summary = if up {
+            // Connected: mirror the GUI's compact summary, adding the
+            // participant count. Exact copy decided here (spec: "exact copy
+            // finalised in code"); follows the Decisions worked example
+            // `connected · #general · 3`.
+            if fields.channel.is_empty() {
+                fields.status_word.clone()
+            } else {
+                format!(
+                    "{} · {} · {}",
+                    fields.status_word, fields.channel, fields.participants
+                )
+            }
+        } else {
+            // Down-but-replied (e.g. `status=disconnected`): the word is the
+            // whole story; a missing word falls back to the down default.
+            if fields.status_word.is_empty() {
+                "daemon: down".to_string()
+            } else {
+                fields.status_word.clone()
+            }
+        };
+        TrayState {
+            up,
+            visible: fields.visible,
+            summary,
         }
     }
 }
@@ -92,88 +132,15 @@ pub fn build_menu(state: &TrayState) -> Vec<MenuRow> {
     ]
 }
 
-/// Parse a `status=` reply (format pinned at `daemon/mod.rs:273-279`) into a
-/// [`TrayState`].
-///
-/// Simple single-token fields (`status`, `participants`, `visible`) are read
-/// by whitespace-delimited `key=value` tokens. The `channel` value is sliced
-/// between its markers (`channel=` … ` participants=`), exactly like the
-/// GUI's [`brief_status`](crate::gui): channel names may contain spaces, so a
-/// naive whitespace split would corrupt them.
-///
-/// Field semantics used:
-/// - `status` word — `connected` (and anything non-empty besides `off` /
-///   `disconnected`) means up; `off` / `disconnected` means down.
-/// - `visible` — `on` / `off`.
-/// - `channel` / `participants` — feed the compact summary.
+/// Parse a `status=` reply into a [`TrayState`]. The wire format itself is
+/// owned by [`StatusFields`] — the single source of truth shared with the
+/// daemon writer and the GUI reader — so channel names with spaces and
+/// lenient numbers are handled there; this only maps the parsed fields onto
+/// what the tray renders.
 pub fn parse_status(reply: &str) -> TrayState {
-    if !reply.starts_with("status=") {
-        // Not a status reply (e.g. a connect error, or an ordinary reply):
-        // treat as "no live daemon".
-        return TrayState::down();
-    }
-
-    // Connection-status word: `status=` up to the next space.
-    let status_word = reply[std::cmp::min(reply.len(), "status=".len())..]
-        .split(' ')
-        .next()
-        .unwrap_or("");
-    let up = !status_word.is_empty() && status_word != "off" && status_word != "disconnected";
-
-    // Channel: between `channel=` and the next ` participants=` marker, so
-    // spaces inside the name survive.
-    let channel = reply
-        .find("channel=")
-        .and_then(|start| {
-            reply[start..]
-                .find(" participants=")
-                .map(|end| reply[start + "channel=".len()..start + end].to_string())
-        })
-        .unwrap_or_default();
-
-    // Participant count: `participants=` up to the next space.
-    let participants = reply
-        .find("participants=")
-        .map(|start| {
-            reply[start + "participants=".len()..]
-                .split(' ')
-                .next()
-                .unwrap_or("")
-                .to_string()
-        })
-        .unwrap_or_default();
-
-    // Visibility flag.
-    let visible = reply
-        .find("visible=")
-        .map(|start| reply[start..].split(' ').next() == Some("visible=on"))
-        .unwrap_or(false);
-
-    let summary = if up {
-        // Connected: mirror the GUI's compact summary, adding the participant
-        // count. Exact copy decided here (spec: "exact copy finalised in
-        // code"); follows the Decisions worked example `connected · #general · 3`.
-        if channel.is_empty() {
-            status_word.to_string()
-        } else if participants.is_empty() {
-            format!("{status_word} · {channel}")
-        } else {
-            format!("{status_word} · {channel} · {participants}")
-        }
-    } else {
-        // Down-but-replied (e.g. `status=disconnected`): the word is the
-        // whole story; a missing word falls back to the down default.
-        if status_word.is_empty() {
-            "daemon: down".to_string()
-        } else {
-            status_word.to_string()
-        }
-    };
-
-    TrayState {
-        up,
-        visible,
-        summary,
+    match StatusFields::parse_wire(reply) {
+        Some(fields) => TrayState::from_fields(&fields),
+        None => TrayState::down(),
     }
 }
 

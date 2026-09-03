@@ -52,6 +52,7 @@ use hyprlay_core::domain::Key;
 use hyprlay_core::domain::Value;
 use hyprlay_core::domain::corner_of;
 use hyprlay_core::singleton::AcquireError;
+use hyprlay_core::status::StatusFields;
 use iced::Alignment;
 use iced::Element;
 use iced::Length;
@@ -375,7 +376,7 @@ fn update(gui: &mut Gui, message: Message) -> Task<Message> {
                 }
             } else if reply == "saved" {
                 gui.dirty = false;
-            } else if !reply.is_empty() && !reply.starts_with("status=") {
+            } else if !reply.is_empty() && !StatusFields::is_status_line(&reply) {
                 // status= replies are consumed by the state chip above;
                 // everything else is ordinary status-bar traffic.
                 gui.last_reply = reply;
@@ -1078,24 +1079,16 @@ fn daemon_toggle(gui: &Gui) -> Element<'_, Message> {
 }
 
 /// "status=connected channel=ngobrol 3 participants=2 …" →
-/// "connected · ngobrol 3". Channel names may contain spaces, so slice on
-/// the known field markers instead of words.
+/// "connected · ngobrol 3". Parsing goes through the shared
+/// [`StatusFields`]; channel names may contain spaces, which its
+/// marker-slice handles.
 fn brief_status(full: &str) -> String {
-    if !full.starts_with("status=") {
-        return full.to_string();
-    }
-    let conn = full
-        .strip_prefix("status=")
-        .and_then(|rest| rest.split(' ').next())
-        .unwrap_or("unknown");
-    let channel = full.find("channel=").and_then(|start| {
-        full[start..]
-            .find(" participants=")
-            .map(|end| &full[start + "channel=".len()..start + end])
-    });
-    match channel {
-        Some(c) => format!("{conn} · {c}"),
-        None => conn.to_string(),
+    match StatusFields::parse_wire(full) {
+        Some(fields) if !fields.channel.is_empty() => {
+            format!("{} · {}", fields.status_word, fields.channel)
+        }
+        Some(fields) => fields.status_word,
+        None => full.to_string(),
     }
 }
 
@@ -1216,6 +1209,13 @@ mod tests {
     fn brief_status_without_channel_falls_back_to_connection_word() {
         assert_eq!(brief_status("status=disconnected"), "disconnected");
         assert_eq!(brief_status("connecting…"), "connecting…");
+        // Empty channel value (malformed Discord payload only): the old
+        // code printed "connected · " with a trailing separator; the new
+        // code drops it. Pinned here so the tightening stays deliberate.
+        assert_eq!(
+            brief_status("status=connected channel= participants=0"),
+            "connected"
+        );
     }
 
     #[test]
