@@ -1,6 +1,9 @@
-# hyprlay
+<h1 align="center">
+  <img src="assets/hyprlay-64.png" alt="hyprlay logo" width="48" />
+  hyprlay
+</h1>
 
-**A lightweight Discord voice overlay for Hyprland.**
+<p align="center"><strong>Lightweight and highly configurable Discord voice overlay for Linux, MacOS and Windows</strong></p>
 
 <hr>
 
