@@ -36,16 +36,15 @@ impl TrayState {
     /// - `visible` — `on` / `off`.
     /// - `channel` / `participants` — feed the compact summary.
     fn from_fields(fields: &StatusFields) -> Self {
-        let up = !fields.status_word.is_empty()
-            && fields.status_word != "off"
-            && fields.status_word != "disconnected";
+        let status = fields.status_word.as_str();
+        let up = !status.is_empty() && status != "off" && status != "disconnected";
         let summary = if up {
             // Connected: mirror the GUI's compact summary, adding the
             // participant count. Exact copy decided here (spec: "exact copy
             // finalised in code"); follows the Decisions worked example
             // `connected · #general · 3`.
             if fields.channel.is_empty() {
-                fields.status_word.clone()
+                fields.status_word.to_string()
             } else {
                 format!(
                     "{} · {} · {}",
@@ -55,10 +54,10 @@ impl TrayState {
         } else {
             // Down-but-replied (e.g. `status=disconnected`): the word is the
             // whole story; a missing word falls back to the down default.
-            if fields.status_word.is_empty() {
+            if status.is_empty() {
                 "daemon: down".to_string()
             } else {
-                fields.status_word.clone()
+                fields.status_word.to_string()
             }
         };
         TrayState {

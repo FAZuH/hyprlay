@@ -194,7 +194,7 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
             let cfg = state.config();
             let corner = hyprlay_core::domain::corner_of(cfg.horizontal, cfg.vertical);
             let fields = StatusFields {
-                status_word: state.status().to_string(),
+                status_word: state.status().into(),
                 channel: state.channel_name().unwrap_or("-").to_string(),
                 participants: state.displayed().len(),
                 position: hyprlay_core::domain::corner_word(corner).to_string(),

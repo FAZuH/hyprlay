@@ -1087,7 +1087,7 @@ fn brief_status(full: &str) -> String {
         Some(fields) if !fields.channel.is_empty() => {
             format!("{} · {}", fields.status_word, fields.channel)
         }
-        Some(fields) => fields.status_word,
+        Some(fields) => fields.status_word.to_string(),
         None => full.to_string(),
     }
 }
