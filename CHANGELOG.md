@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Platforms
+
+- Merged hyprlay-gui and hyprlay-tray into the hyprlay binary
+- Added hyprlay gui to open the settings window and hyprlay tray to run the tray menu
+- Reduced release downloads to two binaries per platform
+- Changed the desktop entry and tray service to the new commands; run hyprlay install again after updating
+
 ## 0.2.3 (2026-09-02)
 
 ### Platforms

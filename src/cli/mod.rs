@@ -26,8 +26,6 @@ use hyprlay_core::ctl::keys_table;
 use hyprlay_core::domain::Command;
 
 use crate::cli::dispatch::DAEMON_BIN;
-use crate::cli::dispatch::GUI_BIN;
-use crate::cli::dispatch::TRAY_BIN;
 use crate::cli::dispatch::exec_sibling;
 
 /// What the launcher does with one invocation.
@@ -35,17 +33,15 @@ use crate::cli::dispatch::exec_sibling;
 pub(crate) enum Outcome {
     /// Exec the sibling `hyprlayd` binary.
     Daemon,
-    /// Exec the sibling `hyprlay-gui` binary.
+    /// Open the settings window in-process (`hyprlay gui`).
     Gui,
-    /// List compositor outputs without contacting the daemon.
-    /// Run the system tray menu.
+    /// Run the system tray menu in-process (`hyprlay tray`).
     Tray,
+    /// List compositor outputs without contacting the daemon.
     Monitors,
     /// Write the user unit + desktop entry and (unless `no_start`) enable
     /// + start the service — all locally, before any socket connect.
-    Install {
-        no_start: bool,
-    },
+    Install { no_start: bool },
     /// Stop/disable the unit and remove both files; never touches the
     /// daemon socket.
     Uninstall,
@@ -256,29 +252,28 @@ fn wire_line(name: &str, sub: &ArgMatches) -> Result<String, String> {
     })
 }
 
-/// Route the invocation and carry it out. Returns the process exit code;
-/// successful sibling execs replace this process and never return. `pub`
-/// because the thin `src/bin/hyprlay.rs` main calls into it.
-pub fn run(args: &[String]) -> i32 {
-    match classify(args) {
-        Ok(Outcome::Daemon) => exec_sibling(DAEMON_BIN),
-        Ok(Outcome::Gui) => exec_sibling(GUI_BIN),
-        Ok(Outcome::Tray) => exec_sibling(TRAY_BIN),
-        Ok(Outcome::Monitors) => list_monitors(),
-        Ok(Outcome::Install { no_start }) => crate::cli::install::run_install(no_start),
-        Ok(Outcome::Uninstall) => crate::cli::install::run_uninstall(),
-        Ok(Outcome::Relay(command)) => relay(&command.to_string()),
-        Ok(Outcome::LocalError(message)) => {
+/// Carry out a classified [`Outcome`] and return the process exit code.
+/// `pub(crate)` because only the crate-root composition root
+/// (`hyprlay::run`) and this module's tests call it, and `Outcome` itself
+/// is `pub(crate)` (D1) — a `pub` signature would leak a crate-private type.
+/// The `gui`/`tray` fronts are routed by that composition root *before*
+/// `execute` is reached, so their arms here are unreachable.
+pub(crate) fn execute(outcome: Outcome) -> i32 {
+    match outcome {
+        Outcome::Daemon => exec_sibling(DAEMON_BIN),
+        Outcome::Gui => unreachable!("front outcomes are routed by the composition root"),
+        Outcome::Tray => unreachable!("front outcomes are routed by the composition root"),
+        Outcome::Monitors => list_monitors(),
+        Outcome::Install { no_start } => crate::cli::install::run_install(no_start),
+        Outcome::Uninstall => crate::cli::install::run_uninstall(),
+        Outcome::Relay(command) => relay(&command.to_string()),
+        Outcome::LocalError(message) => {
             eprintln!("{message}");
             1
         }
-        Ok(Outcome::Help(text)) => {
+        Outcome::Help(text) => {
             print!("{text}");
             0
-        }
-        Err(err) => {
-            let _ = err.print();
-            err.exit_code()
         }
     }
 }
@@ -326,7 +321,7 @@ mod tests {
     use super::Outcome;
     use super::classify;
     use super::cli;
-    use super::run;
+    use super::execute;
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
@@ -367,8 +362,10 @@ mod tests {
 
     #[test]
     fn bare_invocation_exits_zero() {
-        // Help is a successful answer, not an error.
-        assert_eq!(run(&[]), 0);
+        // Help is a successful answer, not an error. Bare argv classifies
+        // to `Help`; executing that outcome returns 0 (same classify+execute
+        // path the composition root drives).
+        assert_eq!(execute(classify(&[]).expect("bare argv classifies")), 0);
     }
 
     #[test]

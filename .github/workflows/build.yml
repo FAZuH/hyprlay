@@ -137,7 +137,7 @@ jobs:
         run: |
           mkdir -p artifacts
           PROFILE=${{ inputs.release && 'release' || 'debug' }}
-          for b in hyprlay hyprlayd hyprlay-gui hyprlay-tray; do
+          for b in hyprlay hyprlayd; do
             cp "target/${{ matrix.target }}/$PROFILE/$b" "artifacts/$b-${{ matrix.platform }}"
             chmod +x "artifacts/$b-${{ matrix.platform }}"
           done
@@ -148,8 +148,6 @@ jobs:
           mkdir artifacts
           copy "target\${{ matrix.target }}\${{ inputs.release && 'release' || 'debug' }}\hyprlay.exe" "artifacts\hyprlay-${{ matrix.platform }}.exe"
           copy "target\${{ matrix.target }}\${{ inputs.release && 'release' || 'debug' }}\hyprlayd.exe" "artifacts\hyprlayd-${{ matrix.platform }}.exe"
-          copy "target\${{ matrix.target }}\${{ inputs.release && 'release' || 'debug' }}\hyprlay-gui.exe" "artifacts\hyprlay-gui-${{ matrix.platform }}.exe"
-          copy "target\${{ matrix.target }}\${{ inputs.release && 'release' || 'debug' }}\hyprlay-tray.exe" "artifacts\hyprlay-tray-${{ matrix.platform }}.exe"
 
       - name: Upload Binary Artifact (hyprlay)
         if: inputs.upload-binary
@@ -167,18 +165,3 @@ jobs:
           path: artifacts/hyprlayd-${{ matrix.platform }}${{ matrix.exe }}
           retention-days: 3
 
-      - name: Upload Binary Artifact (hyprlay-gui)
-        if: inputs.upload-binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: hyprlay-gui-${{ matrix.platform }}${{ matrix.exe }}
-          path: artifacts/hyprlay-gui-${{ matrix.platform }}${{ matrix.exe }}
-          retention-days: 3
-
-      - name: Upload Binary Artifact (hyprlay-tray)
-        if: inputs.upload-binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: hyprlay-tray-${{ matrix.platform }}${{ matrix.exe }}
-          path: artifacts/hyprlay-tray-${{ matrix.platform }}${{ matrix.exe }}
-          retention-days: 3

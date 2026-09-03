@@ -21,9 +21,7 @@ const ENABLE_NOW: &str = "systemctl --user enable --now hyprlay";
 const ENABLE_NOW_TRAY: &str = "systemctl --user enable --now hyprlay-tray";
 const DISABLE_NOW: &str = "systemctl --user disable --now hyprlay";
 const DISABLE_NOW_TRAY: &str = "systemctl --user disable --now hyprlay-tray";
-const TRAY_BIN: &str = "hyprlay-tray";
 const DAEMON_BIN: &str = "hyprlayd";
-const GUI_BIN: &str = "hyprlay-gui";
 
 /// Spy double for the systemctl boundary: records each invocation as one
 /// readable line and can be told to fail a specific command (simulating
@@ -87,9 +85,9 @@ impl World {
     }
 
     fn with_sibling_bins(&self) {
-        std::fs::write(self.bin_dir.join("hyprlayd"), b"").unwrap();
-        std::fs::write(self.bin_dir.join("hyprlay-gui"), b"").unwrap();
-        std::fs::write(self.bin_dir.join(TRAY_BIN), b"").unwrap();
+        // Only the daemon is a required sibling now (D7): gui/tray are
+        // folded into the `hyprlay` binary, so no co-located files exist.
+        std::fs::write(self.bin_dir.join(DAEMON_BIN), b"").unwrap();
     }
 
     fn unit(&self) -> PathBuf {
@@ -131,15 +129,14 @@ impl World {
              Description=hyprlay system tray menu\n\
              \n\
              [Service]\n\
-             ExecStart={}/{}\n\
+             ExecStart={}/hyprlay tray\n\
              Restart=on-failure\n\
              PassEnvironment=WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR HYPRLAND_INSTANCE_SIGNATURE\n\
              EnvironmentFile=-%h/.config/hyprlay/service.env\n\
              \n\
              [Install]\n\
              WantedBy=default.target\n",
-            self.bin_dir.display(),
-            TRAY_BIN
+            self.bin_dir.display()
         )
     }
 
@@ -148,7 +145,7 @@ impl World {
             "[Desktop Entry]\n\
              Type=Application\n\
              Name=hyprlay\n\
-             Exec={}/hyprlay-gui\n\
+             Exec={}/hyprlay gui\n\
              Icon=hyprlay\n\
              Terminal=false\n",
             self.bin_dir.display()
@@ -507,10 +504,8 @@ fn install_aborts_before_any_write_when_bins_are_missing() {
     )
     .unwrap_err();
 
-    // The error names every missing bin.
+    // The error names the single required bin.
     assert!(err.contains(DAEMON_BIN), "error names hyprlayd: {err}");
-    assert!(err.contains(GUI_BIN), "error names hyprlay-gui: {err}");
-    assert!(err.contains(TRAY_BIN), "error names hyprlay-tray: {err}");
     // Nothing was written before the check failed.
     assert!(!world.unit().exists(), "daemon unit must not be written");
     assert!(!world.tray_unit().exists(), "tray unit must not be written");
@@ -521,25 +516,23 @@ fn install_aborts_before_any_write_when_bins_are_missing() {
 }
 
 #[test]
-fn install_aborts_and_names_only_the_bins_that_are_absent() {
-    let world = World::new("partial-bins");
-    // Present: hyprlayd only. Missing: hyprlay-gui and hyprlay-tray.
+fn install_succeeds_with_only_the_required_daemon_bin() {
+    // The co-location requirement now covers only the daemon (D7): the
+    // gui/tray fronts are folded into `hyprlay`, so a shared install dir
+    // holding just `hyprlayd` (plus the launcher) is a complete install.
+    let world = World::new("daemon-only-bins");
     std::fs::write(world.bin_dir.join(DAEMON_BIN), b"").unwrap();
 
-    let err = install(
+    install(
         &world.bin_dir,
         &world.config_base,
         &world.data_base,
         true,
         &Spy::recording(),
     )
-    .unwrap_err();
+    .expect("install succeeds with only hyprlayd present");
 
-    assert!(
-        !err.contains(DAEMON_BIN),
-        "present bin must not be named: {err}"
-    );
-    assert!(err.contains(GUI_BIN), "missing hyprlay-gui named: {err}");
-    assert!(err.contains(TRAY_BIN), "missing hyprlay-tray named: {err}");
-    assert!(!world.unit().exists(), "nothing written on abort");
+    assert!(world.unit().exists(), "daemon unit written");
+    assert!(world.tray_unit().exists(), "tray unit written");
+    assert!(world.desktop().exists(), "desktop entry written");
 }

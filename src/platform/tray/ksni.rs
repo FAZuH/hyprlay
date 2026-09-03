@@ -142,7 +142,7 @@ pub fn run(connected: IconData, disconnected: IconData) -> i32 {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("hyprlay-tray: could not start runtime");
+        .expect("hyprlay tray: could not start runtime");
     rt.block_on(run_async(connected, disconnected))
 }
 

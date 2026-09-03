@@ -20,14 +20,14 @@ fn existing_sibling_resolves_to_its_full_path() {
 
 #[test]
 fn missing_sibling_names_the_binary_and_its_expected_location() {
-    // A partial install (GUI copied without the daemon) must produce an
-    // error that says which file is missing and where it was looked for.
+    // A partial install (daemon missing) must produce an error that says
+    // which file is missing and where it was looked for.
     let dir = unique_temp_dir("missing");
-    let expected = dir.join("hyprlay-gui");
+    let expected = dir.join("hyprlayd");
 
-    let err = resolve_sibling(&dir, "hyprlay-gui").unwrap_err();
+    let err = resolve_sibling(&dir, "hyprlayd").unwrap_err();
 
-    assert!(err.contains("hyprlay-gui"), "error names the binary: {err}");
+    assert!(err.contains("hyprlayd"), "error names the binary: {err}");
     assert!(
         err.contains(&expected.display().to_string()),
         "error shows the expected path: {err}"

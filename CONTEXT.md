@@ -6,10 +6,12 @@ touching `src/` or `crates/`. ADRs for significant decisions live in
 
 ## What this is
 
-A two-crate Rust workspace. One multi-bin package, `hyprlay`, ships all
-four binaries (`hyprlay`, `hyprlayd`, `hyprlay-gui`, `hyprlay-tray`) as thin
-`src/bin/` mains over the shared modules `src/cli`, `src/daemon`, `src/gui`, and
-`src/tray`; `crates/hyprlay-core` is the separate pure-lib crate. The
+A two-crate Rust workspace. One multi-bin package, `hyprlay`, ships two
+binaries (`hyprlay`, `hyprlayd`) as thin `src/bin/` mains. The launcher
+routes the shared fronts `src/cli`, `src/gui`, and `src/tray` in-process
+through the composition root in `src/lib.rs` (`hyprlay gui`, `hyprlay
+tray`); the daemon binary is a thin main over `src/daemon`;
+`crates/hyprlay-core` is the separate pure-lib crate. The
 package renders a Discord voice-channel roster on a transparent overlay
 surface — a Wayland layer-shell surface on Linux, a plain frameless
 always-on-top `winit` window on Windows/macOS — plus two control
@@ -28,11 +30,11 @@ Platform mechanics live behind ports in `src/platform/`; see
   settings GUI starts it when it is down, or it runs as the platform
   service (systemd user unit / LaunchAgent / Startup item). Bare `hyprlay` prints help and starts nothing. Closing the
   GUI never stops it — daemon lifetime is never tied to a client's.
-- **Tray** — the `hyprlay-tray` process: a resident system-tray menu
+- **Tray** — the `hyprlay tray` process: a resident system-tray menu
   (StatusNotifierItem over DBus on Linux via `ksni`; `tray-icon`
   NSStatusItem/Shell_NotifyIcon on macOS/Windows). It shows daemon state and sends control commands over the control socket. It outlives the daemon and runs as its own service unit (systemd user unit on Linux, LaunchAgent on macOS, Startup item on Windows). It depends only on `hyprlay-core` plus a lock helper.
-- **Client** — any short-lived invocation of the CLI bin (`hyprlay
-  <command>`) or the settings GUI bin (`hyprlay-gui`); both send commands
+- **Client** — any short-lived invocation of the CLI (`hyprlay
+  <command>`) or the settings GUI (`hyprlay gui`); both send commands
   to the daemon over **the control socket**
   (`$XDG_RUNTIME_DIR/hyprlay.sock`).
 - **Command** — the entire CLI vocabulary, modeled as the `Command` enum in
@@ -93,12 +95,15 @@ Platform mechanics live behind ports in `src/platform/`; see
   never produce a broken overlay.
 - Dependency direction: the four fronts (`cli`, `daemon`, `gui`, `tray`) are
   modules of one package; each depends only on `hyprlay-core`, and core
-  never imports UI-framework or async-runtime types. Inside the daemon
+  never imports UI-framework or async-runtime types. The one sanctioned
+  cross-front meeting point is the composition root (`run` in
+  `src/lib.rs`), which routes `gui`/`tray` in-process. Inside the daemon
   front: core ← adapters ← overlay/ctl ← shell. Front↔front separation
   is a convention, not a compiler wall: consolidation removed cargo's
   per-crate boundary, so `tests/front_isolation.rs` re-arms it by
   scanning `src/{cli,daemon,gui,tray}` for cross-front imports on every
-  `cargo test`. The CLI adds only clap; the GUI adds iced; the tray adds
+  `cargo test` (the composition root sits outside the scanned front
+  dirs). The CLI adds only clap; the GUI adds iced; the tray adds
   ksni (Linux) or tray-icon (Windows/macOS); adapters never import UI
   modules. Platform adapters live in `src/platform/` (not a front) and
   are the only place platform crates are imported; fronts reach them
