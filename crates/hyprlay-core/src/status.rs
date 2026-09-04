@@ -13,11 +13,18 @@
 //! `channel` value is sliced between its markers because channel names may
 //! contain spaces.
 
+use std::fmt;
+
+use crate::domain::ConnectionStatus;
+
 /// One parsed `status=` reply, one field per wire key.
 #[derive(Debug, PartialEq, Eq)]
 pub struct StatusFields {
     /// Connection-status word, e.g. `connected`, `disconnected`, `off`.
-    pub status_word: String,
+    /// Writers build it from the sealed [`ConnectionStatus`] vocabulary;
+    /// readers get the raw wire token, so a word this build does not know
+    /// still parses (forward-compat) and reaches the UI verbatim.
+    pub status_word: StatusWord,
     /// Voice-channel name; `-` when not connected. May contain spaces.
     pub channel: String,
     /// Number of roster rows the overlay displays.
@@ -102,7 +109,7 @@ impl StatusFields {
             .unwrap_or_default();
         let (offset_x, offset_y) = parse_offset(token_after(line, " offset="));
         Some(Self {
-            status_word: word(line, "status="),
+            status_word: StatusWord(word(line, "status=")),
             channel,
             participants: number(token_after(line, " participants=")),
             position: word(line, " position="),
@@ -122,6 +129,42 @@ impl StatusFields {
             dim_on_hover: token_after(line, " dim-on-hover=") == Some("on"),
             hover_opacity: number(token_after(line, " hover-opacity=")),
         })
+    }
+}
+
+/// The connection-status word of a `status` reply. Opaque on purpose: the
+/// wire contract has a sealed write side and a lenient read side.
+///
+/// - **Write** (daemon): the only way in is [`From<ConnectionStatus>`], so a
+///   bare string can never reach the wire and the word set cannot drift from
+///   the enum's `Display` spelling.
+/// - **Read** (tray/GUI): [`StatusFields::parse_wire`] fills the word from
+///   the raw line, unknown words included — a newer daemon may already speak
+///   words this build has never seen (ADR-002 forward-compat).
+///
+/// [`Display`] renders the stored word unchanged in both directions, which
+/// is what keeps `to_wire()` byte-identical.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusWord(String);
+
+impl From<ConnectionStatus> for StatusWord {
+    fn from(status: ConnectionStatus) -> Self {
+        Self(status.to_string())
+    }
+}
+
+impl fmt::Display for StatusWord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl StatusWord {
+    /// The raw wire token. Readers compare or show it verbatim; nothing
+    /// maps it back onto [`ConnectionStatus`], because the vocabulary is
+    /// open on the wire (a future daemon's word must survive the round trip).
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -165,7 +208,7 @@ mod tests {
     #[test]
     fn roundtrip_preserves_every_field() {
         let fields = StatusFields {
-            status_word: "connected".into(),
+            status_word: ConnectionStatus::Connected.into(),
             channel: "ngobrol 3".into(),
             participants: 2,
             position: "bottom-right".into(),
@@ -183,7 +226,7 @@ mod tests {
             hover_opacity: 40,
         };
         let parsed = StatusFields::parse_wire(&fields.to_wire()).expect("roundtrip parses");
-        assert_eq!(parsed.status_word, "connected");
+        assert_eq!(parsed.status_word.as_str(), "connected");
         assert_eq!(parsed.channel, "ngobrol 3");
         assert_eq!(parsed.participants, 2);
         assert_eq!(parsed.position, "bottom-right");
@@ -204,7 +247,7 @@ mod tests {
     #[test]
     fn to_wire_matches_the_pinned_wire_line() {
         let fields = StatusFields {
-            status_word: "connected".into(),
+            status_word: ConnectionStatus::Connected.into(),
             channel: "ngobrol 3".into(),
             participants: 2,
             position: "top-left".into(),
@@ -284,7 +327,7 @@ mod tests {
         assert_eq!(
             fields,
             StatusFields {
-                status_word: "connected".into(),
+                status_word: ConnectionStatus::Connected.into(),
                 channel: "ngobrol 3".into(),
                 participants: 2,
                 position: "top-left".into(),
@@ -310,8 +353,59 @@ mod tests {
         // readers take the first whitespace-delimited token.
         let fields =
             StatusFields::parse_wire("status=exchanging token channel=a participants=1").unwrap();
-        assert_eq!(fields.status_word, "exchanging");
+        assert_eq!(fields.status_word.as_str(), "exchanging");
         assert_eq!(fields.channel, "a");
         assert_eq!(fields.participants, 1);
+    }
+
+    #[test]
+    fn parse_wire_keeps_an_unknown_status_word_verbatim() {
+        // The reader-side half of the StatusWord contract: a future daemon
+        // may speak a word this build has never seen (ADR-002 forward-compat).
+        // The word must survive parsing and to_wire() byte-for-byte.
+        let fields = StatusFields::parse_wire("status=relinking channel=a participants=1").unwrap();
+        assert_eq!(fields.status_word.as_str(), "relinking");
+        assert_eq!(
+            fields.to_wire(),
+            "status=relinking channel=a participants=1 position= rtl=off visible=off \
+             anchor= scale=0 opacity=0 offset=(0,0) monitor=active auth= \
+             show-on-fullscreen=off dim-on-hover=off hover-opacity=0"
+        );
+    }
+
+    #[test]
+    fn status_word_accepts_only_the_sealed_vocabulary_on_the_write_side() {
+        // The writer-side half: the daemon's word set is the enum, spelled
+        // exactly as its Display does (wire contract).
+        let cases = [
+            (ConnectionStatus::Connecting, "connecting"),
+            (ConnectionStatus::Authorize, "authorize"),
+            (ConnectionStatus::Authenticating, "authenticating"),
+            (ConnectionStatus::ExchangingToken, "exchanging token"),
+            (ConnectionStatus::Connected, "connected"),
+            (ConnectionStatus::Disconnected, "disconnected"),
+        ];
+        for (status, word) in cases {
+            let wire = StatusFields {
+                status_word: status.into(),
+                channel: "-".into(),
+                participants: 0,
+                position: "top-left".into(),
+                rtl: false,
+                visible: false,
+                anchor: "auto".into(),
+                scale: 100,
+                opacity: 100,
+                offset_x: 0,
+                offset_y: 0,
+                monitor: None,
+                auth: "own-app".into(),
+                show_on_fullscreen: true,
+                dim_on_hover: false,
+                hover_opacity: 40,
+            }
+            .to_wire();
+            assert!(wire.starts_with(&format!("status={word} ")), "{wire}");
+        }
     }
 }

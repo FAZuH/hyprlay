@@ -172,6 +172,7 @@ fn spawn_gui(exe: &std::path::Path) -> Result<(), String> {
 mod tests {
     use hyprlay_core::daemon_control::Action;
     use hyprlay_core::daemon_control::DaemonControl;
+    use hyprlay_core::daemon_control::ServiceError;
     use hyprlay_core::daemon_control::StopPolicy;
     use hyprlay_core::daemon_control::Toggle;
     use hyprlay_core::daemon_control::execute_toggle;
@@ -209,11 +210,13 @@ mod tests {
     }
 
     /// Spy at the process/socket boundary: records what ran so tests verify
-    /// state, not call mechanics.
+    /// state, not call mechanics. `fail_with` is a factory because
+    /// `ServiceError` is not `Clone`: every performed action fails the same
+    /// way, exactly as the old `String` double did.
     #[derive(Default)]
     struct FakeControl {
         installed: bool,
-        fail_with: Option<String>,
+        fail_with: Option<Box<dyn Fn() -> ServiceError + Send + Sync>>,
         performed: std::sync::Mutex<Vec<Action>>,
     }
 
@@ -228,10 +231,10 @@ mod tests {
             self.installed
         }
 
-        fn perform(&self, action: Action) -> Result<(), String> {
+        fn perform(&self, action: Action) -> Result<(), ServiceError> {
             self.performed.lock().unwrap().push(action);
             match &self.fail_with {
-                Some(text) => Err(text.clone()),
+                Some(failure) => Err(failure()),
                 None => Ok(()),
             }
         }
@@ -252,7 +255,9 @@ mod tests {
     fn a_failed_action_surfaces_its_error_text() {
         let control = FakeControl {
             installed: false,
-            fail_with: Some("error: could not start hyprlayd: ENOENT".into()),
+            fail_with: Some(Box::new(|| ServiceError::SpawnDaemon {
+                source: std::io::Error::other("ENOENT"),
+            })),
             ..FakeControl::default()
         };
         let outcome = execute_toggle(&control, Toggle::Stop, StopPolicy::ViaSocket);

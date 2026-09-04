@@ -26,6 +26,7 @@ use hyprlay_core::bins::DAEMON_BIN;
 use hyprlay_core::daemon_control::Action;
 use hyprlay_core::daemon_control::DaemonControl;
 use hyprlay_core::daemon_control::SERVICE_UNIT;
+use hyprlay_core::daemon_control::ServiceError;
 use hyprlay_core::daemon_control::ServiceManager;
 use hyprlay_core::domain::Command as DaemonCommand;
 use hyprlay_core::platform::Platform;
@@ -46,11 +47,11 @@ impl ServiceManager for Systemd {
             .is_ok_and(|status| status.success())
     }
 
-    fn systemctl(&self, subcommand: &str) -> Result<(), String> {
+    fn systemctl(&self, subcommand: &str) -> Result<(), ServiceError> {
         let output = Command::new("systemctl")
             .args(["--user", subcommand, SERVICE_UNIT])
             .output()
-            .map_err(|e| format!("error: could not run systemctl: {e}"))?;
+            .map_err(|source| ServiceError::SystemctlNotRun { source })?;
         if output.status.success() {
             return Ok(());
         }
@@ -60,25 +61,20 @@ impl ServiceManager for Systemd {
         } else {
             detail
         };
-        Err(format!("error: systemctl {subcommand} failed: {detail}"))
+        Err(ServiceError::SystemctlFailed {
+            subcommand: subcommand.to_string(),
+            detail,
+        })
     }
 
-    fn spawn_daemon(&self) -> Result<(), String> {
-        let exe = std::env::current_exe()
-            .map_err(|e| format!("error: could not locate the running hyprlay binary: {e}"))?;
+    fn spawn_daemon(&self) -> Result<(), ServiceError> {
+        let exe = std::env::current_exe().map_err(|source| ServiceError::LocateExe { source })?;
         let Some(dir) = exe.parent() else {
-            return Err(format!(
-                "error: could not find the directory of {}",
-                exe.display()
-            ));
+            return Err(ServiceError::NoExeParent { exe: exe.clone() });
         };
         let path = dir.join(DAEMON_BIN);
         if !path.exists() {
-            return Err(format!(
-                "error: {DAEMON_BIN} not found next to the running hyprlay binary (expected {})\n\
-                 the hyprlay binaries must be installed together",
-                path.display()
-            ));
+            return Err(ServiceError::DaemonMissing { path });
         }
         let mut cmd = Command::new(&path);
         // Own process group + null stdio + no wait: the daemon must outlive
@@ -86,13 +82,13 @@ impl ServiceManager for Systemd {
         // guarded daemon-side by the socket probe.
         crate::platform::host::host()
             .spawn(&mut cmd)
-            .map_err(|e| format!("error: could not start {DAEMON_BIN}: {e}"))
+            .map_err(|source| ServiceError::SpawnDaemon { source })
     }
 
-    fn quit_via_socket(&self) -> Result<(), String> {
+    fn quit_via_socket(&self) -> Result<(), ServiceError> {
         hyprlay_core::ctl::send_command_line(&Control, &DaemonCommand::Quit.to_string())
             .map(|_| ())
-            .ok_or_else(|| "error: daemon unreachable".to_string())
+            .ok_or(ServiceError::DaemonUnreachable)
     }
 
     fn install(
@@ -101,11 +97,11 @@ impl ServiceManager for Systemd {
         config_base: &Path,
         data_base: &Path,
         start: bool,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<String>, ServiceError> {
         install(exe_dir, config_base, data_base, start, &RealSystemctl)
     }
 
-    fn uninstall(&self, config_base: &Path, data_base: &Path) -> Result<Vec<String>, String> {
+    fn uninstall(&self, config_base: &Path, data_base: &Path) -> Result<Vec<String>, ServiceError> {
         uninstall(config_base, data_base, &RealSystemctl)
     }
 }
@@ -120,7 +116,7 @@ impl DaemonControl for SystemControl {
         Systemd.unit_installed()
     }
 
-    fn perform(&self, action: Action) -> Result<(), String> {
+    fn perform(&self, action: Action) -> Result<(), ServiceError> {
         match action {
             Action::SystemctlStart => Systemd.systemctl("start"),
             Action::SystemctlStop => Systemd.systemctl("stop"),
@@ -134,7 +130,7 @@ impl DaemonControl for SystemControl {
 /// Owned wrapper around an external binary, so tests substitute a recording
 /// double instead of invoking real units.
 pub trait Systemctl {
-    fn run(&self, args: &[&str]) -> Result<(), String>;
+    fn run(&self, args: &[&str]) -> Result<(), ServiceError>;
 }
 
 /// Production runner: captures exit status and stderr so flow errors carry
@@ -142,23 +138,31 @@ pub trait Systemctl {
 struct RealSystemctl;
 
 impl Systemctl for RealSystemctl {
-    fn run(&self, args: &[&str]) -> Result<(), String> {
+    fn run(&self, args: &[&str]) -> Result<(), ServiceError> {
         let joined = args.join(" ");
         let output = Command::new("systemctl")
             .arg("--user")
             .args(args)
             .output()
-            .map_err(|e| format!("{joined}: could not run systemctl: {e}"))?;
+            .map_err(|source| ServiceError::CommandNotRun {
+                command: joined.clone(),
+                program: "systemctl",
+                source,
+            })?;
         if output.status.success() {
             Ok(())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let detail = stderr.trim();
-            if detail.is_empty() {
-                Err(format!("{joined}: exited with {}", output.status))
+            let detail = if detail.is_empty() {
+                format!("exited with {}", output.status)
             } else {
-                Err(format!("{joined}: {detail}"))
-            }
+                detail.to_string()
+            };
+            Err(ServiceError::CommandFailed {
+                command: joined,
+                detail,
+            })
         }
     }
 }
@@ -270,13 +274,12 @@ pub fn install(
     data_base: &Path,
     start: bool,
     systemctl: &dyn Systemctl,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, ServiceError> {
     let missing = missing_bins(exe_dir);
     if !missing.is_empty() {
-        return Err(format!(
-            "error: missing binaries for install: {}\nthe hyprlay binaries must be installed together",
-            missing.join(", ")
-        ));
+        return Err(ServiceError::MissingInstallBins {
+            names: missing.join(", "),
+        });
     }
 
     let unit = unit_path(config_base);
@@ -296,17 +299,26 @@ pub fn install(
 
     systemctl
         .run(&["daemon-reload"])
-        .map_err(|e| format!("systemctl --user daemon-reload failed: {e}"))?;
+        .map_err(|source| ServiceError::SystemctlStepFailed {
+            step: "daemon-reload",
+            source: Box::new(source),
+        })?;
     report.push("systemctl --user daemon-reload: ok".to_string());
 
     if start {
         systemctl
             .run(&["enable", "--now", "hyprlay"])
-            .map_err(|e| format!("systemctl --user enable --now hyprlay failed: {e}"))?;
+            .map_err(|source| ServiceError::SystemctlStepFailed {
+                step: "enable --now hyprlay",
+                source: Box::new(source),
+            })?;
         report.push("systemctl --user enable --now hyprlay: ok".to_string());
         systemctl
             .run(&["enable", "--now", "hyprlay-tray"])
-            .map_err(|e| format!("systemctl --user enable --now hyprlay-tray failed: {e}"))?;
+            .map_err(|source| ServiceError::SystemctlStepFailed {
+                step: "enable --now hyprlay-tray",
+                source: Box::new(source),
+            })?;
         report.push("systemctl --user enable --now hyprlay-tray: ok".to_string());
     } else {
         report.push("skipped systemctl --user enable --now (--no-start)".to_string());
@@ -320,7 +332,7 @@ pub fn uninstall(
     config_base: &Path,
     data_base: &Path,
     systemctl: &dyn Systemctl,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, ServiceError> {
     let mut report = Vec::new();
     match systemctl.run(&["disable", "--now", "hyprlay"]) {
         Ok(()) => report.push("systemctl --user disable --now hyprlay: ok".to_string()),
@@ -341,27 +353,37 @@ pub fn uninstall(
     Ok(report)
 }
 
-fn write_file(path: &Path, contents: &str) -> Result<(), String> {
+fn write_file(path: &Path, contents: &str) -> Result<(), ServiceError> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|source| ServiceError::CreateDirFailed {
+            path: parent.to_path_buf(),
+            source,
+        })?;
     }
-    fs::write(path, contents).map_err(|e| format!("could not write {}: {e}", path.display()))
+    fs::write(path, contents).map_err(|source| ServiceError::WriteFileFailed {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
-fn write_bytes(path: &Path, contents: &[u8]) -> Result<(), String> {
+fn write_bytes(path: &Path, contents: &[u8]) -> Result<(), ServiceError> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|source| ServiceError::CreateDirFailed {
+            path: parent.to_path_buf(),
+            source,
+        })?;
     }
-    fs::write(path, contents).map_err(|e| format!("could not write {}: {e}", path.display()))
+    fs::write(path, contents).map_err(|source| ServiceError::WriteFileFailed {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 /// Install the app icon into the user's hicolor theme so the `Icon=hyprlay`
 /// desktop entry resolves to a real image. The SVG scales to any size; the
 /// PNG raster sizes cover launchers that do not read SVG. Bytes are bundled
 /// into the binary (same pattern as the tray icons). Returns the paths written.
-fn install_icon(data_base: &Path, report: &mut Vec<String>) -> Result<(), String> {
+fn install_icon(data_base: &Path, report: &mut Vec<String>) -> Result<(), ServiceError> {
     let svg = icon_svg_path(data_base);
     write_bytes(&svg, include_bytes!("../../../assets/hyprlay.svg"))?;
     report.push(format!("wrote {}", svg.display()));
@@ -382,7 +404,7 @@ fn install_icon(data_base: &Path, report: &mut Vec<String>) -> Result<(), String
 }
 
 /// Remove the installed app icon files. `scalable` SVG plus each raster size.
-fn uninstall_icon(data_base: &Path, report: &mut Vec<String>) -> Result<(), String> {
+fn uninstall_icon(data_base: &Path, report: &mut Vec<String>) -> Result<(), ServiceError> {
     remove_reported(&icon_svg_path(data_base), report)?;
     for size in ICON_SIZES {
         remove_reported(&icon_png_path(data_base, *size), report)?;
@@ -390,13 +412,18 @@ fn uninstall_icon(data_base: &Path, report: &mut Vec<String>) -> Result<(), Stri
     Ok(())
 }
 
-fn remove_reported(path: &Path, report: &mut Vec<String>) -> Result<(), String> {
+fn remove_reported(path: &Path, report: &mut Vec<String>) -> Result<(), ServiceError> {
     match fs::remove_file(path) {
         Ok(()) => report.push(format!("removed {}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             report.push(format!("already absent {}", path.display()))
         }
-        Err(e) => return Err(format!("could not remove {}: {e}", path.display())),
+        Err(source) => {
+            return Err(ServiceError::RemoveFileFailed {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
     }
     Ok(())
 }

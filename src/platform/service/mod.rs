@@ -14,6 +14,7 @@ pub mod windows;
 
 use std::path::Path;
 
+use hyprlay_core::daemon_control::ServiceError;
 use hyprlay_core::daemon_control::ServiceManager;
 #[cfg(target_os = "macos")]
 pub use launchd::Launchd;
@@ -35,13 +36,16 @@ pub fn install_service(
     config_base: &Path,
     data_base: &Path,
     start: bool,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, ServiceError> {
     Systemd.install(exe_dir, config_base, data_base, start)
 }
 
 /// Uninstall the autostart service config for the running OS.
 #[cfg(target_os = "linux")]
-pub fn uninstall_service(config_base: &Path, data_base: &Path) -> Result<Vec<String>, String> {
+pub fn uninstall_service(
+    config_base: &Path,
+    data_base: &Path,
+) -> Result<Vec<String>, ServiceError> {
     Systemd.uninstall(config_base, data_base)
 }
 
@@ -52,13 +56,16 @@ pub fn install_service(
     config_base: &Path,
     data_base: &Path,
     start: bool,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, ServiceError> {
     Launchd.install(exe_dir, config_base, data_base, start)
 }
 
 /// Uninstall the autostart service config for the running OS.
 #[cfg(target_os = "macos")]
-pub fn uninstall_service(config_base: &Path, data_base: &Path) -> Result<Vec<String>, String> {
+pub fn uninstall_service(
+    config_base: &Path,
+    data_base: &Path,
+) -> Result<Vec<String>, ServiceError> {
     Launchd.uninstall(config_base, data_base)
 }
 
@@ -69,12 +76,15 @@ pub fn install_service(
     config_base: &Path,
     data_base: &Path,
     start: bool,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, ServiceError> {
     WindowsService.install(exe_dir, config_base, data_base, start)
 }
 
 /// Uninstall the autostart service config for the running OS.
 #[cfg(target_os = "windows")]
-pub fn uninstall_service(config_base: &Path, data_base: &Path) -> Result<Vec<String>, String> {
+pub fn uninstall_service(
+    config_base: &Path,
+    data_base: &Path,
+) -> Result<Vec<String>, ServiceError> {
     WindowsService.uninstall(config_base, data_base)
 }
