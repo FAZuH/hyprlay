@@ -12,6 +12,8 @@ pub mod systemd;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+mod fs_util;
+
 use std::path::Path;
 
 use hyprlay_core::daemon_control::ServiceError;
