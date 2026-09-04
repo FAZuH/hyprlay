@@ -59,7 +59,11 @@ boundary.
 | `src/daemon/adapters/ipc.rs` | transport-agnostic `IpcStream` + `DiscordTransport` port | Discord's local IPC wire format: 8-byte LE header, handshake, PING/PONG; per-OS discovery + connect (unix socket / named pipe) behind the package-local `DiscordTransport` port (Adapter) |
 | `src/daemon/adapters/auth.rs` | `detect() -> Option<OwnAppAuth>`, `exchange(code)` | Credential resolution (env → auth.json) and the OAuth code exchange |
 | `src/daemon/adapters/{cache,avatar,token}.rs` | roster/avatar/token stores | On-disk persistence with tracing on real failures |
-| `src/gui/mod.rs` | iced app `Gui::run()` | Window layout (header / sidebar / content / status bar), field registry, search; every change becomes a `Command` |
+| `src/gui/mod.rs` | iced app shell: `Gui::run()` | `Message`, `Gui`, boot/subscribe wiring, window settings, and the blocking `send` wrapper; every change stays a `Command` — the layer modules below own the rest |
+| `src/gui/update.rs` | `pub(super)` `update(gui, msg)` | The one flat update match (the app's dispatch table), the `shortcut` dispatcher, and the async daemon-toggle / auth effects |
+| `src/gui/commands.rs` | `pub(super)` `command_for`, `apply_num`, `revert_commands` | Message → Command translation plus the bookkeeping the update arms share: unsaved marker, numeric bounds check, revert diff |
+| `src/gui/scroll.rs` | `pub(super)` `measure_sections`, `scroll_to_section` | One-page navigation: the measure operation, section jumps, scrollspy highlight, and the shared widget ids |
+| `src/gui/view.rs` | `pub(super)` `view(gui)` | Window composition: header (title, search, global actions), sidebar (section anchors), status bar (unsaved marker, daemon toggle, last reply) |
 | `src/gui/fields.rs` | per-key field registry | Section, label, tooltip, and control rendering for each setting |
 | `src/gui/daemon.rs` | `DaemonState` machine | Status chip states (connecting… / up / daemon not active) and the Start/Stop toggle plumbing (systemctl vs spawn vs `quit`) |
 | `src/gui/picker.rs` | color picker widget | Color selection UI |
