@@ -275,7 +275,9 @@ impl Overlay {
         if let Some(roster) = crate::daemon::adapters::cache::load_roster() {
             self.channel_name = roster.channel;
             self.me_id = roster.me_id;
-            self.users = roster.users.into_iter().map(Participant::from).collect();
+            // Deserialization already restored the persisted fields; the
+            // live-only speaking flag came back as false.
+            self.users = roster.users;
             self.avatars.hydrate(&self.users);
         }
     }
