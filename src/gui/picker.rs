@@ -32,7 +32,7 @@ use iced::widget::text_input;
 use super::Gui;
 use super::Message;
 use super::fields::reset_button;
-use super::update;
+use super::update::update;
 
 fn iced_color(rgb: Rgb) -> Color {
     Color::from_rgb(rgb.r, rgb.g, rgb.b)
