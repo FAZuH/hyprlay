@@ -9,7 +9,6 @@
 //! keeps it alive (`KeepAlive`) so a crash/laptop wake relaunches it. It is
 //! registered in the `gui/<uid>` domain with `launchctl bootstrap`.
 
-use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -22,6 +21,7 @@ use hyprlay_core::daemon_control::ServiceManager;
 use hyprlay_core::domain::Command as DaemonCommand;
 use hyprlay_core::platform::Platform;
 
+use super::fs_util;
 use crate::platform::ipc::control::Control;
 
 /// The launchd label for the user LaunchAgent (matches the systemd unit name
@@ -176,7 +176,7 @@ impl ServiceManager for Launchd {
         let path = Self::plist_path().ok_or(ServiceError::ResolveDir {
             what: "LaunchAgents dir",
         })?;
-        write_plist(&path, &Self::plist(exe_dir))?;
+        fs_util::write_file(&path, Self::plist(exe_dir).as_bytes())?;
         let uid = Self::uid();
         let mut report = vec![format!("wrote {}", path.display())];
         let plist = path.to_str().ok_or(ServiceError::NonUtf8PlistPath)?;
@@ -220,7 +220,7 @@ impl ServiceManager for Launchd {
             )),
         }
         if let Some(path) = Self::plist_path() {
-            remove_reported(&path, &mut report)?;
+            fs_util::remove_reported(&path, &mut report)?;
         }
         Ok(report)
     }
@@ -242,33 +242,4 @@ impl DaemonControl for SystemControl {
             Action::SocketQuit => Launchd.quit_via_socket(),
         }
     }
-}
-
-fn write_plist(path: &Path, contents: &str) -> Result<(), ServiceError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| ServiceError::CreateDirFailed {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
-    fs::write(path, contents).map_err(|source| ServiceError::WriteFileFailed {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-fn remove_reported(path: &Path, report: &mut Vec<String>) -> Result<(), ServiceError> {
-    match fs::remove_file(path) {
-        Ok(()) => report.push(format!("removed {}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            report.push(format!("already absent {}", path.display()))
-        }
-        Err(source) => {
-            return Err(ServiceError::RemoveFileFailed {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
-    }
-    Ok(())
 }

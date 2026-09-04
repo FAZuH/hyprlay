@@ -15,7 +15,6 @@
 //! `Icon=hyprlay` and install/uninstall also manage the hicolor theme icon
 //! files (SVG + PNG raster sizes) so the launcher shows the brand mark.
 
-use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -31,6 +30,7 @@ use hyprlay_core::daemon_control::ServiceManager;
 use hyprlay_core::domain::Command as DaemonCommand;
 use hyprlay_core::platform::Platform;
 
+use super::fs_util;
 use crate::platform::ipc::control::Control;
 
 /// The systemd user-startup backend.
@@ -285,9 +285,9 @@ pub fn install(
     let unit = unit_path(config_base);
     let tray_unit = tray_unit_path(config_base);
     let desktop = desktop_path(data_base);
-    write_file(&unit, &unit_text(exe_dir))?;
-    write_file(&tray_unit, &tray_unit_text(exe_dir))?;
-    write_file(&desktop, &desktop_text(exe_dir))?;
+    fs_util::write_file(&unit, unit_text(exe_dir).as_bytes())?;
+    fs_util::write_file(&tray_unit, tray_unit_text(exe_dir).as_bytes())?;
+    fs_util::write_file(&desktop, desktop_text(exe_dir).as_bytes())?;
 
     let mut report = vec![
         format!("wrote {}", unit.display()),
@@ -346,37 +346,11 @@ pub fn uninstall(
             "systemctl --user disable --now hyprlay-tray: tolerated ({e})"
         )),
     }
-    remove_reported(&unit_path(config_base), &mut report)?;
-    remove_reported(&tray_unit_path(config_base), &mut report)?;
-    remove_reported(&desktop_path(data_base), &mut report)?;
+    fs_util::remove_reported(&unit_path(config_base), &mut report)?;
+    fs_util::remove_reported(&tray_unit_path(config_base), &mut report)?;
+    fs_util::remove_reported(&desktop_path(data_base), &mut report)?;
     uninstall_icon(data_base, &mut report)?;
     Ok(report)
-}
-
-fn write_file(path: &Path, contents: &str) -> Result<(), ServiceError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| ServiceError::CreateDirFailed {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
-    fs::write(path, contents).map_err(|source| ServiceError::WriteFileFailed {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-fn write_bytes(path: &Path, contents: &[u8]) -> Result<(), ServiceError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| ServiceError::CreateDirFailed {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
-    fs::write(path, contents).map_err(|source| ServiceError::WriteFileFailed {
-        path: path.to_path_buf(),
-        source,
-    })
 }
 
 /// Install the app icon into the user's hicolor theme so the `Icon=hyprlay`
@@ -385,7 +359,7 @@ fn write_bytes(path: &Path, contents: &[u8]) -> Result<(), ServiceError> {
 /// into the binary (same pattern as the tray icons). Returns the paths written.
 fn install_icon(data_base: &Path, report: &mut Vec<String>) -> Result<(), ServiceError> {
     let svg = icon_svg_path(data_base);
-    write_bytes(&svg, include_bytes!("../../../assets/hyprlay.svg"))?;
+    fs_util::write_file(&svg, include_bytes!("../../../assets/hyprlay.svg"))?;
     report.push(format!("wrote {}", svg.display()));
 
     for size in ICON_SIZES {
@@ -397,7 +371,7 @@ fn install_icon(data_base: &Path, report: &mut Vec<String>) -> Result<(), Servic
             256 => include_bytes!("../../../assets/hyprlay-256.png"),
             _ => unreachable!(),
         };
-        write_bytes(&png, bytes)?;
+        fs_util::write_file(&png, bytes)?;
         report.push(format!("wrote {}", png.display()));
     }
     Ok(())
@@ -405,25 +379,9 @@ fn install_icon(data_base: &Path, report: &mut Vec<String>) -> Result<(), Servic
 
 /// Remove the installed app icon files. `scalable` SVG plus each raster size.
 fn uninstall_icon(data_base: &Path, report: &mut Vec<String>) -> Result<(), ServiceError> {
-    remove_reported(&icon_svg_path(data_base), report)?;
+    fs_util::remove_reported(&icon_svg_path(data_base), report)?;
     for size in ICON_SIZES {
-        remove_reported(&icon_png_path(data_base, *size), report)?;
-    }
-    Ok(())
-}
-
-fn remove_reported(path: &Path, report: &mut Vec<String>) -> Result<(), ServiceError> {
-    match fs::remove_file(path) {
-        Ok(()) => report.push(format!("removed {}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            report.push(format!("already absent {}", path.display()))
-        }
-        Err(source) => {
-            return Err(ServiceError::RemoveFileFailed {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
+        fs_util::remove_reported(&icon_png_path(data_base, *size), report)?;
     }
     Ok(())
 }
