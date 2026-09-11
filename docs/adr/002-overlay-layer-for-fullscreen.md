@@ -37,5 +37,5 @@ Conflates "whether" with "how much" and makes the GUI slider ambiguous. Two knob
 ## Consequences
 - Toggling `show-on-fullscreen` costs a daemon restart (control socket downtime ~100 ms, roster re-hydrated from cache). Same cost/UX as `monitor` changes.
 - Hover polling is 20 Hz only while enabled and displayable; otherwise no cursor IPC traffic. View re-renders only on hover edge transitions (diff-gated).
-- `status` reply appends `show-on-fullscreen`, `dim-on-hover`, `hover-opacity` at the end (whitespace-token whitespace — existing tray parsers that split on ` ` and `=` remain compatible).
+- `status` reply appends `show-on-fullscreen`, `dim-on-hover`, `hover-opacity` at the end. Amended 2026-09-03: the convention is now structural — `hyprlay_core::status::StatusFields` builds and parses the whole line, so appending a field is a one-place edit and readers survive it by construction (the hand-rolled token parsers this bullet originally justified are gone).
 - `CONTEXT.md` gains `Overlay layer`, `Dim on hover`, `Hover opacity` vocabulary; the `Daemon-side commands` invariant now lists `set show-on-fullscreen`.

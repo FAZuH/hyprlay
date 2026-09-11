@@ -1,6 +1,9 @@
-# hyprlay
+<h1 align="center">
+  <img src="assets/hyprlay-64.png" alt="hyprlay logo" width="48" />
+  hyprlay
+</h1>
 
-**A lightweight Discord voice overlay for Hyprland.**
+<p align="center"><strong>Lightweight and highly configurable Discord voice overlay for Linux, MacOS and Windows</strong></p>
 
 <hr>
 
@@ -15,7 +18,7 @@ Download the latest binaries from [releases page](https://github.com/FAZuH/hyprl
 
 Or install with [Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html):
 ```sh
-cargo install --git https://github.com/FAZuH/hyprlay
+cargo install --locked --git https://github.com/FAZuH/hyprlay
 
 # Or build from source:
 cargo build --release

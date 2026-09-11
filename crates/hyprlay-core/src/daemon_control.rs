@@ -19,6 +19,161 @@
 
 use std::path::Path;
 
+use crate::bins::DAEMON_BIN;
+
+/// Why a service-control operation failed. Part of the [`DaemonControl`] /
+/// [`ServiceManager`] port contract: the backends in the host package
+/// construct it, fronts render it through `Display`.
+///
+/// The `Display` strings are the observable wording — toggle failures land
+/// in the GUI/tray status line and install failures in the CLI's stderr —
+/// so each variant transcribes its old `format!` string byte-for-byte, and
+/// the per-variant pins below lock that transcription. Failure *identity*
+/// (which operation, which path, which command) is typed; only payloads
+/// that were already strings (subcommand words, command stderr) stay
+/// strings.
+///
+/// Deliberately **not** exhaustive-by-attribute at the variant level: the
+/// adapters must construct every variant from outside this crate. The
+/// enum-level `#[non_exhaustive]` only forces wildcard matches on future
+/// consumers, leaving construction open.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ServiceError {
+    /// `systemctl --user <subcommand>` could not be spawned at all:
+    /// `error: could not run systemctl: <io>`.
+    #[error("error: could not run systemctl: {source}")]
+    SystemctlNotRun {
+        #[source]
+        source: std::io::Error,
+    },
+    /// `systemctl --user <subcommand> hyprlay` exited non-zero; the detail
+    /// is systemctl's trimmed stderr, or `exit <code>` when it printed
+    /// nothing: `error: systemctl <subcommand> failed: <detail>`.
+    #[error("error: systemctl {subcommand} failed: {detail}")]
+    SystemctlFailed { subcommand: String, detail: String },
+    /// A service command could not be spawned: `<command>: could not run
+    /// <program>: <io>`.
+    #[error("{command}: could not run {program}: {source}")]
+    CommandNotRun {
+        command: String,
+        program: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    /// A service command exited non-zero; the detail is its trimmed stderr,
+    /// or `exited with <status>` when it printed nothing: `<command>:
+    /// <detail>`.
+    #[error("{command}: {detail}")]
+    CommandFailed { command: String, detail: String },
+    /// A `systemctl --user <step>` step of an install failed after the
+    /// files were written: `systemctl --user <step> failed: <cause>`.
+    #[error("systemctl --user {step} failed: {source}")]
+    SystemctlStepFailed {
+        step: &'static str,
+        #[source]
+        source: Box<ServiceError>,
+    },
+    /// A `launchctl <step>` step of the start flow failed:
+    /// `error: launchctl <step> failed: <cause>`.
+    #[error("error: launchctl {step} failed: {source}")]
+    LaunchctlStepFailed {
+        step: &'static str,
+        #[source]
+        source: Box<ServiceError>,
+    },
+    /// A `launchctl <step>` step of an install failed:
+    /// `launchctl <step> failed: <cause>`.
+    #[error("launchctl {step} failed: {source}")]
+    LaunchctlInstallStepFailed {
+        step: &'static str,
+        #[source]
+        source: Box<ServiceError>,
+    },
+    /// `std::env::current_exe()` failed: `error: could not locate the
+    /// running hyprlay binary: <io>`.
+    #[error("error: could not locate the running hyprlay binary: {source}")]
+    LocateExe {
+        #[source]
+        source: std::io::Error,
+    },
+    /// The running binary's path has no parent directory: `error: could not
+    /// find the directory of <exe>`.
+    #[error("error: could not find the directory of {exe}")]
+    NoExeParent { exe: std::path::PathBuf },
+    /// The sibling daemon binary is missing from the install directory:
+    /// `error: hyprlayd not found next to the running hyprlay binary
+    /// (expected <path>)\nthe hyprlay binaries must be installed together`.
+    #[error(
+        "error: {} not found next to the running hyprlay binary (expected {path})\nthe hyprlay binaries must be installed together",
+        DAEMON_BIN
+    )]
+    DaemonMissing { path: std::path::PathBuf },
+    /// Spawning the detached sibling daemon failed: `error: could not start
+    /// hyprlayd: <io>`.
+    #[error("error: could not start {}: {source}", DAEMON_BIN)]
+    SpawnDaemon {
+        #[source]
+        source: std::io::Error,
+    },
+    /// The ctl-socket quit got no answer: `error: daemon unreachable`.
+    #[error("error: daemon unreachable")]
+    DaemonUnreachable,
+    /// A subcommand this backend does not implement (only reachable on
+    /// macOS/Windows, whose backends drive a subset of the port):
+    /// `error: unsupported <backend> subcommand: <subcommand>`.
+    #[error("error: unsupported {backend} subcommand: {subcommand}")]
+    UnsupportedSubcommand {
+        backend: &'static str,
+        subcommand: String,
+    },
+    /// A platform directory could not be resolved (the LaunchAgents dir on
+    /// macOS, the Startup folder on Windows): `error: could not resolve the
+    /// <what>`.
+    #[error("error: could not resolve the {what}")]
+    ResolveDir { what: &'static str },
+    /// The LaunchAgent plist path is not valid UTF-8, so it cannot ride in
+    /// a `launchctl` argument vector: `error: plist path is not UTF-8`.
+    #[error("error: plist path is not UTF-8")]
+    NonUtf8PlistPath,
+    /// A required sibling binary is missing from the install directory, so
+    /// the install aborts before writing anything: `error: missing binaries
+    /// for install: <names>\nthe hyprlay binaries must be installed
+    /// together`.
+    #[error(
+        "error: missing binaries for install: {names}\nthe hyprlay binaries must be installed together"
+    )]
+    MissingInstallBins { names: String },
+    /// Creating a service-config file's parent directory failed:
+    /// `could not create <path>: <io>`.
+    #[error("could not create {path}: {source}")]
+    CreateDirFailed {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// Writing a service-config file failed: `could not write <path>: <io>`.
+    #[error("could not write {path}: {source}")]
+    WriteFileFailed {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// Removing a service-config file failed: `could not remove <path>:
+    /// <io>`.
+    #[error("could not remove {path}: {source}")]
+    RemoveFileFailed {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// The default install/uninstall of an OS that cannot host the hyprlay
+    /// service: `install is not supported on this platform` /
+    /// `uninstall is not supported on this platform`.
+    #[error("{operation} is not supported on this platform")]
+    UnsupportedOperation { operation: &'static str },
+}
+
 /// Which direction a toggle press drives the daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Toggle {
@@ -48,7 +203,7 @@ pub enum StopPolicy {
 /// stays testable without touching systemctl or the daemon.
 pub trait DaemonControl: Send + Sync {
     fn unit_installed(&self) -> bool;
-    fn perform(&self, action: Action) -> Result<(), String>;
+    fn perform(&self, action: Action) -> Result<(), ServiceError>;
 }
 
 /// The service-management boundary behind a [`DaemonControl`]: the systemctl
@@ -66,11 +221,11 @@ pub trait ServiceManager: Send + Sync {
     /// Whether the user service unit for the daemon is installed.
     fn unit_installed(&self) -> bool;
     /// Run `systemctl --user <subcommand> <SERVICE_UNIT>`.
-    fn systemctl(&self, subcommand: &str) -> Result<(), String>;
+    fn systemctl(&self, subcommand: &str) -> Result<(), ServiceError>;
     /// Detached spawn of the sibling daemon binary.
-    fn spawn_daemon(&self) -> Result<(), String>;
+    fn spawn_daemon(&self) -> Result<(), ServiceError>;
     /// Quit the running daemon over the control socket.
-    fn quit_via_socket(&self) -> Result<(), String>;
+    fn quit_via_socket(&self) -> Result<(), ServiceError>;
     /// Install the autostart service config next to `exe_dir` and register
     /// it; `start` controls whether it begins running immediately. Returns
     /// one human-readable line per step.
@@ -80,15 +235,19 @@ pub trait ServiceManager: Send + Sync {
         config_base: &Path,
         data_base: &Path,
         start: bool,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<String>, ServiceError> {
         let _ = (exe_dir, config_base, data_base, start);
-        Err("install is not supported on this platform".to_string())
+        Err(ServiceError::UnsupportedOperation {
+            operation: "install",
+        })
     }
     /// Uninstall the autostart service config and deregister it. Returns one
     /// human-readable line per step.
-    fn uninstall(&self, config_base: &Path, data_base: &Path) -> Result<Vec<String>, String> {
+    fn uninstall(&self, config_base: &Path, data_base: &Path) -> Result<Vec<String>, ServiceError> {
         let _ = (config_base, data_base);
-        Err("uninstall is not supported on this platform".to_string())
+        Err(ServiceError::UnsupportedOperation {
+            operation: "uninstall",
+        })
     }
 }
 
@@ -124,12 +283,15 @@ pub fn execute_toggle(
     stop: StopPolicy,
 ) -> Option<String> {
     let action = plan_action(toggle, control.unit_installed(), stop);
-    control.perform(action).err()
+    control.perform(action).err().map(|e| e.to_string())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+
     use super::Action;
+    use super::ServiceError;
     use super::StopPolicy;
     use super::Toggle;
     use super::plan_action;
@@ -180,5 +342,191 @@ mod tests {
                 Action::SocketQuit
             );
         }
+    }
+
+    // -------------------------------------------------------------------
+    // ServiceError characterization pins. Each row locks one variant's
+    // Display to the exact string the pre-typed `format!` sites produced;
+    // rewording any of them is a breaking change to the surfaces that print
+    // service errors (GUI/tray status lines, the CLI's stderr).
+    // -------------------------------------------------------------------
+
+    fn pinned_io() -> std::io::Error {
+        std::io::Error::other("disk on strike")
+    }
+
+    fn pinned_error() -> ServiceError {
+        ServiceError::CommandFailed {
+            command: "daemon-reload".into(),
+            detail: "unit not found".into(),
+        }
+    }
+
+    #[test]
+    fn service_error_display_reproduces_the_pinned_wording() {
+        use super::ServiceError as E;
+        let cases: [(E, &str); 21] = [
+            (
+                E::SystemctlNotRun {
+                    source: pinned_io(),
+                },
+                "error: could not run systemctl: disk on strike",
+            ),
+            (
+                E::SystemctlFailed {
+                    subcommand: "stop".into(),
+                    detail: "unit not loaded".into(),
+                },
+                "error: systemctl stop failed: unit not loaded",
+            ),
+            (
+                E::CommandNotRun {
+                    command: "daemon-reload".into(),
+                    program: "systemctl",
+                    source: pinned_io(),
+                },
+                "daemon-reload: could not run systemctl: disk on strike",
+            ),
+            (
+                E::CommandFailed {
+                    command: "bootout gui/1000/hyprlay.user".into(),
+                    detail: "exited with 3".into(),
+                },
+                "bootout gui/1000/hyprlay.user: exited with 3",
+            ),
+            (
+                E::SystemctlStepFailed {
+                    step: "daemon-reload",
+                    source: Box::new(pinned_error()),
+                },
+                "systemctl --user daemon-reload failed: daemon-reload: unit not found",
+            ),
+            (
+                E::LaunchctlStepFailed {
+                    step: "bootstrap",
+                    source: Box::new(pinned_error()),
+                },
+                "error: launchctl bootstrap failed: daemon-reload: unit not found",
+            ),
+            (
+                E::LaunchctlInstallStepFailed {
+                    step: "enable",
+                    source: Box::new(pinned_error()),
+                },
+                "launchctl enable failed: daemon-reload: unit not found",
+            ),
+            (
+                E::LocateExe {
+                    source: pinned_io(),
+                },
+                "error: could not locate the running hyprlay binary: disk on strike",
+            ),
+            (
+                E::NoExeParent {
+                    exe: "/proc/self/exe".into(),
+                },
+                "error: could not find the directory of /proc/self/exe",
+            ),
+            (
+                E::DaemonMissing {
+                    path: "/opt/hyprlay/hyprlayd".into(),
+                },
+                "error: hyprlayd not found next to the running hyprlay binary \
+                 (expected /opt/hyprlay/hyprlayd)\nthe hyprlay binaries must be installed together",
+            ),
+            (
+                E::SpawnDaemon {
+                    source: pinned_io(),
+                },
+                "error: could not start hyprlayd: disk on strike",
+            ),
+            (E::DaemonUnreachable, "error: daemon unreachable"),
+            (
+                E::UnsupportedSubcommand {
+                    backend: "Windows startup",
+                    subcommand: "reload".into(),
+                },
+                "error: unsupported Windows startup subcommand: reload",
+            ),
+            (
+                E::ResolveDir {
+                    what: "LaunchAgents dir",
+                },
+                "error: could not resolve the LaunchAgents dir",
+            ),
+            (E::NonUtf8PlistPath, "error: plist path is not UTF-8"),
+            (
+                E::MissingInstallBins {
+                    names: "hyprlayd".into(),
+                },
+                "error: missing binaries for install: hyprlayd\nthe hyprlay binaries must be installed together",
+            ),
+            (
+                E::CreateDirFailed {
+                    path: "/home/u/.config/hyprlay/systemd/user".into(),
+                    source: pinned_io(),
+                },
+                "could not create /home/u/.config/hyprlay/systemd/user: disk on strike",
+            ),
+            (
+                E::WriteFileFailed {
+                    path: "/home/u/.config/hyprlay/systemd/user/hyprlay.service".into(),
+                    source: pinned_io(),
+                },
+                "could not write /home/u/.config/hyprlay/systemd/user/hyprlay.service: disk on strike",
+            ),
+            (
+                E::RemoveFileFailed {
+                    path: "/home/u/.local/share/applications/hyprlay.desktop".into(),
+                    source: pinned_io(),
+                },
+                "could not remove /home/u/.local/share/applications/hyprlay.desktop: disk on strike",
+            ),
+            (
+                E::UnsupportedOperation {
+                    operation: "install",
+                },
+                "install is not supported on this platform",
+            ),
+            (
+                E::UnsupportedOperation {
+                    operation: "uninstall",
+                },
+                "uninstall is not supported on this platform",
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected, "{error:?}");
+        }
+    }
+
+    #[test]
+    fn io_failures_keep_the_io_error_as_their_source() {
+        let inner = pinned_io();
+        let error = ServiceError::WriteFileFailed {
+            path: "/tmp/hyprlay.service".into(),
+            source: inner,
+        };
+        let source = error
+            .source()
+            .expect("the io::Error rides along as the source");
+        assert!(source.downcast_ref::<std::io::Error>().is_some());
+    }
+
+    #[test]
+    fn nested_step_failures_chain_through_their_source() {
+        let inner = pinned_error();
+        let error = ServiceError::SystemctlStepFailed {
+            step: "daemon-reload",
+            source: Box::new(inner),
+        };
+        let source = error
+            .source()
+            .expect("the wrapped service failure is the source");
+        assert_eq!(
+            source.to_string(),
+            "daemon-reload: unit not found",
+            "the cause chain ends at the raw command failure"
+        );
     }
 }

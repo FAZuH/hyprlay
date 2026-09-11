@@ -15,6 +15,7 @@ use common::unique_temp_dir;
 use hyprlay::platform::service::systemd::Systemctl;
 use hyprlay::platform::service::systemd::install;
 use hyprlay::platform::service::systemd::uninstall;
+use hyprlay_core::daemon_control::ServiceError;
 
 const DAEMON_RELOAD: &str = "systemctl --user daemon-reload";
 const ENABLE_NOW: &str = "systemctl --user enable --now hyprlay";
@@ -52,13 +53,14 @@ impl Spy {
 }
 
 impl Systemctl for Spy {
-    fn run(&self, args: &[&str]) -> Result<(), String> {
+    fn run(&self, args: &[&str]) -> Result<(), ServiceError> {
         let line = format!("systemctl --user {}", args.join(" "));
         self.calls.borrow_mut().push(line.clone());
         match &self.fail_when {
-            Some(failing) if *failing == line => {
-                Err("Failed to connect: unit not found".to_string())
-            }
+            Some(failing) if *failing == line => Err(ServiceError::CommandFailed {
+                command: args.join(" "),
+                detail: "Failed to connect: unit not found".to_string(),
+            }),
             _ => Ok(()),
         }
     }
@@ -393,7 +395,10 @@ fn failed_daemon_reload_reports_the_step_and_never_enables() {
     )
     .unwrap_err();
 
-    assert!(err.contains("daemon-reload"), "error names the step: {err}");
+    assert!(
+        err.to_string().contains("daemon-reload"),
+        "error names the step: {err}"
+    );
     assert_eq!(spy.lines(), vec![DAEMON_RELOAD.to_string()]);
 }
 
@@ -412,7 +417,10 @@ fn failed_enable_now_reports_the_step_after_writing_both_files() {
     )
     .unwrap_err();
 
-    assert!(err.contains("enable"), "error names the step: {err}");
+    assert!(
+        err.to_string().contains("enable"),
+        "error names the step: {err}"
+    );
     assert_eq!(
         spy.lines(),
         vec![DAEMON_RELOAD.to_string(), ENABLE_NOW.to_string()]
@@ -505,7 +513,10 @@ fn install_aborts_before_any_write_when_bins_are_missing() {
     .unwrap_err();
 
     // The error names the single required bin.
-    assert!(err.contains(DAEMON_BIN), "error names hyprlayd: {err}");
+    assert!(
+        err.to_string().contains(DAEMON_BIN),
+        "error names hyprlayd: {err}"
+    );
     // Nothing was written before the check failed.
     assert!(!world.unit().exists(), "daemon unit must not be written");
     assert!(!world.tray_unit().exists(), "tray unit must not be written");

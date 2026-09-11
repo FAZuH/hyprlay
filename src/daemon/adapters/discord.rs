@@ -18,6 +18,8 @@ use std::time::Duration;
 use futures_channel::mpsc::Sender;
 use futures_util::SinkExt;
 use hyprlay_core::domain::ConnectionStatus;
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 use tracing::info;
@@ -36,11 +38,16 @@ pub enum DiscordEvent {
     Participants(Vec<Participant>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// One voice-channel participant. Doubles as the roster-cache row: serde
+/// output defines both the `roster.json` file format and the write-dedup
+/// signature, so a new field cannot be added to one without the other.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Participant {
     pub id: String,
     pub name: String,
     pub avatar_hash: Option<String>,
+    /// Speaking state is live-only: it would be stale on load.
+    #[serde(skip)]
     pub speaking: bool,
     pub self_mute: bool,
     pub self_deaf: bool,

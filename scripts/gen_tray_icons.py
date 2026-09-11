@@ -1,62 +1,64 @@
 #!/usr/bin/env python3
-"""Generate the two tray icons (RGBA PNG, 48x48) with an "H" glyph.
-Run once; the PNGs are committed under assets/. No third-party deps."""
-import zlib, struct, os
+"""Regenerate every brand asset in assets/ from assets/hyprlay.svg.
 
-W = H = 48
+That SVG is the single source for all sizes; outputs are committed, so
+run this after editing it and commit the result.
+"""
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 
-def draw_h(color):
-    """Return a W*H*4 RGBA bytearray with an "H" glyph on a transparent
-    background. `color` is (r, g, b, a)."""
-    r, g, b, a = color
-    bar = 8       # stroke thickness of each bar
-    margin = 10   # gap from the canvas edge to the vertical bars
-    # Vertical bars span the full letter height.
-    v_top, v_bot = margin, H - margin
-    # Horizontal center bar, vertically centered.
-    c_top = H // 2 - bar // 2
-    c_bot = H // 2 + bar // 2
-    left = margin
-    right = W - margin - bar
-    buf = bytearray(W * H * 4)
-    for y in range(H):
-        for x in range(W):
-            on = False
-            if v_top <= y < v_bot:
-                if left <= x < left + bar:
-                    on = True
-                if right <= x < right + bar:
-                    on = True
-            if c_top <= y < c_bot and left + bar <= x < right:
-                on = True
-            i = (y * W + x) * 4
-            if on:
-                buf[i:i+4] = bytes((r, g, b, a))
-            # else: leave transparent (alpha 0)
-    return buf
+HERE = os.path.dirname(os.path.abspath(__file__))
+ASSETS = os.path.join(os.path.dirname(HERE), "assets")
+SVG = os.path.join(ASSETS, "hyprlay.svg")
 
-def write_png(path, pixels):
-    raw = bytearray()
-    for y in range(H):
-        raw.append(0)  # filter type 0 (none)
-        raw += pixels[y * W * 4:(y + 1) * W * 4]
-    comp = zlib.compress(bytes(raw), 9)
-    def chunk(typ, data):
-        body = typ + data
-        return (struct.pack(">I", len(data)) + body
-                + struct.pack(">I", zlib.crc32(body) & 0xffffffff))
-    sig = b'\x89PNG\r\n\x1a\n'
-    ihdr = struct.pack(">IIBBBBB", W, H, 8, 6, 0, 0, 0)  # 8-bit RGBA
-    with open(path, "wb") as f:
-        f.write(sig + chunk(b'IHDR', ihdr)
-                + chunk(b'IDAT', comp) + chunk(b'IEND', b''))
+H_FILL = 'fill="#ffffff"'
+H_DIMMED = 'fill="#a0a0a0"'
+TRAY_PX = 48
+APP_PX = (48, 64, 128, 256)
+ICO_SIZES = [(px, px) for px in sorted(APP_PX + (32, 16), reverse=True)]
 
-here = os.path.dirname(os.path.abspath(__file__))
-assets = os.path.join(os.path.dirname(here), "assets")
-os.makedirs(assets, exist_ok=True)
-write_png(os.path.join(assets, "tray-connected.png"),
-          draw_h((255, 255, 255, 255)))    # white H
-write_png(os.path.join(assets, "tray-disconnected.png"),
-          draw_h((160, 160, 160, 255)))    # dim grey H
-print("wrote", os.path.join(assets, "tray-connected.png"),
-      os.path.join(assets, "tray-disconnected.png"))
+
+def raster(svg_text, px, out_path):
+    with tempfile.NamedTemporaryFile("w", suffix=".svg", delete=False) as f:
+        f.write(svg_text)
+        src = f.name
+    try:
+        subprocess.run(
+            ["rsvg-convert", "-w", str(px), "-h", str(px), "-o", out_path, src],
+            check=True,
+        )
+    finally:
+        os.unlink(src)
+
+
+def main():
+    if not shutil.which("rsvg-convert"):
+        sys.exit("error: rsvg-convert not found (install librsvg)")
+    try:
+        from PIL import Image
+    except ImportError:
+        sys.exit("error: Pillow not found (needed for assets/hyprlay.ico)")
+
+    with open(SVG) as f:
+        svg = f.read()
+    if svg.count(H_FILL) != 1:
+        sys.exit(f"error: expected exactly one {H_FILL} (the H glyph) in {SVG}")
+
+    raster(svg, TRAY_PX, os.path.join(ASSETS, "tray-connected.png"))
+    raster(svg.replace(H_FILL, H_DIMMED, 1), TRAY_PX,
+           os.path.join(ASSETS, "tray-disconnected.png"))
+    for px in APP_PX:
+        raster(svg, px, os.path.join(ASSETS, f"hyprlay-{px}.png"))
+
+    master = os.path.join(ASSETS, "hyprlay-256.png")
+    Image.open(master).save(
+        os.path.join(ASSETS, "hyprlay.ico"), format="ICO", sizes=ICO_SIZES
+    )
+    print("wrote tray pair, hyprlay PNGs", APP_PX, "and hyprlay.ico from", SVG)
+
+
+if __name__ == "__main__":
+    main()

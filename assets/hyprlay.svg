@@ -1,19 +1,6 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 128 128">
-  <rect x="0" y="0" width="128" height="128" rx="24" fill="#000000"/>
-  <!-- Bold centered "H" -->
-  <path d="M 40 32
-           L 50 32
-           L 50 56
-           L 78 56
-           L 78 32
-           L 88 32
-           L 88 96
-           L 78 96
-           L 78 66
-           L 50 66
-           L 50 96
-           L 40 96
-           Z"
-        fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- Ring stroke = 5% of the diameter (12.8/256) -->
+  <circle cx="128" cy="128" r="120" fill="#000000" stroke="#3f3f3f" stroke-width="12.8"/>
+  <!-- "H" ink box centered at (128,128): cap height 110 = 43% of the diameter -->
+  <path d="M75 73h29v42h50v-42h29v110h-29v-42h-50v42h-29z" fill="#ffffff"/>
 </svg>

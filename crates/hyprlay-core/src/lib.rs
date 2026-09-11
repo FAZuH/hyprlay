@@ -14,3 +14,4 @@ pub mod daemon_control;
 pub mod domain;
 pub mod platform;
 pub mod singleton;
+pub mod status;

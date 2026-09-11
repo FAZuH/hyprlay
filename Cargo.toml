@@ -35,6 +35,10 @@ iced = { version = "0.14", default-features = false, features = [
 ] }
 iced_layershell = "0.19.1"
 iced_runtime = "0.14"
+# pinned: iced_exdevtools 0.19.1 (unconditional dep of iced_layershell 0.19.1)
+# fails to compile against winit-core 0.31.0-beta.3; remove once iced_layershell
+# ships a release on the fixed iced_exdevtools 0.20 line
+winit-core = "=0.31.0-beta.2"
 tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "time", "macros"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 futures-channel = { version = "0.3", default-features = false, features = ["std"] }
@@ -48,6 +52,7 @@ dirs = "6"
 fd-lock = "4.0"
 interprocess = { version = "2", features = ["tokio"] }
 tracing = "0.1"
+thiserror = "2.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 clap = { version = "4.5", default-features = false, features = [
@@ -63,6 +68,7 @@ hyprlay-core = { workspace = true }
 clap = { workspace = true }
 iced = { workspace = true }
 iced_runtime = { workspace = true }
+winit-core = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
 futures-channel = { workspace = true }
