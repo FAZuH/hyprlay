@@ -52,9 +52,12 @@ Platform mechanics live behind ports in `src/platform/`; see
   name and own user id. Persisted to the roster cache only while connected;
   speaking state is never persisted (it would be stale on load).
 - **Roster row** — one participant entry rendered on the overlay surface:
-  avatar plus username, decorated by speaking ring and mute badges. The
-  overlay shows only roster rows — never connection or status text. An
-  empty roster renders an empty transparent surface.
+  avatar plus username, decorated by the speaking ring and, when the
+  participant is silenced, by one mute glyph shown inline after the username
+  (crossed microphone, or crossed headphones when deafened). Red marks a
+  server-set state, grey a self-set one. The overlay shows only roster rows —
+  never connection or status text. An empty roster renders an empty
+  transparent surface.
 - **RosterChange** — `Changed`/`Unchanged` result of applying a Discord
   event to the `Overlay`; drives cache writes and view refreshes.
 - **Overlay layer** — the Wayland layer-shell layer the overlay binds to.

@@ -7,6 +7,10 @@
 - Changed the app and tray icon to a circular design
 - Fixed source installs failing on a fresh dependency resolution
 
+### Overlay
+
+- Replaced the M and D text badges with crossed-mic and crossed-headphones glyphs after each name, red for server-set and grey for self-set mute or deafen
+
 ## 0.3.0 (2026-09-03)
 
 ### Platforms
