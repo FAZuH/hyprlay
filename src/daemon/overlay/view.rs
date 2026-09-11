@@ -52,11 +52,15 @@ pub fn view<'a, M: 'static>(state: &'a Overlay) -> Element<'a, M> {
     // is transparent anywhere.
     let alphas = state.effective_alphas();
 
-    let rows: Vec<Element<M>> = state
+    let mut rows: Vec<Element<M>> = state
         .displayed()
         .into_iter()
         .map(|p| participant_row(state, p, alphas))
         .collect();
+    let hidden = state.hidden_rows();
+    if hidden > 0 {
+        rows.push(overflow_row(state, hidden, alphas));
+    }
 
     // Fully transparent panel: no background, no border — only the rows.
     // Connect/sign-in progress is deliberately never rendered: an empty
@@ -171,6 +175,53 @@ fn alpha(mark: Mark, alphas: Alphas) -> Color {
     Color {
         a: alphas.text,
         ..mark.color()
+    }
+}
+
+/// The "+N" overflow pill: one quiet row after the capped roster, indented
+/// to the name column and dressed like a name chip, painted in the glyphs'
+/// muted grey. N counts the filtered participants the cap hides.
+fn overflow_row<'a, M: 'static>(
+    state: &'a Overlay,
+    hidden: usize,
+    alphas: Alphas,
+) -> Element<'a, M> {
+    let text_size = scaled(state, state.config().text_size);
+    let chip_bg = Color {
+        a: alphas.box_bg,
+        ..color_of(state.config().box_color)
+    };
+    let label = text(format!("+{hidden}")).size(text_size).color(Color {
+        a: alphas.text,
+        ..super::glyph::OVERFLOW_COLOR
+    });
+    let chip: Element<'_, M> = container(label)
+        .padding([2, 8])
+        .style(move |_t| ContainerStyle {
+            background: Some(chip_bg.into()),
+            border: Border {
+                radius: (text_size * 0.6).into(),
+                ..Border::default()
+            },
+            ..ContainerStyle::default()
+        })
+        .into();
+    // Indent past the avatar column so the pill sits under the names.
+    let indent = scaled(state, state.config().avatar_size) + 8.0;
+    if state.config().rtl {
+        row![
+            Space::new().width(Length::Fill),
+            chip,
+            Space::new().width(Length::Fixed(indent))
+        ]
+        .into()
+    } else {
+        row![
+            Space::new().width(Length::Fixed(indent)),
+            chip,
+            Space::new().width(Length::Fill)
+        ]
+        .into()
     }
 }
 

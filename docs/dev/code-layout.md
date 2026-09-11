@@ -52,7 +52,7 @@ boundary.
 | `src/daemon/surface_host/layershell.rs` | Linux/Wayland overlay shell | The existing `iced_layershell` app, behaviour byte-identical: edge anchoring with margins, hover polling |
 | `src/daemon/surface_host/winit.rs` | Windows/macOS overlay shell | Frameless, transparent, always-on-top `iced` window moved to the computed on-screen position; same shared logic and hover poll |
 | `src/daemon/ctl_server.rs` | `incoming()` stream of `CtlRequest` | Serves the core `ControlListener` on a dedicated thread (accept loop never stalls the async host), one thread per connection; the wire vocabulary itself lives in core (single source of truth) |
-| `src/daemon/overlay/state.rs` | `Overlay` model methods (`desired_size`, `displayed`, `apply_discord`) | Roster filtering, sizing, avatar cache/dedup |
+| `src/daemon/overlay/state.rs` | `Overlay` model methods (`desired_size`, `displayed`, `hidden_rows`, `apply_discord`) | Roster filtering, sizing, avatar cache/dedup |
 | `src/daemon/overlay/geometry.rs` | `anchor/margin/drag(cfg, …)` | All screen-placement math |
 | `src/daemon/overlay/view.rs` | `view(&Overlay)` | Widget construction only |
 | `src/daemon/overlay/glyph.rs` | `mark_of(&Participant) -> Option<Mark>` | Mute/deafen glyph mapping for roster rows, free of widgets |

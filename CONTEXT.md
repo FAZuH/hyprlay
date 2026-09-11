@@ -55,9 +55,21 @@ Platform mechanics live behind ports in `src/platform/`; see
   avatar plus username, decorated by the speaking ring and, when the
   participant is silenced, by one mute glyph shown inline after the username
   (crossed microphone, or crossed headphones when deafened). Red marks a
-  server-set state, grey a self-set one. The overlay shows only roster rows —
-  never connection or status text. An empty roster renders an empty
-  transparent surface.
+  server-set state, grey a self-set one. The overlay shows only roster rows
+  plus the +N pill when the row cap truncates them — never connection or
+  status text. An empty roster renders an empty transparent surface.
+- **Roster order** — the strategy that orders roster rows before rendering,
+  set by `roster-order` (default `join-order`): `join-order` keeps the
+  order Discord reports, `name` sorts case-insensitive A→Z,
+  `recent-speakers` puts the most recent speaker on top. Every strategy is
+  a stable sort, so ties keep join order.
+- **Max rows** — roster height cap in rows (`max-rows`, clamped 0..=200;
+  0 = unlimited). Applied after sorting and filtering: rows past the cap
+  are not rendered and are counted by the +N pill.
+- **+N pill** — the roster overflow indicator: one extra row after a
+  capped roster reading `+N`, where N counts exactly the rows the cap
+  hides (participants removed by filters do not count). Dressed like a
+  name chip in the glyphs' muted grey.
 - **RosterChange** — `Changed`/`Unchanged` result of applying a Discord
   event to the `Overlay`; drives cache writes and view refreshes.
 - **Overlay layer** — the Wayland layer-shell layer the overlay binds to.
