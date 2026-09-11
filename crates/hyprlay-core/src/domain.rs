@@ -20,6 +20,7 @@ use crate::config::HorizontalAnchor;
 use crate::config::MAX_NAME;
 use crate::config::OFFSETS;
 use crate::config::OPACITY;
+use crate::config::RosterOrder;
 use crate::config::SCALE;
 use crate::config::SPACING;
 use crate::config::TEXT_SIZE;
@@ -279,6 +280,7 @@ pub enum Key {
     ShowOnFullscreen,
     DimOnHover,
     HoverOpacity,
+    RosterOrder,
 }
 
 /// Config sections, shared by `reset <group>` and the TOML layout.
@@ -325,6 +327,7 @@ pub enum Value {
     Color(HexColor),
     Corner(Corner),
     Anchor(crate::config::AnchorMode),
+    RosterOrder(RosterOrder),
     Target(MonitorTarget),
     Cycle,
 }
@@ -338,6 +341,7 @@ impl fmt::Display for Value {
             Self::Corner(c) => f.write_str(corner_word(*c)),
             Self::Target(MonitorTarget::Active) => f.write_str("active"),
             Self::Anchor(m) => f.write_str(m.as_str()),
+            Self::RosterOrder(o) => f.write_str(o.as_str()),
             Self::Target(MonitorTarget::Named(name)) => write!(f, "{name}"),
             // Never sent over the wire; only ever constructed internally.
             Self::Cycle => f.write_str(""),
@@ -347,7 +351,7 @@ impl fmt::Display for Value {
 
 impl Key {
     /// Every key in display order (grouped, wire order inside a group).
-    pub const ALL: [Key; 28] = [
+    pub const ALL: [Key; 29] = [
         Key::Position,
         Key::Anchor,
         Key::Monitor,
@@ -376,6 +380,7 @@ impl Key {
         Key::ShowOnFullscreen,
         Key::DimOnHover,
         Key::HoverOpacity,
+        Key::RosterOrder,
     ];
 
     pub fn name(self) -> &'static str {
@@ -408,6 +413,7 @@ impl Key {
             Self::ShowOnFullscreen => "show-on-fullscreen",
             Self::DimOnHover => "dim-on-hover",
             Self::HoverOpacity => "hover-opacity",
+            Self::RosterOrder => "roster-order",
         }
     }
 
@@ -436,7 +442,8 @@ impl Key {
             | Self::Visible
             | Self::AutoSave
             | Self::ShowOnFullscreen
-            | Self::DimOnHover => Group::Layout,
+            | Self::DimOnHover
+            | Self::RosterOrder => Group::Layout,
             Self::Opacity
             | Self::AvatarOpacity
             | Self::TextOpacity
@@ -484,6 +491,7 @@ impl Key {
             Self::TextOpacity => Value::Num(cfg.text_opacity as i64),
             Self::BoxOpacity => Value::Num(cfg.box_opacity as i64),
             Self::HoverOpacity => Value::Num(cfg.hover_opacity as i64),
+            Self::RosterOrder => Value::RosterOrder(cfg.roster_order),
             Self::SpeakingColor => Value::Color(cfg.speaking_color),
             Self::TextColor => Value::Color(cfg.text_color),
             Self::BoxColor => Value::Color(cfg.box_color),
@@ -566,6 +574,7 @@ fn cycle_able(key: Key) -> bool {
             | Key::AutoSave
             | Key::ShowOnFullscreen
             | Key::DimOnHover
+            | Key::RosterOrder
     )
 }
 
@@ -622,6 +631,14 @@ impl Key {
                 Some("bottom") => Ok(Value::Anchor(crate::config::AnchorMode::Bottom)),
                 _ => Err("error: anchor <auto|top|bottom>".to_string()),
             },
+            Self::RosterOrder => match arg {
+                Some("join-order") => Ok(Value::RosterOrder(crate::config::RosterOrder::JoinOrder)),
+                Some("name") => Ok(Value::RosterOrder(crate::config::RosterOrder::Name)),
+                Some("recent-speakers") => Ok(Value::RosterOrder(
+                    crate::config::RosterOrder::RecentSpeakers,
+                )),
+                _ => Err("error: roster-order <join-order|name|recent-speakers>".to_string()),
+            },
             Self::Monitor => Ok(match arg {
                 Some("active") => Value::Target(MonitorTarget::Active),
                 Some(name) => Value::Target(MonitorTarget::Named(name.to_string())),
@@ -663,6 +680,7 @@ impl Key {
             Value::Cycle => match self {
                 Self::Position => Value::Corner(corner_of(cfg.horizontal, cfg.vertical).next()),
                 Self::Anchor => Value::Anchor(cfg.anchor.next()),
+                Self::RosterOrder => Value::RosterOrder(cfg.roster_order.next()),
                 Self::Monitor => {
                     return CommandResult::err("error: monitor cycling needs the running daemon");
                 }
@@ -699,6 +717,10 @@ impl Key {
             (Self::Anchor, Value::Anchor(mode)) => {
                 cfg.anchor = mode;
                 CommandResult::ok(format!("anchor={mode}"), vec![Effect::Reanchor])
+            }
+            (Self::RosterOrder, Value::RosterOrder(order)) => {
+                cfg.roster_order = order;
+                CommandResult::ok(format!("roster-order={order}"), vec![Effect::Resize])
             }
             // Routed by the daemon shell before config application: a change
             // re-creates the layer surface on another output.
@@ -1655,6 +1677,57 @@ mod tests {
         apply("reset opacity", &mut cfg2);
         assert_eq!(cfg2.hover_opacity, Config::default().hover_opacity);
         assert_eq!(cfg2.opacity, Config::default().opacity);
+    }
+
+    #[test]
+    fn roster_order_key_roundtrips_through_the_wire_grammar() {
+        let mut cfg = Config::default();
+        assert_eq!(Key::RosterOrder.name(), "roster-order");
+        assert_eq!(Key::RosterOrder.group(), Group::Layout);
+        assert_eq!(Key::RosterOrder.num_bounds(), None);
+        assert_eq!(
+            apply("get roster-order", &mut cfg).reply,
+            "roster-order=join-order"
+        );
+        assert_eq!(
+            apply("set roster-order name", &mut cfg).reply,
+            "roster-order=name"
+        );
+        assert_eq!(cfg.roster_order, RosterOrder::Name);
+        assert_eq!(
+            apply("set roster-order recent-speakers", &mut cfg).reply,
+            "roster-order=recent-speakers"
+        );
+        assert_eq!(cfg.roster_order, RosterOrder::RecentSpeakers);
+        // Bare form cycles through all three options, like `set anchor`.
+        assert_eq!(
+            apply("set roster-order", &mut cfg).reply,
+            "roster-order=join-order"
+        );
+        assert_eq!(cfg.roster_order, RosterOrder::JoinOrder);
+        // Garbage words are refused with the full token list.
+        assert_eq!(
+            parse_err("set roster-order sideways"),
+            "error: roster-order <join-order|name|recent-speakers>"
+        );
+        // Canonical text re-parses to the same command.
+        assert_eq!(
+            "set roster-order recent-speakers"
+                .parse::<Command>()
+                .unwrap(),
+            Command::Set(
+                Key::RosterOrder,
+                Value::RosterOrder(RosterOrder::RecentSpeakers)
+            )
+        );
+        assert_eq!(
+            Command::Set(Key::RosterOrder, Value::RosterOrder(RosterOrder::Name)).to_string(),
+            "set roster-order name"
+        );
+        // reset layout restores the default order.
+        apply("set roster-order name", &mut cfg);
+        apply("reset layout", &mut cfg);
+        assert_eq!(cfg.roster_order, RosterOrder::JoinOrder);
     }
 
     #[test]

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use hyprlay_core::config::Config;
+use hyprlay_core::config::RosterOrder;
 use hyprlay_core::domain::ConnectionStatus;
 use iced::widget::image::Handle;
 
@@ -76,6 +77,11 @@ pub struct Overlay {
     me_id: Option<String>,
     channel_name: Option<String>,
     users: Vec<Participant>,
+    /// Tick when each participant last started speaking. Runtime-only
+    /// presentation state for the recent-speakers order — never serialized,
+    /// and dropped the moment someone stops speaking or leaves the channel.
+    speakers: HashMap<String, u64>,
+    tick: u64,
     avatars: AvatarCache,
     /// Label of the authentication path for `hyprlay status`. Own-app
     /// credentials are the only path, so this never varies.
@@ -105,6 +111,8 @@ impl Overlay {
             me_id: None,
             channel_name: None,
             users: Vec::new(),
+            speakers: HashMap::new(),
+            tick: 0,
             avatars: AvatarCache::default(),
             auth_label: "own-app",
             offset,
@@ -181,6 +189,7 @@ impl Overlay {
                 RosterChange::Unchanged
             }
             DiscordEvent::Participants(users) => {
+                self.track_speakers(&users);
                 self.users = users;
                 if self.status == ConnectionStatus::Connected {
                     crate::daemon::adapters::cache::save_roster(
@@ -197,19 +206,57 @@ impl Overlay {
 
     // -- derived views ------------------------------------------------------
 
-    /// Participants after applying the config filters (own user, talking).
-    /// Hidden short-circuits to an empty list so the surface collapses
-    /// through the normal empty-surface path — no layer-shell unmap games;
-    /// the daemon keeps tracking state while invisible.
+    /// Participants after applying the config filters (own user, talking)
+    /// and the configured roster order. Hidden short-circuits to an empty
+    /// list so the surface collapses through the normal empty-surface path
+    /// — no layer-shell unmap games; the daemon keeps tracking state while
+    /// invisible.
     pub fn displayed(&self) -> Vec<&Participant> {
         if !self.config.visible {
             return Vec::new();
         }
-        self.users
+        let mut rows: Vec<&Participant> = self
+            .users
             .iter()
             .filter(|p| self.config.show_own_user || Some(&p.id) != self.me_id.as_ref())
             .filter(|p| !self.config.show_only_talking_users || p.speaking)
-            .collect()
+            .collect();
+        self.sort_rows(&mut rows);
+        rows
+    }
+
+    /// One ordering pass over already-filtered rows. Every strategy is a
+    /// stable sort, so ties fall back to join order everywhere.
+    fn sort_rows(&self, rows: &mut [&Participant]) {
+        match self.config.roster_order {
+            RosterOrder::JoinOrder => {}
+            RosterOrder::Name => rows.sort_by_key(|p| p.name.to_lowercase()),
+            RosterOrder::RecentSpeakers => {
+                rows.sort_by(|a, b| self.speakers.get(&b.id).cmp(&self.speakers.get(&a.id)))
+            }
+        }
+    }
+
+    /// Diff speaking flags against the previous roster: a start stamps the
+    /// participant with the next tick (the top of the recent-speakers
+    /// order), a stop drops the record so they sink back to join order.
+    /// Departed participants lose their record with the roster.
+    fn track_speakers(&mut self, users: &[Participant]) {
+        self.tick += 1;
+        for p in users {
+            let was_speaking = self.users.iter().any(|u| u.id == p.id && u.speaking);
+            match (was_speaking, p.speaking) {
+                (false, true) => {
+                    self.speakers.insert(p.id.clone(), self.tick);
+                }
+                (true, false) => {
+                    self.speakers.remove(&p.id);
+                }
+                _ => {}
+            }
+        }
+        self.speakers
+            .retain(|id, _| users.iter().any(|u| &u.id == id));
     }
 
     /// Surface size (logical px) for the currently displayed rows. Height 0
@@ -306,6 +353,123 @@ mod tests {
         let mut o = Overlay::new(cfg);
         o.users = users;
         o
+    }
+
+    fn ids<'a>(rows: &[&'a Participant]) -> Vec<&'a str> {
+        rows.iter().map(|p| p.id.as_str()).collect()
+    }
+
+    #[test]
+    fn join_order_keeps_wire_order() {
+        let state = overlay(
+            vec![
+                participant("carol", "Carol", false),
+                participant("alice", "alice", false),
+                participant("bob", "Bob", false),
+            ],
+            Config::default(),
+        );
+        assert_eq!(ids(&state.displayed()), ["carol", "alice", "bob"]);
+    }
+
+    #[test]
+    fn name_order_is_case_insensitive_a_to_z() {
+        let cfg = Config {
+            roster_order: RosterOrder::Name,
+            ..Config::default()
+        };
+        let state = overlay(
+            vec![
+                participant("carol", "Carol", false),
+                participant("dave", "dave", false),
+                participant("alice", "ALICE", false),
+                participant("bob", "Bob", false),
+            ],
+            cfg,
+        );
+        assert_eq!(ids(&state.displayed()), ["alice", "bob", "carol", "dave"]);
+    }
+
+    #[test]
+    fn name_order_ties_fall_back_to_join_order() {
+        let cfg = Config {
+            roster_order: RosterOrder::Name,
+            ..Config::default()
+        };
+        let state = overlay(
+            vec![
+                participant("second", "sam", false),
+                participant("first", "Sam", false),
+            ],
+            cfg,
+        );
+        assert_eq!(ids(&state.displayed()), ["second", "first"]);
+    }
+
+    #[test]
+    fn recent_speakers_bubble_up_most_recent_first() {
+        let cfg = Config {
+            roster_order: RosterOrder::RecentSpeakers,
+            ..Config::default()
+        };
+        let all = || {
+            vec![
+                participant("a", "a", false),
+                participant("b", "b", false),
+                participant("c", "c", false),
+            ]
+        };
+        let mut state = overlay(all(), cfg);
+        // b starts, then a joins in: a is the most recent speaker.
+        let mut b_speaking = all();
+        b_speaking[1].speaking = true;
+        state.apply_discord(DiscordEvent::Participants(b_speaking.clone()));
+        let mut both = b_speaking.clone();
+        both[0].speaking = true;
+        state.apply_discord(DiscordEvent::Participants(both));
+        assert_eq!(ids(&state.displayed()), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn recent_speaker_sinks_back_when_stopping() {
+        let cfg = Config {
+            roster_order: RosterOrder::RecentSpeakers,
+            ..Config::default()
+        };
+        let all = || vec![participant("b", "b", false), participant("a", "a", false)];
+        let mut state = overlay(all(), cfg);
+        let mut a_speaking = all();
+        a_speaking[1].speaking = true;
+        state.apply_discord(DiscordEvent::Participants(a_speaking));
+        assert_eq!(ids(&state.displayed()), ["a", "b"]);
+        // Stopping sinks a back to its join-order slot.
+        state.apply_discord(DiscordEvent::Participants(all()));
+        assert_eq!(ids(&state.displayed()), ["b", "a"]);
+    }
+
+    #[test]
+    fn recent_speakers_cleared_on_channel_switch() {
+        let cfg = Config {
+            roster_order: RosterOrder::RecentSpeakers,
+            ..Config::default()
+        };
+        let mut state = overlay(
+            vec![participant("a", "a", false), participant("b", "b", false)],
+            cfg,
+        );
+        state.apply_discord(DiscordEvent::Participants(vec![
+            participant("a", "a", true),
+            participant("b", "b", false),
+        ]));
+        assert_eq!(ids(&state.displayed()), ["a", "b"]);
+        // Empty roster then a fresh list in reverse join order: the old
+        // speaker record must not bubble `a` back to the top.
+        state.apply_discord(DiscordEvent::Participants(vec![]));
+        state.apply_discord(DiscordEvent::Participants(vec![
+            participant("b", "b", false),
+            participant("a", "a", false),
+        ]));
+        assert_eq!(ids(&state.displayed()), ["b", "a"]);
     }
 
     #[test]

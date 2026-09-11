@@ -6,6 +6,7 @@ use hyprlay_core::config::AnchorMode;
 use hyprlay_core::config::Config;
 use hyprlay_core::config::HorizontalAnchor as H;
 use hyprlay_core::config::PALETTES;
+use hyprlay_core::config::RosterOrder;
 use hyprlay_core::config::VerticalAnchor as V;
 use hyprlay_core::domain::Key;
 use hyprlay_core::domain::Value;
@@ -210,6 +211,12 @@ pub(super) const FIELDS: &[Field] = &[
     },
     Field {
         section: Section::Layout,
+        label: "roster order",
+        tip: "How participants are ordered. Join order keeps Discord's arrival order, name sorts alphabetically, recent speakers bubble the last person who talked to the top.",
+        render: f_roster_order,
+    },
+    Field {
+        section: Section::Layout,
         label: "width",
         tip: "Panel width in logical pixels.",
         render: f_width,
@@ -379,6 +386,35 @@ pub(super) fn f_own_user(gui: &Gui) -> Element<'_, Message> {
     toggle(gui.config.show_own_user, |v| {
         Message::SetFlag(Key::OwnUser, v)
     })
+}
+
+/// Tri-state roster-order selector: join-order | name | recent-speakers as
+/// chips, mirroring the anchor chip pattern (selected state highlighted).
+pub(super) fn f_roster_order(gui: &Gui) -> Element<'_, Message> {
+    let modes = [
+        (RosterOrder::JoinOrder, "join-order"),
+        (RosterOrder::Name, "name"),
+        (RosterOrder::RecentSpeakers, "recent-speakers"),
+    ];
+    let mut chips = row![].spacing(6);
+    for (mode, label) in modes {
+        let selected = gui.config.roster_order == mode;
+        chips = chips.push(roster_order_chip(mode, label, selected));
+    }
+    chips.into()
+}
+
+fn roster_order_chip(mode: RosterOrder, label: &str, selected: bool) -> Element<'static, Message> {
+    let bg = if selected { ACCENT } else { FIELD_BG };
+    button(text(label.to_string()))
+        .on_press(Message::RosterOrder(mode))
+        .style(move |_t, _s| button::Style {
+            background: Some(bg.into()),
+            text_color: Color::WHITE,
+            ..button::Style::default()
+        })
+        .padding([4, 10])
+        .into()
 }
 
 pub(super) fn f_width(gui: &Gui) -> Element<'_, Message> {
@@ -882,5 +918,14 @@ mod tests {
             .find(|f| f.label == "anchor")
             .expect("anchor field registered");
         assert_eq!(field.section, Section::Position);
+    }
+
+    #[test]
+    fn roster_order_field_is_registered_in_the_layout_section() {
+        let field = FIELDS
+            .iter()
+            .find(|f| f.label == "roster order")
+            .expect("roster order field registered");
+        assert_eq!(field.section, Section::Layout);
     }
 }

@@ -42,6 +42,45 @@ pub enum AnchorMode {
     Bottom,
 }
 
+/// How roster rows are ordered on the overlay. `JoinOrder` keeps the wire
+/// order Discord reports (today's behavior); `Name` sorts case-insensitive
+/// A→Z; `RecentSpeakers` bubbles the most recent speaker to the top. All
+/// ties fall back to join order.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum RosterOrder {
+    #[default]
+    JoinOrder,
+    Name,
+    RecentSpeakers,
+}
+
+impl RosterOrder {
+    /// join-order -> name -> recent-speakers -> join-order, for bare
+    /// `set roster-order`.
+    pub fn next(self) -> Self {
+        match self {
+            Self::JoinOrder => Self::Name,
+            Self::Name => Self::RecentSpeakers,
+            Self::RecentSpeakers => Self::JoinOrder,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::JoinOrder => "join-order",
+            Self::Name => "name",
+            Self::RecentSpeakers => "recent-speakers",
+        }
+    }
+}
+
+impl fmt::Display for RosterOrder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Hard safety bound for offsets and the offset slider range.
 pub const OFFSET_LIMIT: i32 = 4000;
 
@@ -113,6 +152,8 @@ pub struct Config {
     pub max_username_length: usize,
     pub show_own_user: bool,
     pub show_only_talking_users: bool,
+    /// Row ordering strategy on the overlay.
+    pub roster_order: RosterOrder,
     /// Master visibility switch: false collapses the overlay to an empty
     /// surface while the daemon keeps running and tracking state.
     pub visible: bool,
@@ -158,6 +199,7 @@ impl Default for Config {
             max_username_length: 16,
             show_own_user: true,
             show_only_talking_users: false,
+            roster_order: RosterOrder::JoinOrder,
             visible: true,
             auto_save: true,
             show_on_fullscreen: true,
@@ -274,6 +316,7 @@ impl Config {
                 max_name: Some(self.max_username_length),
                 talking_only: Some(self.show_only_talking_users),
                 own_user: Some(self.show_own_user),
+                roster_order: Some(self.roster_order),
                 visible: Some(self.visible),
                 auto_save: Some(self.auto_save),
                 show_on_fullscreen: Some(self.show_on_fullscreen),
@@ -318,6 +361,7 @@ impl Config {
             max_username_length: l.max_name.unwrap_or(d.max_username_length),
             show_only_talking_users: l.talking_only.unwrap_or(d.show_only_talking_users),
             show_own_user: l.own_user.unwrap_or(d.show_own_user),
+            roster_order: l.roster_order.unwrap_or(d.roster_order),
             visible: l.visible.unwrap_or(d.visible),
             auto_save: l.auto_save.unwrap_or(d.auto_save),
             show_on_fullscreen: l.show_on_fullscreen.unwrap_or(d.show_on_fullscreen),
@@ -361,6 +405,7 @@ struct LayoutTable {
     max_name: Option<usize>,
     talking_only: Option<bool>,
     own_user: Option<bool>,
+    roster_order: Option<RosterOrder>,
     visible: Option<bool>,
     auto_save: Option<bool>,
     show_on_fullscreen: Option<bool>,
@@ -706,6 +751,51 @@ speaking = \"#00ff00\"
         // And the roundtrip is stable.
         let re: Config = toml::from_str(&toml::to_string(&back).unwrap()).unwrap();
         assert_eq!(re, back);
+    }
+
+    #[test]
+    fn roster_order_lives_in_layout_section_and_roundtrips() {
+        let cfg = Config {
+            roster_order: crate::config::RosterOrder::RecentSpeakers,
+            ..Config::default()
+        };
+        let toml_str = toml::to_string(&cfg).unwrap();
+        assert!(
+            toml_str.contains("roster-order = \"recent-speakers\""),
+            "roster-order missing from [layout] in:\n{toml_str}"
+        );
+        let back: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(back.roster_order, cfg.roster_order);
+        // An old file without the key keeps today's behavior.
+        let back: Config = toml::from_str("[layout]\nwidth = 400").unwrap();
+        assert_eq!(back.roster_order, RosterOrder::JoinOrder);
+    }
+
+    #[test]
+    fn roster_order_wire_words_are_kebab_case() {
+        for (order, word) in [
+            (RosterOrder::JoinOrder, "join-order"),
+            (RosterOrder::Name, "name"),
+            (RosterOrder::RecentSpeakers, "recent-speakers"),
+        ] {
+            assert_eq!(order.as_str(), word);
+            let parsed: RosterOrder = toml::from_str(&format!("v = \"{word}\""))
+                .map(|f: RosterFile| f.v)
+                .unwrap();
+            assert_eq!(parsed, order);
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct RosterFile {
+        v: RosterOrder,
+    }
+
+    #[test]
+    fn roster_order_cycles_through_all_three() {
+        assert_eq!(RosterOrder::JoinOrder.next(), RosterOrder::Name);
+        assert_eq!(RosterOrder::Name.next(), RosterOrder::RecentSpeakers);
+        assert_eq!(RosterOrder::RecentSpeakers.next(), RosterOrder::JoinOrder);
     }
 
     #[test]
