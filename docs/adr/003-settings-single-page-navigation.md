@@ -9,7 +9,7 @@ Accepted
 ## Context
 
 The settings GUI (`hyprlay-gui`, `src/gui/`) shows one section at a time.
-The sidebar sends `Message::Section(Section)` (`src/gui/mod.rs`, `sidebar`),
+The sidebar sends `Message::Section(Section)` (`src/gui/view.rs`, `sidebar`),
 and `section_page(gui, section)` (`src/gui/fields.rs`) renders that section
 alone inside its own scrollable. Moving between sections means a full page
 swap, so the user cannot see Position and Layout together or compare values
@@ -32,7 +32,7 @@ sources for the needed mechanics:
 - `iced_runtime::task::widget(operation)` runs a custom operation and
   delivers its `finish()` output as a message. The repo already uses a
   runtime operation this way (`iced_runtime::widget::operation::focus` in
-  `src/gui/mod.rs`).
+  `src/gui/update.rs`).
 
 The repo uses this same widget-id mechanism for the search box
 (`SEARCH_ID` in `src/gui/fields.rs`).
@@ -108,12 +108,12 @@ fires exactly when the offset changes, so polling is strictly more work.
   end. `Navigate → Measured → scroll_to` fires `on_scroll` once on landing,
   which re-measures and re-derives the same section.
 - The sidebar highlight stays suppressed while search text is set; the
-  existing selected condition in `sidebar` (`src/gui/mod.rs`) keeps its
+  existing selected condition in `sidebar` (`src/gui/view.rs`) keeps its
   `gui.search.trim().is_empty()` guard.
 - New state on `Gui`: `section_offsets` and `last_scroll_y`, plus the
   `CONTENT_SCROLL_ID` and per-section anchor widget ids. Two pure helpers,
   `active_section_for` and `offset_within_content`, carry the math and are
-  unit-tested in `src/gui/mod.rs`.
+  unit-tested in `src/gui/scroll.rs`.
 - Offsets measured at jump time mean stale measurements cannot send the
   viewport to the wrong place, at the cost of one measure operation per
   scroll event batch.

@@ -14,7 +14,6 @@
 //! quit — the same two primitives the tray uses. Only the autostart install
 //! is Windows-specific.
 
-use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -22,10 +21,12 @@ use std::process::Command;
 use hyprlay_core::bins::DAEMON_BIN;
 use hyprlay_core::daemon_control::Action;
 use hyprlay_core::daemon_control::DaemonControl;
+use hyprlay_core::daemon_control::ServiceError;
 use hyprlay_core::daemon_control::ServiceManager;
 use hyprlay_core::domain::Command as DaemonCommand;
 use hyprlay_core::platform::Platform;
 
+use super::fs_util;
 use crate::platform::ipc::control::Control;
 
 /// The Startup-folder launcher file name.
@@ -63,47 +64,40 @@ impl ServiceManager for WindowsService {
         Self::script_path().is_some_and(|path| path.exists())
     }
 
-    fn systemctl(&self, subcommand: &str) -> Result<(), String> {
+    fn systemctl(&self, subcommand: &str) -> Result<(), ServiceError> {
         match subcommand {
             // No service manager: starting "via the service" is a spawn, and
             // stopping it is a socket quit (the only reliable teardown).
             "start" => self.spawn_daemon(),
             "stop" => self.quit_via_socket(),
-            other => Err(format!(
-                "error: unsupported Windows startup subcommand: {other}"
-            )),
+            other => Err(ServiceError::UnsupportedSubcommand {
+                backend: "Windows startup",
+                subcommand: other.to_string(),
+            }),
         }
     }
 
-    fn spawn_daemon(&self) -> Result<(), String> {
-        let exe = std::env::current_exe()
-            .map_err(|e| format!("error: could not locate the running hyprlay binary: {e}"))?;
+    fn spawn_daemon(&self) -> Result<(), ServiceError> {
+        let exe = std::env::current_exe().map_err(|source| ServiceError::LocateExe { source })?;
         let Some(dir) = exe.parent() else {
-            return Err(format!(
-                "error: could not find the directory of {}",
-                exe.display()
-            ));
+            return Err(ServiceError::NoExeParent { exe: exe.clone() });
         };
         let path = Self::daemon_exe(dir);
         if !path.exists() {
-            return Err(format!(
-                "error: {DAEMON_BIN} not found next to the running hyprlay binary (expected {})\n\
-                 the hyprlay binaries must be installed together",
-                path.display()
-            ));
+            return Err(ServiceError::DaemonMissing { path });
         }
         let mut cmd = Command::new(&path);
         // CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW + null stdio + no wait:
         // the daemon must outlive this binary and never hold a console.
         crate::platform::host::host()
             .spawn(&mut cmd)
-            .map_err(|e| format!("error: could not start {DAEMON_BIN}: {e}"))
+            .map_err(|source| ServiceError::SpawnDaemon { source })
     }
 
-    fn quit_via_socket(&self) -> Result<(), String> {
+    fn quit_via_socket(&self) -> Result<(), ServiceError> {
         hyprlay_core::ctl::send_command_line(&Control, &DaemonCommand::Quit.to_string())
             .map(|_| ())
-            .ok_or_else(|| "error: daemon unreachable".to_string())
+            .ok_or(ServiceError::DaemonUnreachable)
     }
 
     fn install(
@@ -112,17 +106,22 @@ impl ServiceManager for WindowsService {
         _config_base: &Path,
         _data_base: &Path,
         _start: bool,
-    ) -> Result<Vec<String>, String> {
-        let path = Self::script_path()
-            .ok_or_else(|| "error: could not resolve the Startup folder".to_string())?;
-        write_script(&path, &Self::launcher(exe_dir))?;
+    ) -> Result<Vec<String>, ServiceError> {
+        let path = Self::script_path().ok_or(ServiceError::ResolveDir {
+            what: "Startup folder",
+        })?;
+        fs_util::write_file(&path, Self::launcher(exe_dir).as_bytes())?;
         Ok(vec![format!("wrote {}", path.display())])
     }
 
-    fn uninstall(&self, _config_base: &Path, _data_base: &Path) -> Result<Vec<String>, String> {
+    fn uninstall(
+        &self,
+        _config_base: &Path,
+        _data_base: &Path,
+    ) -> Result<Vec<String>, ServiceError> {
         let mut report = Vec::new();
         if let Some(path) = Self::script_path() {
-            remove_reported(&path, &mut report)?;
+            fs_util::remove_reported(&path, &mut report)?;
         }
         Ok(report)
     }
@@ -136,7 +135,7 @@ impl DaemonControl for SystemControl {
         WindowsService.unit_installed()
     }
 
-    fn perform(&self, action: Action) -> Result<(), String> {
+    fn perform(&self, action: Action) -> Result<(), ServiceError> {
         match action {
             Action::SystemctlStart => WindowsService.systemctl("start"),
             Action::SystemctlStop => WindowsService.systemctl("stop"),
@@ -144,23 +143,4 @@ impl DaemonControl for SystemControl {
             Action::SocketQuit => WindowsService.quit_via_socket(),
         }
     }
-}
-
-fn write_script(path: &Path, contents: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
-    }
-    fs::write(path, contents).map_err(|e| format!("could not write {}: {e}", path.display()))
-}
-
-fn remove_reported(path: &Path, report: &mut Vec<String>) -> Result<(), String> {
-    match fs::remove_file(path) {
-        Ok(()) => report.push(format!("removed {}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            report.push(format!("already absent {}", path.display()))
-        }
-        Err(e) => return Err(format!("could not remove {}: {e}", path.display())),
-    }
-    Ok(())
 }

@@ -795,3 +795,92 @@ fn preset_button<'a>(cfg: &'a Config, h: H, v: V, label: &'a str) -> Element<'a,
         .width(Length::Fill)
         .into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_matches_label_tip_and_section_name() {
+        let field = Field {
+            section: Section::Position,
+            label: "offset x",
+            tip: "Horizontal distance in px from the anchored screen edge.",
+            render: f_offset_x,
+        };
+        assert!(search_matches(&field, "offset"));
+        assert!(search_matches(&field, "horizontal"));
+        assert!(search_matches(&field, "POSITION"));
+        assert!(!search_matches(&field, "avatar"));
+        assert!(!search_matches(&field, ""));
+    }
+
+    #[test]
+    fn sections_map_one_to_one_onto_config_groups() {
+        use hyprlay_core::domain::Group;
+        // Only config-backed sections participate; Connection has no group.
+        let config_backed: Vec<_> = Section::ALL
+            .into_iter()
+            .filter_map(|section| section.group().map(|group| (section, group)))
+            .collect();
+        assert_eq!(config_backed.len(), Group::ALL.len());
+        for ((section, group), expected) in config_backed.into_iter().zip(Group::ALL) {
+            // The reset button sends one ResetGroup per GUI section; if a
+            // section ever fails to map, its fields could never be reset.
+            assert_eq!(group, expected);
+            assert_eq!(
+                format!("{expected}"),
+                section.name().to_lowercase(),
+                "section {} diverged from group {}",
+                section.name(),
+                group
+            );
+        }
+    }
+
+    /// Exactly one section is exempt from the reset machinery, and its name
+    /// must stay stable because the shortcut hints and search rely on it.
+    #[test]
+    fn every_section_except_connection_maps_to_a_group() {
+        for section in Section::ALL {
+            match section.group() {
+                Some(_) => assert_ne!(section.name(), "Connection"),
+                None => assert_eq!(section.name(), "Connection"),
+            }
+        }
+    }
+
+    #[test]
+    fn every_field_has_a_nonempty_tooltip() {
+        for f in FIELDS {
+            assert!(!f.tip.is_empty(), "field {} needs a tooltip", f.label);
+            assert!(!f.label.is_empty());
+        }
+    }
+
+    #[test]
+    fn every_section_has_fields() {
+        for s in Section::ALL {
+            assert!(
+                FIELDS.iter().any(|f| f.section == s),
+                "section {} has no fields",
+                s.name()
+            );
+        }
+    }
+
+    /// Click-through was removed; no field may render it again.
+    #[test]
+    fn click_through_is_gone_from_the_field_registry() {
+        assert!(!FIELDS.iter().any(|f| f.label.contains("click")));
+    }
+
+    #[test]
+    fn anchor_field_is_registered_in_the_position_section() {
+        let field = FIELDS
+            .iter()
+            .find(|f| f.label == "anchor")
+            .expect("anchor field registered");
+        assert_eq!(field.section, Section::Position);
+    }
+}
