@@ -18,7 +18,7 @@ Download the latest binaries from [releases page](https://github.com/FAZuH/hyprl
 
 Or install with [Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html):
 ```sh
-cargo install --git https://github.com/FAZuH/hyprlay
+cargo install --locked --git https://github.com/FAZuH/hyprlay
 
 # Or build from source:
 cargo build --release

@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Platforms
+
+- Fixed source installs failing on a fresh dependency resolution
+
 ## 0.3.0 (2026-09-03)
 
 ### Platforms

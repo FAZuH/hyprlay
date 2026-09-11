@@ -1670,6 +1670,7 @@ dependencies = [
  "tray-icon",
  "ureq",
  "windows-sys 0.59.0",
+ "winit-core",
  "winresource",
  "x11rb",
 ]
