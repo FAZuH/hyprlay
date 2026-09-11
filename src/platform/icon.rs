@@ -1,4 +1,5 @@
-//! Bundled app icon: the brand mark (black rounded square, bold white "H")
+//! Bundled app icon: the brand mark (black disc with a dark-grey ring,
+//! bold white "H")
 //! as a scalable SVG plus the PNG/ICO raster sizes, all committed under
 //! `assets/hyprlay.{svg,png,ico}`. This module exposes the iced window icon
 //! built from the embedded 256px PNG (used by the settings GUI and the
