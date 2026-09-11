@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Overlay
+
+- Replaced the M and D text badges with crossed-mic and crossed-headphones glyphs after each name, red for server-set and grey for self-set mute or deafen
+
+## 0.3.1 (2026-09-11)
+
 ### Platforms
 
 - Changed the app and tray icon to a circular design

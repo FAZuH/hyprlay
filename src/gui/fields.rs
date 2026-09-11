@@ -247,7 +247,7 @@ pub(super) const FIELDS: &[Field] = &[
     Field {
         section: Section::Opacity,
         label: "overall",
-        tip: "Dims everything together: avatars, usernames, badges and the speaking ring.",
+        tip: "Dims everything together: avatars, usernames, glyphs and the speaking ring.",
         render: f_opacity,
     },
     Field {
