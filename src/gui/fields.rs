@@ -252,6 +252,12 @@ pub(super) const FIELDS: &[Field] = &[
         render: f_max_name,
     },
     Field {
+        section: Section::Layout,
+        label: "max rows",
+        tip: "Cap how many participant rows render. Overflow rows hide behind a +N pill; 0 shows everyone.",
+        render: f_max_rows,
+    },
+    Field {
         section: Section::Opacity,
         label: "overall",
         tip: "Dims everything together: avatars, usernames, glyphs and the speaking ring.",
@@ -439,6 +445,10 @@ pub(super) fn f_spacing(gui: &Gui) -> Element<'_, Message> {
 
 pub(super) fn f_max_name(gui: &Gui) -> Element<'_, Message> {
     number_row(gui, Key::MaxName)
+}
+
+pub(super) fn f_max_rows(gui: &Gui) -> Element<'_, Message> {
+    number_row(gui, Key::MaxRows)
 }
 
 pub(super) fn f_opacity(gui: &Gui) -> Element<'_, Message> {
@@ -918,6 +928,15 @@ mod tests {
             .find(|f| f.label == "anchor")
             .expect("anchor field registered");
         assert_eq!(field.section, Section::Position);
+    }
+
+    #[test]
+    fn max_rows_field_is_registered_in_the_layout_section() {
+        let field = FIELDS
+            .iter()
+            .find(|f| f.label == "max rows")
+            .expect("max rows field registered");
+        assert_eq!(field.section, Section::Layout);
     }
 
     #[test]

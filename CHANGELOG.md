@@ -6,6 +6,7 @@
 
 - Replaced the M and D text badges with crossed-mic and crossed-headphones glyphs after each name, red for server-set and grey for self-set mute or deafen
 - Added roster sorting with join order, name, and recent speakers
+- Added max rows setting that hides overflow participants behind a +N pill
 
 ## 0.3.1 (2026-09-11)
 

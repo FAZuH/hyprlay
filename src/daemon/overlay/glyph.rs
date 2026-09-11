@@ -34,6 +34,10 @@ const SERVER_COLOR: Color = Color::from_rgb8(0xDC, 0x26, 0x26);
 /// Tailwind `neutral-400`: they silenced themselves.
 const SELF_COLOR: Color = Color::from_rgb8(0xA3, 0xA3, 0xA3);
 
+/// The same quiet grey the self-set glyphs wear, reused by the "+N"
+/// overflow pill so hidden rows read as decoration, not as people.
+pub(crate) const OVERFLOW_COLOR: Color = SELF_COLOR;
+
 /// The one badge a row carries, if it carries one at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Mark {

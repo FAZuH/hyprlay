@@ -18,6 +18,7 @@ use crate::config::Bounds;
 use crate::config::Config;
 use crate::config::HorizontalAnchor;
 use crate::config::MAX_NAME;
+use crate::config::MAX_ROWS;
 use crate::config::OFFSETS;
 use crate::config::OPACITY;
 use crate::config::RosterOrder;
@@ -281,6 +282,7 @@ pub enum Key {
     DimOnHover,
     HoverOpacity,
     RosterOrder,
+    MaxRows,
 }
 
 /// Config sections, shared by `reset <group>` and the TOML layout.
@@ -351,7 +353,7 @@ impl fmt::Display for Value {
 
 impl Key {
     /// Every key in display order (grouped, wire order inside a group).
-    pub const ALL: [Key; 29] = [
+    pub const ALL: [Key; 30] = [
         Key::Position,
         Key::Anchor,
         Key::Monitor,
@@ -381,6 +383,7 @@ impl Key {
         Key::DimOnHover,
         Key::HoverOpacity,
         Key::RosterOrder,
+        Key::MaxRows,
     ];
 
     pub fn name(self) -> &'static str {
@@ -414,6 +417,7 @@ impl Key {
             Self::DimOnHover => "dim-on-hover",
             Self::HoverOpacity => "hover-opacity",
             Self::RosterOrder => "roster-order",
+            Self::MaxRows => "max-rows",
         }
     }
 
@@ -443,7 +447,8 @@ impl Key {
             | Self::AutoSave
             | Self::ShowOnFullscreen
             | Self::DimOnHover
-            | Self::RosterOrder => Group::Layout,
+            | Self::RosterOrder
+            | Self::MaxRows => Group::Layout,
             Self::Opacity
             | Self::AvatarOpacity
             | Self::TextOpacity
@@ -492,6 +497,7 @@ impl Key {
             Self::BoxOpacity => Value::Num(cfg.box_opacity as i64),
             Self::HoverOpacity => Value::Num(cfg.hover_opacity as i64),
             Self::RosterOrder => Value::RosterOrder(cfg.roster_order),
+            Self::MaxRows => Value::Num(cfg.max_rows as i64),
             Self::SpeakingColor => Value::Color(cfg.speaking_color),
             Self::TextColor => Value::Color(cfg.text_color),
             Self::BoxColor => Value::Color(cfg.box_color),
@@ -516,6 +522,7 @@ impl Key {
             Self::TextSize => Some((TEXT_SIZE.min as i64, TEXT_SIZE.max as i64)),
             Self::Spacing => Some((SPACING.min as i64, SPACING.max as i64)),
             Self::MaxName => Some((MAX_NAME.min as i64, MAX_NAME.max as i64)),
+            Self::MaxRows => Some((MAX_ROWS.min as i64, MAX_ROWS.max as i64)),
             _ => None,
         }
     }
@@ -661,6 +668,7 @@ impl Key {
             | Self::TextSize
             | Self::Spacing
             | Self::MaxName
+            | Self::MaxRows
             | Self::Opacity
             | Self::AvatarOpacity
             | Self::TextOpacity
@@ -814,6 +822,13 @@ impl Key {
                 v as usize,
                 MAX_NAME,
                 "max-name",
+                Effect::Resize,
+            ),
+            (Self::MaxRows, Value::Num(v)) => set_num(
+                &mut cfg.max_rows,
+                v as u32,
+                MAX_ROWS,
+                "max-rows",
                 Effect::Resize,
             ),
             (Self::Opacity, Value::Num(v)) => set_pct(&mut cfg.opacity, v as u8, "opacity"),
@@ -1728,6 +1743,40 @@ mod tests {
         apply("set roster-order name", &mut cfg);
         apply("reset layout", &mut cfg);
         assert_eq!(cfg.roster_order, RosterOrder::JoinOrder);
+    }
+
+    #[test]
+    fn max_rows_key_roundtrips_through_the_wire_grammar() {
+        let mut cfg = Config::default();
+        assert_eq!(Key::MaxRows.name(), "max-rows");
+        assert_eq!(Key::MaxRows.group(), Group::Layout);
+        assert_eq!(
+            Key::MaxRows.num_bounds(),
+            Some((MAX_ROWS.min as i64, MAX_ROWS.max as i64))
+        );
+        assert_eq!(apply("get max-rows", &mut cfg).reply, "max-rows=0");
+        assert_eq!(apply("set max-rows 6", &mut cfg).reply, "max-rows=6");
+        assert_eq!(cfg.max_rows, 6);
+        // 0 is the unlimited value and is settable again.
+        apply("set max-rows 0", &mut cfg);
+        assert_eq!(cfg.max_rows, 0);
+        // Out-of-range values are refused with the bounds hint.
+        assert_eq!(parse_err("set max-rows -1"), "error: max-rows <0-200>");
+        assert_eq!(parse_err("set max-rows 201"), "error: max-rows <0-200>");
+        assert_eq!(parse_err("set max-rows"), "error: max-rows <0-200>");
+        // Canonical text re-parses to the same command.
+        assert_eq!(
+            "set max-rows 6".parse::<Command>().unwrap(),
+            Command::Set(Key::MaxRows, Value::Num(6))
+        );
+        assert_eq!(
+            Command::Set(Key::MaxRows, Value::Num(6)).to_string(),
+            "set max-rows 6"
+        );
+        // reset layout restores unlimited.
+        apply("set max-rows 6", &mut cfg);
+        apply("reset layout", &mut cfg);
+        assert_eq!(cfg.max_rows, 0);
     }
 
     #[test]

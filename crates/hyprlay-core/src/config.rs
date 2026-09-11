@@ -115,6 +115,8 @@ pub const AVATAR_SIZE: Bounds<u32> = Bounds { min: 16, max: 64 };
 pub const TEXT_SIZE: Bounds<u32> = Bounds { min: 8, max: 32 };
 pub const SPACING: Bounds<u32> = Bounds { min: 0, max: 24 };
 pub const MAX_NAME: Bounds<usize> = Bounds { min: 4, max: 64 };
+/// Roster height cap in rows; 0 means unlimited.
+pub const MAX_ROWS: Bounds<u32> = Bounds { min: 0, max: 200 };
 pub const OFFSETS: Bounds<i32> = Bounds {
     min: -OFFSET_LIMIT,
     max: OFFSET_LIMIT,
@@ -154,6 +156,9 @@ pub struct Config {
     pub show_only_talking_users: bool,
     /// Row ordering strategy on the overlay.
     pub roster_order: RosterOrder,
+    /// Maximum roster rows rendered (0..=200); 0 = unlimited. Overflow
+    /// rows are hidden behind a "+N" pill row.
+    pub max_rows: u32,
     /// Master visibility switch: false collapses the overlay to an empty
     /// surface while the daemon keeps running and tracking state.
     pub visible: bool,
@@ -200,6 +205,7 @@ impl Default for Config {
             show_own_user: true,
             show_only_talking_users: false,
             roster_order: RosterOrder::JoinOrder,
+            max_rows: 0,
             visible: true,
             auto_save: true,
             show_on_fullscreen: true,
@@ -317,6 +323,7 @@ impl Config {
                 talking_only: Some(self.show_only_talking_users),
                 own_user: Some(self.show_own_user),
                 roster_order: Some(self.roster_order),
+                max_rows: Some(self.max_rows),
                 visible: Some(self.visible),
                 auto_save: Some(self.auto_save),
                 show_on_fullscreen: Some(self.show_on_fullscreen),
@@ -362,6 +369,7 @@ impl Config {
             show_only_talking_users: l.talking_only.unwrap_or(d.show_only_talking_users),
             show_own_user: l.own_user.unwrap_or(d.show_own_user),
             roster_order: l.roster_order.unwrap_or(d.roster_order),
+            max_rows: l.max_rows.unwrap_or(d.max_rows),
             visible: l.visible.unwrap_or(d.visible),
             auto_save: l.auto_save.unwrap_or(d.auto_save),
             show_on_fullscreen: l.show_on_fullscreen.unwrap_or(d.show_on_fullscreen),
@@ -406,6 +414,7 @@ struct LayoutTable {
     talking_only: Option<bool>,
     own_user: Option<bool>,
     roster_order: Option<RosterOrder>,
+    max_rows: Option<u32>,
     visible: Option<bool>,
     auto_save: Option<bool>,
     show_on_fullscreen: Option<bool>,
@@ -479,6 +488,7 @@ impl Config {
         self.avatar_size = AVATAR_SIZE.clamp_value(self.avatar_size);
         self.text_size = TEXT_SIZE.clamp_value(self.text_size);
         self.spacing = SPACING.clamp_value(self.spacing);
+        self.max_rows = MAX_ROWS.clamp_value(self.max_rows);
     }
 
     pub fn save(&self) {
@@ -796,6 +806,28 @@ speaking = \"#00ff00\"
         assert_eq!(RosterOrder::JoinOrder.next(), RosterOrder::Name);
         assert_eq!(RosterOrder::Name.next(), RosterOrder::RecentSpeakers);
         assert_eq!(RosterOrder::RecentSpeakers.next(), RosterOrder::JoinOrder);
+    }
+
+    #[test]
+    fn max_rows_lives_in_layout_section_and_roundtrips() {
+        let cfg = Config {
+            max_rows: 12,
+            ..Config::default()
+        };
+        let toml_str = toml::to_string(&cfg).unwrap();
+        assert!(
+            toml_str.contains("max-rows = 12"),
+            "max-rows missing from [layout] in:\n{toml_str}"
+        );
+        let back: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(back.max_rows, 12);
+        // An old file without the key stays unlimited...
+        let back: Config = toml::from_str("[layout]\nwidth = 400").unwrap();
+        assert_eq!(back.max_rows, 0);
+        // ...and a hand-edited out-of-range file clamps on load.
+        let mut back: Config = toml::from_str("[layout]\nmax-rows = 99999").unwrap();
+        back.clamp();
+        assert_eq!(back.max_rows, MAX_ROWS.max);
     }
 
     #[test]

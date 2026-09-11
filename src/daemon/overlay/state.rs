@@ -206,12 +206,34 @@ impl Overlay {
 
     // -- derived views ------------------------------------------------------
 
-    /// Participants after applying the config filters (own user, talking)
-    /// and the configured roster order. Hidden short-circuits to an empty
-    /// list so the surface collapses through the normal empty-surface path
-    /// — no layer-shell unmap games; the daemon keeps tracking state while
-    /// invisible.
+    /// The displayed rows, cut off at `max_rows` (0 = unlimited). Rows past
+    /// the cap are not rendered; [`Overlay::hidden_rows`] counts them.
     pub fn displayed(&self) -> Vec<&Participant> {
+        let mut rows = self.eligible();
+        if self.config.max_rows > 0 {
+            rows.truncate(self.config.max_rows as usize);
+        }
+        rows
+    }
+
+    /// Participants that overflow the row cap — the "+N" pill's N. Rows
+    /// removed by the config filters do not count: they are not hidden by
+    /// the cap.
+    pub fn hidden_rows(&self) -> usize {
+        if self.config.max_rows == 0 {
+            return 0;
+        }
+        self.eligible()
+            .len()
+            .saturating_sub(self.config.max_rows as usize)
+    }
+
+    /// Participants after applying the config filters (own user, talking)
+    /// and the configured roster order, before the row cap. Hidden
+    /// short-circuits to an empty list so the surface collapses through the
+    /// normal empty-surface path — no layer-shell unmap games; the daemon
+    /// keeps tracking state while invisible.
+    fn eligible(&self) -> Vec<&Participant> {
         if !self.config.visible {
             return Vec::new();
         }
@@ -260,11 +282,15 @@ impl Overlay {
     }
 
     /// Surface size (logical px) for the currently displayed rows. Height 0
-    /// means "nothing to show".
+    /// means "nothing to show". A truncated roster reserves one more row
+    /// for the "+N" overflow pill.
     pub fn desired_size(&self) -> (u32, u32) {
-        let n = self.displayed().len() as f32;
+        let mut n = self.displayed().len() as f32;
         if n == 0.0 {
             return (self.config.width, 0);
+        }
+        if self.hidden_rows() > 0 {
+            n += 1.0;
         }
         let scale = self.config.scale_f32();
         let avatar = self.config.avatar_size as f32 * scale;
@@ -503,6 +529,131 @@ mod tests {
     fn desired_size_is_zero_height_without_participants() {
         let state = overlay(vec![], Config::default());
         assert_eq!(state.desired_size().1, 0);
+    }
+
+    #[test]
+    fn row_cap_truncates_and_reports_hidden_overflow() {
+        let users = || {
+            vec![
+                participant("1", "a", false),
+                participant("2", "b", false),
+                participant("3", "c", false),
+                participant("4", "d", false),
+            ]
+        };
+        let cfg = Config {
+            max_rows: 2,
+            ..Config::default()
+        };
+        let state = overlay(users(), cfg);
+        assert_eq!(ids(&state.displayed()), ["1", "2"]);
+        assert_eq!(state.hidden_rows(), 2);
+    }
+
+    #[test]
+    fn row_cap_zero_is_unlimited_and_no_pill_when_within_cap() {
+        let users = || {
+            vec![
+                participant("1", "a", false),
+                participant("2", "b", false),
+                participant("3", "c", false),
+            ]
+        };
+        let unlimited = overlay(users(), Config::default());
+        assert_eq!(unlimited.displayed().len(), 3);
+        assert_eq!(unlimited.hidden_rows(), 0);
+        // n < cap
+        let roomy = overlay(
+            users(),
+            Config {
+                max_rows: 5,
+                ..Config::default()
+            },
+        );
+        assert_eq!(roomy.displayed().len(), 3);
+        assert_eq!(roomy.hidden_rows(), 0);
+        // n = cap
+        let exact = overlay(
+            users(),
+            Config {
+                max_rows: 3,
+                ..Config::default()
+            },
+        );
+        assert_eq!(exact.displayed().len(), 3);
+        assert_eq!(exact.hidden_rows(), 0);
+    }
+
+    #[test]
+    fn row_cap_counts_hidden_rows_after_filters() {
+        // Talking-only hides the quiet rows before the cap applies, so the
+        // pill counts only eligible rows that overflow the cap.
+        let cfg = Config {
+            show_only_talking_users: true,
+            max_rows: 2,
+            ..Config::default()
+        };
+        let state = overlay(
+            vec![
+                participant("1", "quiet", false),
+                participant("2", "loud", true),
+                participant("3", "loud", true),
+                participant("4", "loud", true),
+            ],
+            cfg,
+        );
+        assert_eq!(ids(&state.displayed()), ["2", "3"]);
+        assert_eq!(state.hidden_rows(), 1);
+    }
+
+    #[test]
+    fn row_cap_truncates_after_sort() {
+        let cfg = Config {
+            roster_order: RosterOrder::Name,
+            max_rows: 2,
+            ..Config::default()
+        };
+        let state = overlay(
+            vec![
+                participant("z", "zed", false),
+                participant("a", "amy", false),
+                participant("m", "mo", false),
+            ],
+            cfg,
+        );
+        assert_eq!(ids(&state.displayed()), ["a", "m"]);
+        assert_eq!(state.hidden_rows(), 1);
+    }
+
+    #[test]
+    fn desired_size_adds_one_pill_row_when_truncated() {
+        let users = || {
+            vec![
+                participant("1", "a", false),
+                participant("2", "b", false),
+                participant("3", "c", false),
+            ]
+        };
+        let cfg = Config {
+            avatar_size: 34,
+            spacing: 4,
+            scale: 100,
+            ..Config::default()
+        };
+        // row_h = 34 + 8 = 42, spacing = 4.
+        let full = overlay(users(), cfg.clone());
+        let full_h = full.desired_size().1; // 3 rows: 3*42 + 2*4
+        assert_eq!(full_h, 134);
+        // Capped to 2 rows + a pill row = still 3 rows of height.
+        let capped = overlay(
+            users(),
+            Config {
+                max_rows: 2,
+                ..cfg.clone()
+            },
+        );
+        assert_eq!(capped.desired_size().1, full_h);
+        assert_eq!(capped.hidden_rows(), 1);
     }
 
     #[test]
