@@ -3,5 +3,6 @@
 //! these with the adapters.
 
 pub mod geometry;
+mod glyph;
 pub mod state;
 pub mod view;

@@ -13,8 +13,12 @@ use iced::widget::container;
 use iced::widget::container::Style as ContainerStyle;
 use iced::widget::image;
 use iced::widget::row;
+use iced::widget::svg;
 use iced::widget::text;
 
+use super::glyph::Glyph;
+use super::glyph::Mark;
+use super::glyph::mark_of;
 use crate::daemon::adapters::discord::Participant;
 use crate::daemon::overlay::state::Overlay;
 
@@ -26,8 +30,8 @@ fn color_of(hex: HexColor) -> Color {
     Color::from_rgb8(r, g, b)
 }
 
-const MUTE_RED: Color = Color::from_rgb(0.95, 0.25, 0.26);
-const DEAF_ORANGE: Color = Color::from_rgb(0.96, 0.72, 0.24);
+/// Glyph drawn inline after the username, logical px.
+const INLINE_SIZE: u32 = 16;
 
 const FALLBACK_COLORS: [Color; 6] = [
     Color::from_rgb(0.36, 0.44, 0.96),
@@ -48,11 +52,15 @@ pub fn view<'a, M: 'static>(state: &'a Overlay) -> Element<'a, M> {
     // is transparent anywhere.
     let alphas = state.effective_alphas();
 
-    let rows: Vec<Element<M>> = state
+    let mut rows: Vec<Element<M>> = state
         .displayed()
         .into_iter()
         .map(|p| participant_row(state, p, alphas))
         .collect();
+    let hidden = state.hidden_rows();
+    if hidden > 0 {
+        rows.push(overflow_row(state, hidden, alphas));
+    }
 
     // Fully transparent panel: no background, no border — only the rows.
     // Connect/sign-in progress is deliberately never rendered: an empty
@@ -104,6 +112,8 @@ fn participant_row<'a, M: 'static>(
         })
         .into();
 
+    let mark = mark_of(p);
+
     let name = truncate(&p.name, state.config().max_username_length);
     // Speakers are differentiated by the ring only — names stay fully
     // opaque so the per-part sliders are the only transparency knobs.
@@ -133,31 +143,95 @@ fn participant_row<'a, M: 'static>(
         })
         .into();
 
-    let mut badges = row![].spacing(4.0);
-    if p.muted() {
-        badges = badges.push(badge("M", MUTE_RED, alphas.text, alphas.box_bg, state));
-    }
-    if p.deafened() {
-        badges = badges.push(badge("D", DEAF_ORANGE, alphas.text, alphas.box_bg, state));
-    }
+    // The mark, inline right after the username.
+    let inline =
+        mark.map(|mark| glyph(mark.glyph, scaled(state, INLINE_SIZE), alpha(mark, alphas)));
 
     if state.config().rtl {
         // Avatar on the right, name to its left, text right-aligned.
-        row![
+        let mut row = row![
             Space::new().width(Length::Fill),
-            name_right_aligned(state, name_area),
-            badges,
-            avatar
+            name_right_aligned(state, name_area)
         ]
         .spacing(8.0)
-        .align_y(iced::Alignment::Center)
+        .align_y(iced::Alignment::Center);
+        if let Some(inline) = inline {
+            row = row.push(inline);
+        }
+        row.push(avatar).into()
+    } else {
+        let mut row = row![avatar, name_area]
+            .spacing(8.0)
+            .align_y(iced::Alignment::Center);
+        if let Some(inline) = inline {
+            row = row.push(inline);
+        }
+        row.push(Space::new().width(Length::Fill)).into()
+    }
+}
+
+/// The mark's color, dimmed by the text-opacity knob like any row content.
+fn alpha(mark: Mark, alphas: Alphas) -> Color {
+    Color {
+        a: alphas.text,
+        ..mark.color()
+    }
+}
+
+/// The "+N" overflow pill: one quiet row after the capped roster, indented
+/// to the name column and dressed like a name chip, painted in the glyphs'
+/// muted grey. N counts the filtered participants the cap hides.
+fn overflow_row<'a, M: 'static>(
+    state: &'a Overlay,
+    hidden: usize,
+    alphas: Alphas,
+) -> Element<'a, M> {
+    let text_size = scaled(state, state.config().text_size);
+    let chip_bg = Color {
+        a: alphas.box_bg,
+        ..color_of(state.config().box_color)
+    };
+    let label = text(format!("+{hidden}")).size(text_size).color(Color {
+        a: alphas.text,
+        ..super::glyph::OVERFLOW_COLOR
+    });
+    let chip: Element<'_, M> = container(label)
+        .padding([2, 8])
+        .style(move |_t| ContainerStyle {
+            background: Some(chip_bg.into()),
+            border: Border {
+                radius: (text_size * 0.6).into(),
+                ..Border::default()
+            },
+            ..ContainerStyle::default()
+        })
+        .into();
+    // Indent past the avatar column so the pill sits under the names.
+    let indent = scaled(state, state.config().avatar_size) + 8.0;
+    if state.config().rtl {
+        row![
+            Space::new().width(Length::Fill),
+            chip,
+            Space::new().width(Length::Fixed(indent))
+        ]
         .into()
     } else {
-        row![avatar, name_area, Space::new().width(Length::Fill), badges]
-            .spacing(8.0)
-            .align_y(iced::Alignment::Center)
-            .into()
+        row![
+            Space::new().width(Length::Fixed(indent)),
+            chip,
+            Space::new().width(Length::Fill)
+        ]
+        .into()
     }
+}
+
+/// Vector glyph of one MDI icon, painted flat in `color`.
+fn glyph<M: 'static>(glyph: Glyph, px: f32, color: Color) -> Element<'static, M> {
+    svg::Svg::new(svg::Handle::from_memory(glyph.svg().as_bytes()))
+        .width(Length::Fixed(px))
+        .height(Length::Fixed(px))
+        .style(move |_theme, _status| svg::Style { color: Some(color) })
+        .into()
 }
 
 /// In RTL mode the name hugs the avatar: right-aligned inside a filling row.
@@ -171,34 +245,6 @@ fn name_right_aligned<'a, M: 'a>(state: &Overlay, name_area: Element<'a, M>) -> 
             ..Default::default()
         })
         .into()
-}
-
-fn badge<M: 'static>(
-    label: &str,
-    color: Color,
-    alpha: f32,
-    bg_alpha: f32,
-    state: &Overlay,
-) -> Element<'static, M> {
-    let size = scaled(state, state.config().text_size) * 0.7;
-    let bg = Color {
-        a: bg_alpha,
-        ..color
-    };
-    container(text(label.to_string()).size(size).color(Color {
-        a: alpha,
-        ..Color::WHITE
-    }))
-    .padding(2.0)
-    .style(move |_t| ContainerStyle {
-        background: Some(bg.into()),
-        border: Border {
-            radius: (size * 0.5).into(),
-            ..Border::default()
-        },
-        ..ContainerStyle::default()
-    })
-    .into()
 }
 
 fn fallback_avatar<M: 'static>(id: &str, name: &str, px: f32, alpha: f32) -> Element<'static, M> {

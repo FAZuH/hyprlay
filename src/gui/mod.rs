@@ -61,6 +61,8 @@ enum Message {
     Position(H, V),
     /// Pin the vertical glue edge explicitly (or return it to Auto).
     Anchor(hyprlay_core::config::AnchorMode),
+    /// Pick the roster ordering strategy.
+    RosterOrder(hyprlay_core::config::RosterOrder),
     /// Flip one boolean config key (rtl, talking-only, own user).
     SetFlag(Key, bool),
     /// Integer text edited for a numeric knob; invalid or out-of-range

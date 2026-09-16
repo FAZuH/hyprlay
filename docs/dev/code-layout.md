@@ -52,9 +52,10 @@ boundary.
 | `src/daemon/surface_host/layershell.rs` | Linux/Wayland overlay shell | The existing `iced_layershell` app, behaviour byte-identical: edge anchoring with margins, hover polling |
 | `src/daemon/surface_host/winit.rs` | Windows/macOS overlay shell | Frameless, transparent, always-on-top `iced` window moved to the computed on-screen position; same shared logic and hover poll |
 | `src/daemon/ctl_server.rs` | `incoming()` stream of `CtlRequest` | Serves the core `ControlListener` on a dedicated thread (accept loop never stalls the async host), one thread per connection; the wire vocabulary itself lives in core (single source of truth) |
-| `src/daemon/overlay/state.rs` | `Overlay` model methods (`desired_size`, `displayed`, `apply_discord`) | Roster filtering, sizing, avatar cache/dedup |
+| `src/daemon/overlay/state.rs` | `Overlay` model methods (`desired_size`, `displayed`, `hidden_rows`, `apply_discord`) | Roster filtering, sizing, avatar cache/dedup |
 | `src/daemon/overlay/geometry.rs` | `anchor/margin/drag(cfg, …)` | All screen-placement math |
 | `src/daemon/overlay/view.rs` | `view(&Overlay)` | Widget construction only |
+| `src/daemon/overlay/glyph.rs` | `mark_of(&Participant) -> Option<Mark>` | Mute/deafen glyph mapping for roster rows, free of widgets |
 | `src/daemon/adapters/discord.rs` | `run(sender, auth) -> DiscordEvent` | Local IPC protocol over `IpcStream`, OAuth token exchange, reconnection, voice subscriptions (Adapter to external Discord API) |
 | `src/daemon/adapters/ipc.rs` | transport-agnostic `IpcStream` + `DiscordTransport` port | Discord's local IPC wire format: 8-byte LE header, handshake, PING/PONG; per-OS discovery + connect (unix socket / named pipe) behind the package-local `DiscordTransport` port (Adapter) |
 | `src/daemon/adapters/auth.rs` | `detect() -> Option<OwnAppAuth>`, `exchange(code)` | Credential resolution (env → auth.json) and the OAuth code exchange |

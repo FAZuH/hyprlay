@@ -59,6 +59,7 @@ pub(super) fn command_for(message: Message) -> Command {
         // Rides the generic apply path like Position: mirror locally, send
         // the same wire command the CLI would.
         Message::Anchor(mode) => Command::Set(Key::Anchor, Value::Anchor(mode)),
+        Message::RosterOrder(order) => Command::Set(Key::RosterOrder, Value::RosterOrder(order)),
         Message::SetFlag(..) => unreachable!("flags are handled directly in update"),
         // Handled directly in `update`; unreachable here.
         Message::NumText(..)
@@ -115,6 +116,25 @@ mod tests {
         let revert = Command::Set(Key::Anchor, Key::Anchor.value_of(&saved));
         revert.apply_config(&mut live);
         assert_eq!(live.anchor, saved.anchor);
+    }
+
+    #[test]
+    fn roster_order_setting_roundtrips_through_apply_and_revert() {
+        // The exact Command path the GUI chip row drives.
+        let mut live = Config::default();
+        let pick_name = Command::Set(
+            Key::RosterOrder,
+            Value::RosterOrder(hyprlay_core::config::RosterOrder::Name),
+        );
+        pick_name.clone().apply_config(&mut live);
+        assert_eq!(live.roster_order, hyprlay_core::config::RosterOrder::Name);
+
+        // Reverting mirrors what "clear changes" replays: read the saved
+        // value back through the shared table and re-apply it.
+        let saved = Config::default();
+        let revert = Command::Set(Key::RosterOrder, Key::RosterOrder.value_of(&saved));
+        revert.apply_config(&mut live);
+        assert_eq!(live.roster_order, saved.roster_order);
     }
 
     #[test]
