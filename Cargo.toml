@@ -31,6 +31,7 @@ iced = { version = "0.14", default-features = false, features = [
     "tiny-skia",
     "crisp",
     "image-without-codecs",
+    "svg",
     "tokio",
 ] }
 iced_layershell = "0.19.1"
