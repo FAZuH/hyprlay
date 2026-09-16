@@ -1,8 +1,15 @@
 # Commit & Changelog Conventions
 
-The changelog is generated from your commits automatically. Generation uses
-the stock `conventional-changelog-conventionalcommits` preset. The only
-custom behavior in `.config.cjs` is the version bump logic.
+This repo maintains the changelog by hand. `.github/changelog-mode` holds
+`manual`, so you write entries in `CHANGELOG.md` and the release renames the
+topmost `## [Unreleased]` section to `## <version> (<date>)`. The release does
+not build entries from your commits. For entry wording and grouping, see
+`changelog.md`.
+
+Your commit subjects still set the version bump, and the release still
+creates the tag automatically. The bump uses the stock
+`conventional-changelog-conventionalcommits` preset. The only custom behavior
+in `.config.cjs` is the version bump logic.
 
 ## Commit message format
 
@@ -17,8 +24,10 @@ format:
 - `scope` — optional; the part of the codebase you changed
 - `subject` — a short description of the change
 
-The type decides the changelog section. The scope shows in the entry. The
-subject becomes the entry text.
+The commit type sets the version bump (see `Bump control`). In `auto` mode the
+type also picks the changelog section, the scope shows in the entry, and the
+subject becomes the entry text. This repo is `manual` mode, so you write the
+entries yourself.
 
 Example:
 
@@ -27,9 +36,10 @@ feat(api): add user search endpoint
 fix(parser): handle empty input
 ```
 
-## Which commits appear
+## Which commits matter
 
-These types create changelog entries:
+In `auto` mode these types create changelog entries. In this repo (`manual`
+mode) they mark the user-visible changes you must write an entry for:
 
 | Type | Section heading | Meaning |
 |------|-----------------|---------|
@@ -38,7 +48,7 @@ These types create changelog entries:
 | `perf` | Performance Improvements | A performance improvement |
 | `revert` | Reverts | A reverted change |
 
-These types do NOT create entries:
+These types do NOT create entries in either mode:
 
 ```
 docs, style, chore, refactor, test, build, ci
@@ -63,8 +73,10 @@ Example: `chore!(major): drop the legacy config format` bumps the version
 to the next major but creates no entry.
 
 A visible commit can also declare a breaking change. Add `!` after the type,
-or add a `BREAKING CHANGE:` footer to the body. The changelog then shows the
-entry under a "Breaking Changes" section.
+or add a `BREAKING CHANGE:` footer to the body. In `auto` mode the changelog
+then shows the entry under a "Breaking Changes" section. In `manual` mode, put
+that entry under `### Breaking Changes` in `[Unreleased]` yourself. See
+`changelog.md`.
 
 Workspace members (crates) are bumped independently. The CI detects changed
 members by file path under `crates/<member>/`, not by commit scope. Commit
