@@ -1,8 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Development helper script
 # Usage: ./dev.sh [command1] [command2] ...
-#   commands: format | lint | test | docs | all | help
+#   commands: format | lint | test | docs | demo | all | help
 #   plus any commands provided by modules (scripts/dev-*.sh, dev/*.sh, dev-*.sh)
 #   Multiple commands can be specified and will execute left to right
 
@@ -101,6 +101,33 @@ cmd_docs() {
 }
 dev_desc docs "Compile Mermaid diagrams to images"
 
+cmd_demo() {
+    inf "Building release binary..."
+    cargo build --release
+    scs "Release build completed"
+
+    inf "Creating wrapper script..."
+    local wrapper_dir="/tmp/tomo-demo-bin"
+    mkdir -p "$wrapper_dir"
+    cat > "$wrapper_dir/tomo" << SCRIPT
+#!/bin/bash
+exec $PWD/target/release/tomo --config-path /tmp/tomo-demo "\$@"
+SCRIPT
+    chmod +x "$wrapper_dir/tomo"
+    export PATH="$wrapper_dir:$PATH"
+    trap "rm -rf $wrapper_dir" EXIT
+    scs "Wrapper created at $wrapper_dir/tomo"
+
+    if ! command -v vhs &> /dev/null; then
+        wrn "vhs not found. Install it: https://github.com/charmbracelet/vhs"
+    fi
+
+    inf "Running demo tape..."
+    vhs scripts/demo.tape
+    scs "Demo tape completed"
+}
+dev_desc demo "Build release, alias, and run vhs demo tape"
+
 cmd_all() {
     inf "Running all tasks..."
     cmd_format
@@ -122,7 +149,15 @@ discover_modules() {
         for f in ${SCRIPT_DIR}/${pat}; do
             [ -f "$f" ] || continue
             inf "Loading module: $(basename "$f")"
-            source "$f"
+            # A module that fails to load must not take dev.sh down with it:
+            # the remaining modules and every built-in command still work, and
+            # the missing name is the only thing the agent has to act on.
+            # A module that calls `exit` at load time still ends the script -
+            # that is the shell, not this guard, so a module must not exit
+            # outside its own command function.
+            if ! source "$f"; then
+                wrn "module failed to load, skipping: $f"
+            fi
         done
         shopt -u nullglob
     done
@@ -153,6 +188,7 @@ Examples:
   ./dev.sh lint                    # Run linter
   ./dev.sh test                    # Run tests
   ./dev.sh docs                    # Compile Mermaid diagrams
+  ./dev.sh demo                    # Build release, alias, and run demo tape
   ./dev.sh format lint             # Format then lint
   ./dev.sh all                     # Run format, lint, and test
 
