@@ -25,7 +25,6 @@ use crate::daemon::Lifecycle;
 use crate::daemon::adapters::auth::OwnAppAuth;
 use crate::daemon::adapters::avatar;
 use crate::daemon::adapters::discord;
-use crate::daemon::hover_poll_enabled;
 use crate::daemon::monitor_for_overlay;
 use crate::daemon::overlay::geometry;
 use crate::daemon::overlay::state;
@@ -137,7 +136,7 @@ pub(crate) fn run(cfg: Config, auth: Option<OwnAppAuth>) -> ExitCode {
 }
 
 fn subscription(state: &Overlay, auth: &DiscordRpc) -> Subscription<Message> {
-    let hover = if hover_poll_enabled(state) {
+    let hover = if state.hover_polling() {
         Subscription::run(hover_subscription)
     } else {
         Subscription::none()
@@ -189,7 +188,7 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
     match message {
         Message::Discord(ev) => {
             let change = state.apply_discord(ev);
-            if !hover_poll_enabled(state) {
+            if !state.hover_polling() {
                 state.clear_hover_if_set();
             }
             match change {
@@ -211,7 +210,7 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
             // helper; the winit arm does too. The audit found this arm
             // re-implemented it inline with a De Morgan'd `||` and had
             // already diverged, so it is the shared helper now.
-            if !hover_poll_enabled(state) {
+            if !state.hover_polling() {
                 state.clear_hover_if_set();
                 return Task::none();
             }

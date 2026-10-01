@@ -29,6 +29,37 @@ pub struct Roster {
     pub users: Vec<Participant>,
 }
 
+impl Roster {
+    /// Write this roster to the cache. The free `save_roster(channel, me_id,
+    /// users)` this replaced took exactly the three fields of this type, so
+    /// the caller had to pull them out to decide for it (Tell, Don't Ask).
+    pub fn write(&self) {
+        let sig = format!(
+            "{:?}|{:?}|{}",
+            self.channel,
+            self.me_id,
+            roster_signature(&self.users)
+        );
+        {
+            let mut last = last_signature().lock().unwrap();
+            if *last == sig {
+                return;
+            }
+            *last = sig;
+        }
+        let dir = cache_dir();
+        let write = || -> std::io::Result<()> {
+            std::fs::create_dir_all(&dir)?;
+            let payload = serde_json::to_string(self)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            std::fs::write(dir.join("roster.json"), payload)
+        };
+        if let Err(e) = write() {
+            tracing::warn!(event = "roster_save_failed", error = %e, "could not persist roster cache");
+        }
+    }
+}
+
 /// Cheap identity of a roster for write dedup — the serde output of every
 /// participant, so the signature covers exactly the fields the cache file
 /// persists and can never drift away from the file format. The live-only
@@ -50,33 +81,6 @@ fn roster_signature(users: &[Participant]) -> String {
 fn last_signature() -> &'static Mutex<String> {
     static LAST: OnceLock<Mutex<String>> = OnceLock::new();
     LAST.get_or_init(|| Mutex::new(String::new()))
-}
-
-/// Persist the roster if it changed since the last write.
-pub fn save_roster(channel: Option<&str>, me_id: Option<&str>, users: &[Participant]) {
-    let sig = format!("{:?}|{:?}|{}", channel, me_id, roster_signature(users));
-    {
-        let mut last = last_signature().lock().unwrap();
-        if *last == sig {
-            return;
-        }
-        *last = sig;
-    }
-    let roster = Roster {
-        channel: channel.map(str::to_string),
-        me_id: me_id.map(str::to_string),
-        users: users.to_vec(),
-    };
-    let dir = cache_dir();
-    let write = || -> std::io::Result<()> {
-        std::fs::create_dir_all(&dir)?;
-        let payload = serde_json::to_string(&roster)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(dir.join("roster.json"), payload)
-    };
-    if let Err(e) = write() {
-        tracing::warn!(event = "roster_save_failed", error = %e, "could not persist roster cache");
-    }
 }
 
 pub fn load_roster() -> Option<Roster> {

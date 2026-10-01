@@ -14,6 +14,7 @@ use hyprlay_core::domain::ConnectionStatus;
 use iced::widget::image::Handle;
 
 use crate::daemon::adapters::avatar;
+use crate::daemon::adapters::cache::Roster;
 use crate::daemon::adapters::discord::DiscordEvent;
 use crate::daemon::adapters::discord::Participant;
 
@@ -175,6 +176,18 @@ impl Overlay {
         }
     }
 
+    /// Whether the hover poll should be running right now. The free
+    /// `hover_poll_enabled(state)` this replaced reached into four of this
+    /// type's accessors and owned nothing (Feature Envy); it is the same
+    /// code with the receiver in reach. Called from five sites across the
+    /// daemon and both surface arms.
+    pub fn hover_polling(&self) -> bool {
+        self.config.dim_on_hover
+            && self.config.visible
+            && !self.displayed().is_empty()
+            && self.status == hyprlay_core::domain::ConnectionStatus::Connected
+    }
+
     pub fn effective_alphas(&self) -> hyprlay_core::config::Alphas {
         self.config.alphas_for(self.hovered)
     }
@@ -202,11 +215,12 @@ impl Overlay {
                 self.track_speakers(&users);
                 self.users = users;
                 if self.status == ConnectionStatus::Connected {
-                    crate::daemon::adapters::cache::save_roster(
-                        self.channel_name.as_deref(),
-                        self.me_id.as_deref(),
-                        &self.users,
-                    );
+                    Roster {
+                        channel: self.channel_name.clone(),
+                        me_id: self.me_id.clone(),
+                        users: self.users.clone(),
+                    }
+                    .write();
                 }
                 self.avatars.hydrate(&self.users);
                 RosterChange::Changed

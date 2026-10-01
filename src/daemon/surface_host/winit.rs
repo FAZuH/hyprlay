@@ -22,7 +22,6 @@ use crate::daemon::Lifecycle;
 use crate::daemon::adapters::auth::OwnAppAuth;
 use crate::daemon::adapters::avatar;
 use crate::daemon::adapters::discord;
-use crate::daemon::hover_poll_enabled;
 use crate::daemon::monitor_for_overlay;
 use crate::daemon::overlay::geometry;
 use crate::daemon::overlay::state;
@@ -129,7 +128,7 @@ fn view_window<'a>(state: &'a WinitState) -> Element<'a, Message> {
 }
 
 fn subscription(state: &WinitState, auth: &DiscordRpc) -> Subscription<Message> {
-    let hover = if hover_poll_enabled(&state.overlay) {
+    let hover = if state.overlay.hover_polling() {
         Subscription::run(hover_subscription)
     } else {
         Subscription::none()
@@ -189,7 +188,7 @@ fn update(state: &mut WinitState, message: Message) -> Task<Message> {
         }
         Message::Discord(ev) => {
             let change = state.overlay.apply_discord(ev);
-            if !hover_poll_enabled(&state.overlay) && state.overlay.is_hovered() {
+            if !state.overlay.hover_polling() && state.overlay.is_hovered() {
                 state.overlay.set_hovered(false);
             }
             match change {
@@ -207,7 +206,7 @@ fn update(state: &mut WinitState, message: Message) -> Task<Message> {
         }
         Message::Ctl { command, reply } => handle_ctl(state, command, reply),
         Message::HoverCursor(pos) => {
-            if !hover_poll_enabled(&state.overlay) {
+            if !state.overlay.hover_polling() {
                 return Task::none();
             }
             let Some((x, y)) = pos else {

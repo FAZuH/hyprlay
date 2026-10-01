@@ -118,6 +118,11 @@ mod tests {
 
     /// `(self_mute, self_deaf, server_mute, server_deaf)` and the mark (glyph
     /// + server-caused) it must produce, if any.
+    ///
+    /// The inputs stay hand-enumerated: they are every combination of the
+    /// four-bool clump `Participant` carries, and 16 is all of them. The
+    /// expected values stay literal too, which is what makes the table
+    /// falsifiable.
     type Case = ((bool, bool, bool, bool), Option<(Glyph, bool)>);
 
     const CASES: [Case; 16] = [

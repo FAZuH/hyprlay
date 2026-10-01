@@ -160,11 +160,11 @@ pub(crate) fn monitor_for_overlay(cfg: &hyprlay_core::config::Config) -> Option<
     crate::daemon::overlay::geometry::pick_monitor(&monitors, cfg.monitor.as_deref()).cloned()
 }
 
+/// The free name the daemon's own arm and its tests call. The logic lives on
+/// [`Overlay::hover_polling`]; this is a one-line delegate so the call sites
+/// that have no `Overlay` in scope still read the same.
 pub(crate) fn hover_poll_enabled(state: &Overlay) -> bool {
-    state.config().dim_on_hover
-        && state.config().visible
-        && !state.displayed().is_empty()
-        && state.status() == hyprlay_core::domain::ConnectionStatus::Connected
+    state.hover_polling()
 }
 
 /// Control-socket command resolution. The command line is parsed once into a
