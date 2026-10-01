@@ -208,15 +208,9 @@ fn update(state: &mut WinitState, message: Message) -> Task<Message> {
         Message::Ctl { command, reply } => handle_ctl(state, command, reply),
         Message::HoverCursor(pos) => {
             if !hover_poll_enabled(&state.overlay) {
-                if state.overlay.is_hovered() {
-                    state.overlay.set_hovered(false);
-                }
                 return Task::none();
             }
             let Some((x, y)) = pos else {
-                if state.overlay.is_hovered() {
-                    state.overlay.set_hovered(false);
-                }
                 return Task::none();
             };
             let rect = hover_rect(state);

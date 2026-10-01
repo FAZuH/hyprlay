@@ -508,10 +508,6 @@ impl Config {
         self.scale as f32 / 100.0
     }
 
-    pub fn alphas(&self) -> Alphas {
-        self.alphas_for(false)
-    }
-
     pub fn alphas_for(&self, hovered: bool) -> Alphas {
         let opacity = if hovered {
             self.hover_opacity
@@ -524,14 +520,6 @@ impl Config {
             avatar: part(self.avatar_opacity),
             text: part(self.text_opacity),
             box_bg: part(self.box_opacity),
-        }
-    }
-
-    pub fn effective_opacity(&self, hovered: bool) -> u8 {
-        if hovered {
-            self.hover_opacity
-        } else {
-            self.opacity
         }
     }
 }
@@ -855,7 +843,7 @@ speaking = \"#00ff00\"
             box_opacity: 90,
             ..Config::default()
         };
-        let a = cfg.alphas();
+        let a = cfg.alphas_for(false);
         assert_eq!(a.overall, 0.5);
         assert_eq!(a.avatar, 0.5);
         assert_eq!(a.text, 0.25);
@@ -864,7 +852,7 @@ speaking = \"#00ff00\"
 
     #[test]
     fn default_alphas_leave_everything_but_the_chip_opaque() {
-        let a = Config::default().alphas();
+        let a = Config::default().alphas_for(false);
         assert_eq!(a.overall, 1.0);
         assert_eq!(a.avatar, 1.0);
         assert_eq!(a.text, 1.0);
@@ -1010,8 +998,8 @@ speaking = \"#00ff00\"
         assert_eq!(hovered.text, 0.2);
         assert_eq!(idle.box_bg, 0.9);
         assert_eq!(hovered.box_bg, 0.36);
-        assert_eq!(cfg.alphas(), idle);
-        assert_eq!(cfg.effective_opacity(false), 100);
-        assert_eq!(cfg.effective_opacity(true), 40);
+        assert_eq!(cfg.alphas_for(false), idle);
+        assert_eq!(cfg.alphas_for(false).overall, 1.0);
+        assert_eq!(cfg.alphas_for(true).overall, 0.4);
     }
 }

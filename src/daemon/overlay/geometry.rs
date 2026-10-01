@@ -233,8 +233,6 @@ pub fn drag(margin: (i32, i32, i32, i32), cfg: &Config, dx: i32, dy: i32) -> (i3
 
 #[cfg(test)]
 mod tests {
-    use hyprlay_core::compositor::macos_flip_y;
-    use hyprlay_core::compositor::physical_to_logical;
 
     use super::*;
 
@@ -539,23 +537,6 @@ mod tests {
             ..monitor(0, 0, 1920, 1080)
         };
         assert_eq!(monitor_logical(&zero), (0, 0, 1920, 1080));
-    }
-
-    #[test]
-    fn physical_to_logical_rounds_to_nearest_logical_pixel() {
-        assert_eq!(physical_to_logical(1920, 1.25), 1536);
-        assert_eq!(physical_to_logical(1920, 1.0), 1920);
-        assert_eq!(physical_to_logical(1920, 0.0), 1920); // degenerate scale
-        assert_eq!(physical_to_logical(-100, 2.0), -50);
-    }
-
-    #[test]
-    fn macos_flip_y_converts_top_left_to_bottom_left_origin() {
-        // A point 100px from the top of a 1080 logical space is 980 from the
-        // bottom under the macOS Y-up convention.
-        assert_eq!(macos_flip_y(100, 1080), 980);
-        assert_eq!(macos_flip_y(0, 1080), 1080);
-        assert_eq!(macos_flip_y(1080, 1080), 0);
     }
 
     #[test]

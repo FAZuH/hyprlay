@@ -189,8 +189,8 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
     match message {
         Message::Discord(ev) => {
             let change = state.apply_discord(ev);
-            if !hover_poll_enabled(state) && state.is_hovered() {
-                state.set_hovered(false);
+            if !hover_poll_enabled(state) {
+                state.clear_hover_if_set();
             }
             match change {
                 state::RosterChange::Changed => {
@@ -207,20 +207,16 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
         }
         Message::Ctl { command, reply } => handle_ctl(state, command, reply),
         Message::HoverCursor(pos) => {
-            if !state.config().dim_on_hover
-                || !state.config().visible
-                || state.displayed().is_empty()
-                || state.status() != hyprlay_core::domain::ConnectionStatus::Connected
-            {
-                if state.is_hovered() {
-                    state.set_hovered(false);
-                }
+            // Same guard as the Discord arm above, which calls the shared
+            // helper; the winit arm does too. The audit found this arm
+            // re-implemented it inline with a De Morgan'd `||` and had
+            // already diverged, so it is the shared helper now.
+            if !hover_poll_enabled(state) {
+                state.clear_hover_if_set();
                 return Task::none();
             }
             let Some((x, y)) = pos else {
-                if state.is_hovered() {
-                    state.set_hovered(false);
-                }
+                state.clear_hover_if_set();
                 return Task::none();
             };
             let monitor = monitor_for_overlay(state.config());

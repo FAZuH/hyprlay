@@ -23,8 +23,6 @@ pub struct Singleton {
     // self-reference; that is one extra fd held as long as the singleton
     // itself, closed at process exit.
     _guard: RwLockWriteGuard<'static, File>,
-    #[allow(dead_code)]
-    path: PathBuf,
 }
 
 /// Why a singleton could not be acquired.
@@ -90,10 +88,7 @@ pub fn acquire_at(runtime_dir: &Path, name: &str) -> Result<Singleton, AcquireEr
     // keeps the lock held until exit).
     let lock: &'static mut RwLock<File> = Box::leak(Box::new(RwLock::new(file)));
     match lock.try_write() {
-        Ok(guard) => Ok(Singleton {
-            _guard: guard,
-            path,
-        }),
+        Ok(guard) => Ok(Singleton { _guard: guard }),
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Err(AcquireError::AlreadyHeld),
         Err(e) => Err(AcquireError::Io(e)),
     }

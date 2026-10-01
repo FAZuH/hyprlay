@@ -165,6 +165,16 @@ impl Overlay {
         }
     }
 
+    /// Drop the hover flag when it is set. Seven sites used to carry this
+    /// block inline: `daemon/mod.rs:460`, four in the layershell arm, three
+    /// in the winit arm. The guard above it differs per site; this is the
+    /// one piece they all share.
+    pub fn clear_hover_if_set(&mut self) {
+        if self.hovered {
+            self.hovered = false;
+        }
+    }
+
     pub fn effective_alphas(&self) -> hyprlay_core::config::Alphas {
         self.config.alphas_for(self.hovered)
     }
