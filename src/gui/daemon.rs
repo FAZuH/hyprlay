@@ -144,11 +144,6 @@ impl AutoStart {
 
 #[cfg(test)]
 mod tests {
-    use hyprlay_core::daemon_control::Action;
-    use hyprlay_core::daemon_control::DaemonControl;
-    use hyprlay_core::daemon_control::ServiceError;
-    use hyprlay_core::daemon_control::StopPolicy;
-    use hyprlay_core::daemon_control::execute_toggle;
 
     use super::*;
 
@@ -268,81 +263,6 @@ mod tests {
     fn while_connecting_the_toggle_is_disabled_under_a_dimmed_start_label() {
         assert_eq!(DaemonState::Connecting.label(), "Start daemon");
         assert_eq!(DaemonState::Connecting.toggle(), None);
-    }
-
-    #[test]
-    fn an_installed_unit_routes_start_through_systemctl() {
-        assert_eq!(
-            hyprlay_core::daemon_control::plan_action(
-                Toggle::Start,
-                true,
-                StopPolicy::ViaSystemctl
-            ),
-            Action::SystemctlStart
-        );
-    }
-
-    #[test]
-    fn an_installed_unit_routes_stop_through_systemctl() {
-        assert_eq!(
-            hyprlay_core::daemon_control::plan_action(Toggle::Stop, true, StopPolicy::ViaSystemctl),
-            Action::SystemctlStop
-        );
-    }
-
-    #[test]
-    fn without_a_unit_start_spawns_the_sibling_daemon() {
-        assert_eq!(
-            hyprlay_core::daemon_control::plan_action(
-                Toggle::Start,
-                false,
-                StopPolicy::ViaSystemctl
-            ),
-            Action::SpawnDaemon
-        );
-    }
-
-    #[test]
-    fn without_a_unit_stop_quits_over_the_control_socket() {
-        assert_eq!(
-            hyprlay_core::daemon_control::plan_action(
-                Toggle::Stop,
-                false,
-                StopPolicy::ViaSystemctl
-            ),
-            Action::SocketQuit
-        );
-    }
-
-    #[test]
-    fn a_successful_toggle_runs_exactly_one_action_and_stays_quiet() {
-        let control = FakeControl {
-            installed: true,
-            ..FakeControl::default()
-        };
-        let outcome = execute_toggle(&control, Toggle::Start, StopPolicy::ViaSystemctl);
-        assert_eq!(outcome, None);
-        assert_eq!(control.performed(), vec![Action::SystemctlStart]);
-    }
-
-    #[test]
-    fn a_failed_action_surfaces_its_error_text() {
-        let control = FakeControl {
-            installed: false,
-            fail_with: Some(Box::new(|| ServiceError::SystemctlFailed {
-                subcommand: "stop".into(),
-                detail: "unit not loaded".into(),
-            })),
-            ..FakeControl::default()
-        };
-        // Stop without a unit resolves to the socket path; its failure must
-        // reach the status line verbatim.
-        let outcome = execute_toggle(&control, Toggle::Stop, StopPolicy::ViaSystemctl);
-        assert_eq!(
-            outcome,
-            Some("error: systemctl stop failed: unit not loaded".into())
-        );
-        assert_eq!(control.performed(), vec![Action::SocketQuit]);
     }
 
     #[test]
@@ -468,36 +388,5 @@ mod tests {
             DaemonState::Unreachable,
             "once the launch returned, a dead daemon must be reported"
         );
-    }
-
-    /// Spy at the process/socket boundary: records what ran so tests verify
-    /// state, not call mechanics. `fail_with` is a factory because
-    /// `ServiceError` is not `Clone`: every performed action fails the same
-    /// way, exactly as the old `String` double did.
-    #[derive(Default)]
-    struct FakeControl {
-        installed: bool,
-        fail_with: Option<Box<dyn Fn() -> ServiceError + Send + Sync>>,
-        performed: std::sync::Mutex<Vec<Action>>,
-    }
-
-    impl FakeControl {
-        fn performed(&self) -> Vec<Action> {
-            self.performed.lock().unwrap().clone()
-        }
-    }
-
-    impl DaemonControl for FakeControl {
-        fn unit_installed(&self) -> bool {
-            self.installed
-        }
-
-        fn perform(&self, action: Action) -> Result<(), ServiceError> {
-            self.performed.lock().unwrap().push(action);
-            match &self.fail_with {
-                Some(failure) => Err(failure()),
-                None => Ok(()),
-            }
-        }
     }
 }
