@@ -241,17 +241,10 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
             // restart only when the re-exec target exists, mirroring the
             // monitor-change guard below.
             if !can_reexec() {
-                tracing::error!(
-                    event = "daemon_restart_failed",
-                    "aborting restart: daemon binary unavailable"
+                return reexec_unavailable(
+                    "restart",
+                    "error: could not restart daemon: binary is missing",
                 );
-                return CommandOutcome {
-                    reply: Reply::Error(
-                        "error: could not restart daemon: binary is missing".to_string(),
-                    ),
-                    effects: Vec::new(),
-                    lifecycle: None,
-                };
             }
             return CommandOutcome {
                 reply: Reply::Ok("restarting".to_string()),
@@ -320,17 +313,10 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
             // after this point (binary rebuilt away under a running daemon),
             // reporting success while the old surface stayed put.
             if !can_reexec() {
-                tracing::error!(
-                    event = "daemon_restart_failed",
-                    "aborting monitor change: daemon binary unavailable"
+                return reexec_unavailable(
+                    "monitor change",
+                    "error: could not relocate overlay: daemon binary is missing",
                 );
-                return CommandOutcome {
-                    reply: Reply::Error(
-                        "error: could not relocate overlay: daemon binary is missing".to_string(),
-                    ),
-                    effects: Vec::new(),
-                    lifecycle: None,
-                };
             }
             state.config_mut().monitor = match target {
                 MonitorTarget::Active => None,
@@ -370,18 +356,10 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
                 };
             }
             if !can_reexec() {
-                tracing::error!(
-                    event = "daemon_restart_failed",
-                    "aborting show-on-fullscreen change: daemon binary unavailable"
+                return reexec_unavailable(
+                    "show-on-fullscreen change",
+                    "error: could not change overlay layer: daemon binary is missing",
                 );
-                return CommandOutcome {
-                    reply: Reply::Error(
-                        "error: could not change overlay layer: daemon binary is missing"
-                            .to_string(),
-                    ),
-                    effects: Vec::new(),
-                    lifecycle: None,
-                };
             }
             state.config_mut().show_on_fullscreen = requested;
             state.config_mut().save();
@@ -396,17 +374,10 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
         }
         Command::ResetAll if reset_needs_restart(state, &cmd) => {
             if !can_reexec() {
-                tracing::error!(
-                    event = "daemon_restart_failed",
-                    "aborting reset: daemon binary unavailable"
+                return reexec_unavailable(
+                    "reset",
+                    "error: could not reset overlay: daemon binary is missing",
                 );
-                return CommandOutcome {
-                    reply: Reply::Error(
-                        "error: could not reset overlay: daemon binary is missing".to_string(),
-                    ),
-                    effects: Vec::new(),
-                    lifecycle: None,
-                };
             }
             let requested = hyprlay_core::config::Config::default().show_on_fullscreen;
             let monitor = state.config().monitor.clone();
@@ -426,17 +397,10 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
             if group == Group::Layout && reset_needs_restart(state, &cmd) =>
         {
             if !can_reexec() {
-                tracing::error!(
-                    event = "daemon_restart_failed",
-                    "aborting reset layout: daemon binary unavailable"
+                return reexec_unavailable(
+                    "reset layout",
+                    "error: could not reset layout: daemon binary is missing",
                 );
-                return CommandOutcome {
-                    reply: Reply::Error(
-                        "error: could not reset layout: daemon binary is missing".to_string(),
-                    ),
-                    effects: Vec::new(),
-                    lifecycle: None,
-                };
             }
             let requested = hyprlay_core::config::Config::default().show_on_fullscreen;
             let defaults = hyprlay_core::config::Config::default();
@@ -557,6 +521,27 @@ fn can_reexec() -> bool {
     std::env::current_exe()
         .and_then(|exe| std::fs::metadata(exe).map(|_| ()))
         .is_ok()
+}
+
+/// The outcome every restart-routed command shares when the re-exec target is
+/// missing. Five commands used to carry this block inline, ~13 lines each;
+/// the reply text is the only thing that varies, and the log phrase is close
+/// but not identical to it — so both are arguments.
+///
+/// Logging stays here so a failed guard is visible in the daemon's log, not
+/// just in the reply the client sees. The reply is part of the byte-stable
+/// wire contract (`CONTEXT.md`, Invariants), so the wording is pinned by
+/// tests and must not change.
+fn reexec_unavailable(log_what: &str, reply: &str) -> CommandOutcome {
+    tracing::error!(
+        event = "daemon_restart_failed",
+        "aborting {log_what}: daemon binary unavailable"
+    );
+    CommandOutcome {
+        reply: Reply::Error(reply.to_string()),
+        effects: Vec::new(),
+        lifecycle: None,
+    }
 }
 
 /// The visible second-daemon failure line (D7). Kept pure so the exact
