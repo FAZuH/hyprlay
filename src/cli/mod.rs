@@ -56,7 +56,7 @@ pub(crate) enum Outcome {
 }
 
 const ROOT_HELP_TEMPLATE: &str = concat!(
-    "{name} {version} — {about}\n",
+    "{name} {version} - {about}\n",
     "\n",
     "USAGE:\n",
     "    {usage}\n",
@@ -584,7 +584,7 @@ mod tests {
             Some(concat!(
                 "hyprlay ",
                 env!("CARGO_PKG_VERSION"),
-                " — lightweight Discord voice overlay (Wayland/Hyprland)"
+                " - lightweight Discord voice overlay (Wayland/Hyprland)"
             )),
             "banner opens the root help"
         );
@@ -621,7 +621,7 @@ mod tests {
             let description = about.to_string();
             assert!(
                 help.contains(&row) && help.contains(&description),
-                "root help must list `{name}` — {description}"
+                "root help must list `{name}` - {description}"
             );
         }
         for required in ["get", "set", "install", "uninstall", "quit"] {

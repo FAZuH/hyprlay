@@ -103,8 +103,9 @@ fn sidebar(gui: &Gui) -> Element<'_, Message> {
             .style(nav_style(selected)),
         );
     }
-    let hints =
-        "\nCtrl+S    save\nCtrl+R    reset section\nCtrl+F    search\nEsc       clear search";
+    // Every shortcut the app implements, including Ctrl+Shift+R (Reset all),
+    // which was implemented but absent from this sheet.
+    let hints = "\nCtrl+S    save\nCtrl+R    reset section\nCtrl+Shift+R    reset all\nCtrl+F    search\nEsc       clear search";
     let col = column![
         nav,
         iced::widget::Space::new().height(Length::Fill),

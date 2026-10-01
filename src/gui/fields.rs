@@ -604,7 +604,16 @@ pub(super) fn search_page(gui: &Gui) -> Element<'_, Message> {
         );
     }
     if hits == 0 {
-        col = col.push(text("no settings match").color(MUTED));
+        // R-27: the empty state names why it is empty and the one action
+        // that fills it. `search_matches` covers labels, tooltips, and
+        // section names, so saying so is the difference between a dead end
+        // and a hint.
+        col = col.push(
+            text(format!(
+                "no settings match \u{201c}{query}\u{201d}. Search covers labels, tooltips, and section names."
+            ))
+            .color(MUTED),
+        );
     }
     scroll_page(col).into()
 }
