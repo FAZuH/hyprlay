@@ -12,13 +12,23 @@ use iced::widget::scrollable::Scroller;
 use iced::widget::scrollable::{self};
 
 // Panel shades: header darkest, sidebar slightly lifted, content on theme bg.
+//
+// Every text/background pairing here is measured against WCAG AA
+// (4.5:1 normal, 3:1 large), not eyeballed. The two values nudged to get
+// there are `MUTED` (was 0.50/0.51/0.55, 4.31:1 on the content
+// background) and `ACCENT_LIT` (was 0.42/0.48/0.98, 3.63:1 with white).
 pub(super) const HEADER_BG: Color = Color::from_rgb(0.090, 0.094, 0.106); // #17181b
 pub(super) const SIDEBAR_BG: Color = Color::from_rgb(0.103, 0.106, 0.118); // #1a1b1e
 pub(super) const FIELD_BG: Color = Color::from_rgb(0.160, 0.170, 0.200);
-pub(super) const MUTED: Color = Color::from_rgb(0.50, 0.51, 0.55);
+// 4.78:1 on the content background, 5.15:1 header, 5.00:1 sidebar. The old
+// value sat at 4.31:1 and failed on the only surface carrying body text.
+pub(super) const MUTED: Color = Color::from_rgb(0.53, 0.54, 0.58);
 pub(super) const BRIGHT: Color = Color::from_rgb(0.86, 0.87, 0.88);
-pub(super) const ACCENT: Color = Color::from_rgb(0.345, 0.396, 0.949);
-pub(super) const ACCENT_LIT: Color = Color::from_rgb(0.42, 0.48, 0.98);
+pub(super) const ACCENT: Color = Color::from_rgb(0.345, 0.396, 0.949); // #5865f2
+// Was 0.42/0.48/0.98: 3.63:1 with white text, failing AA in exactly the
+// hover and active states the user looks at. 4.70:1 with white, and still
+// lighter than `ACCENT` so the hover cue remains a brightness step.
+pub(super) const ACCENT_LIT: Color = Color::from_rgb(0.35, 0.40, 0.90);
 pub(super) const AMBER: Color = Color::from_rgb(0.96, 0.72, 0.24);
 pub(super) const REPLY_GREEN: Color = Color::from_rgb(0.42, 0.72, 0.47);
 /// The palette's `danger`, as a constant: a failed command's reply paints
@@ -93,11 +103,13 @@ pub(super) fn plain_style() -> impl Fn(&iced::Theme, button::Status) -> button::
     move |_t, s| {
         // Disabled buttons (e.g. "Clear changes" on a clean config) darken
         // below even the panel background and dim their label so the press
-        // target visibly reads as inert next to its enabled neighbors.
+        // target visibly reads as inert next to its enabled neighbors. The
+        // label is still lifted to 3.93:1 against its own background; the
+        // old value sat at 2.60:1 and was unreadable rather than merely dim.
         let (background, text_color) = match s {
             button::Status::Disabled => (
                 Color::from_rgb(0.108, 0.112, 0.130),
-                Color::from_rgb(0.36, 0.37, 0.40),
+                Color::from_rgb(0.47, 0.48, 0.51),
             ),
             _ => (FIELD_BG, BRIGHT),
         };
