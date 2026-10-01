@@ -1,7 +1,14 @@
-//! The mute/deafen mark: which glyph a roster row shows and in which color.
+//! The mute/deafen mark: which glyph a roster row shows, in which color,
+//! and whether it carries a badge.
 //!
 //! The decision is kept here, free of widgets, so the pins below hold no
 //! matter how the row is drawn.
+//!
+//! Who set the flag is signalled on three channels — color, glyph weight,
+//! and a badge behind it — so a moderator's mute still reads in
+//! forced-colors mode and for a colorblind reader. Color alone was not
+//! enough: `SERVER_COLOR` and `SELF_COLOR` differ only in hue, and
+//! `Mark::color` was their sole differentiator.
 
 use iced::Color;
 
@@ -52,6 +59,20 @@ impl Mark {
         } else {
             SELF_COLOR
         }
+    }
+
+    /// Whether the mark wears a plate behind it. A moderator's mute is
+    /// the one thing on a roster row that is not the participant's own
+    /// doing, so it gets the second channel: colour alone left the two
+    /// mute sources identical in forced-colors mode and to a
+    /// colourblind reader.
+    ///
+    /// A plate, not an outline variant of the glyph: the MDI set has no
+    /// `microphone-off-outline` or `headphones-off-outline` to pair with
+    /// the filled paths above, so an outline would mean hand-authoring
+    /// path data outside the licensed set.
+    pub(crate) fn badged(self) -> bool {
+        self.server_caused
     }
 }
 
@@ -181,6 +202,25 @@ mod tests {
         .color();
         assert_eq!(red, Color::from_rgb8(0xDC, 0x26, 0x26));
         assert_eq!(grey, Color::from_rgb8(0xA3, 0xA3, 0xA3));
+    }
+
+    #[test]
+    fn only_a_server_caused_mark_is_badged() {
+        // The plate is the channel that survives forced-colors mode and
+        // a colorblind reader, so it must track `server_caused` exactly:
+        // never on a self-set mark, always on a moderator's.
+        for mark in CASES.iter().filter_map(|(_, m)| *m) {
+            let expected = mark.1;
+            let marked = Mark {
+                glyph: Glyph::MicOff,
+                server_caused: expected,
+            };
+            assert_eq!(
+                marked.badged(),
+                expected,
+                "server_caused={expected} must decide the badge"
+            );
+        }
     }
 
     #[test]
