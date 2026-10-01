@@ -169,23 +169,96 @@ pub enum Effect {
     Nudge(i32, i32),
 }
 
+/// What a command produced, as distinct from what it said.
+///
+/// The wire vocabulary is byte-stable (`CONTEXT.md`, Invariants), so the text
+/// is unchanged by this split. What changes is that a caller can no longer
+/// learn the *kind* of a reply by inspecting its *content*: four sites used
+/// to do exactly that, with `starts_with("error:")` and
+/// `contains("[position]")` sniffing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reply {
+    Ok(String),
+    Error(String),
+}
+
+impl Reply {
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Self::Ok(_))
+    }
+
+    /// The reply as it travels over the socket. Byte-identical to the plain
+    /// string this replaced, so every pinned reply string still holds.
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Ok(txt) | Self::Error(txt) => txt,
+        }
+    }
+
+    /// The reply with surrounding whitespace dropped, kind preserved. The
+    /// socket round-trip can add a trailing newline; callers want the text.
+    pub fn trimmed(&self) -> Self {
+        match self {
+            Self::Ok(txt) => Self::Ok(txt.trim().to_string()),
+            Self::Error(txt) => Self::Error(txt.trim().to_string()),
+        }
+    }
+
+    /// True when this reply is the config dump the GUI reads back to learn
+    /// the live config. Named on the type so no caller re-derives it from
+    /// the text.
+    pub fn is_config_dump(&self) -> bool {
+        self.text().contains("[position]")
+    }
+}
+
+/// Compare a reply against the wire text it carries, so the pinned reply
+/// strings in the test modules assert the *text* and never have to know
+/// this type exists. The wire vocabulary is byte-stable; these impls are
+/// what keep it that way.
+impl PartialEq<&str> for Reply {
+    fn eq(&self, other: &&str) -> bool {
+        self.text() == *other
+    }
+}
+
+impl PartialEq<str> for Reply {
+    fn eq(&self, other: &str) -> bool {
+        self.text() == other
+    }
+}
+
+impl PartialEq<String> for Reply {
+    fn eq(&self, other: &String) -> bool {
+        self.text() == other
+    }
+}
+
+/// The wire form. A reply prints as its text, exactly as the plain string
+/// it replaced did, so `format!`-based assertions hold unchanged.
+impl std::fmt::Display for Reply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.text())
+    }
+}
+
 #[derive(Debug)]
 pub struct CommandResult {
-    pub reply: String,
+    pub reply: Reply,
     pub effects: Vec<Effect>,
 }
 
 impl CommandResult {
     fn ok(reply: impl Into<String>, effects: Vec<Effect>) -> Self {
         Self {
-            reply: reply.into(),
+            reply: Reply::Ok(reply.into()),
             effects,
         }
     }
 
     fn err(reply: impl Into<String>) -> Self {
         Self {
-            reply: reply.into(),
+            reply: Reply::Error(reply.into()),
             effects: Vec::new(),
         }
     }
@@ -1312,9 +1385,9 @@ mod tests {
         for (word, rtl) in sequence {
             let r = apply("set position", &mut cfg);
             assert!(
-                r.reply.starts_with(&format!("position={word}")),
+                r.reply.text().starts_with(&format!("position={word}")),
                 "{}",
-                r.reply
+                r.reply.text()
             );
             assert_eq!(cfg.rtl, rtl);
         }

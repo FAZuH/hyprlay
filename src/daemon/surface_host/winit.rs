@@ -254,7 +254,7 @@ fn handle_ctl(
 
     let outcome = resolve_command(&mut state.overlay, cmd);
 
-    let _ = reply.send(outcome.reply);
+    let _ = reply.send(outcome.reply.text().to_string());
 
     let mut tasks: Vec<Task<Message>> = Vec::new();
 

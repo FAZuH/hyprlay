@@ -27,6 +27,7 @@ use hyprlay_core::domain::Effect;
 use hyprlay_core::domain::Group;
 use hyprlay_core::domain::Key;
 use hyprlay_core::domain::MonitorTarget;
+use hyprlay_core::domain::Reply;
 use hyprlay_core::domain::Value;
 use hyprlay_core::status::StatusFields;
 use overlay::state::Overlay;
@@ -147,7 +148,7 @@ pub(crate) enum Lifecycle {
 /// before any shell tasks are produced: the reply to send back, the domain
 /// effects to translate, and any lifecycle action to run.
 pub(crate) struct CommandOutcome {
-    pub reply: String,
+    pub reply: Reply,
     pub effects: Vec<Effect>,
     pub lifecycle: Option<Lifecycle>,
 }
@@ -178,14 +179,14 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
         Command::Save => {
             state.config_mut().save();
             return CommandOutcome {
-                reply: "saved".to_string(),
+                reply: Reply::Ok("saved".to_string()),
                 effects: Vec::new(),
                 lifecycle: None,
             };
         }
         Command::Dump => {
             return CommandOutcome {
-                reply: toml::to_string(state.config()).unwrap_or_default(),
+                reply: Reply::Ok(toml::to_string(state.config()).unwrap_or_default()),
                 effects: Vec::new(),
                 lifecycle: None,
             };
@@ -212,21 +213,21 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
                 hover_opacity: cfg.hover_opacity,
             };
             return CommandOutcome {
-                reply: fields.to_wire(),
+                reply: Reply::Ok(fields.to_wire()),
                 effects: Vec::new(),
                 lifecycle: None,
             };
         }
         Command::Help => {
             return CommandOutcome {
-                reply: ctl::usage(),
+                reply: Reply::Ok(ctl::usage()),
                 effects: Vec::new(),
                 lifecycle: None,
             };
         }
         Command::Get(key) => {
             return CommandOutcome {
-                reply: key.get(state.config()),
+                reply: Reply::Ok(key.get(state.config())),
                 effects: Vec::new(),
                 lifecycle: None,
             };
@@ -245,13 +246,15 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
                     "aborting restart: daemon binary unavailable"
                 );
                 return CommandOutcome {
-                    reply: "error: could not restart daemon: binary is missing".to_string(),
+                    reply: Reply::Error(
+                        "error: could not restart daemon: binary is missing".to_string(),
+                    ),
                     effects: Vec::new(),
                     lifecycle: None,
                 };
             }
             return CommandOutcome {
-                reply: "restarting".to_string(),
+                reply: Reply::Ok("restarting".to_string()),
                 effects: Vec::new(),
                 lifecycle: Some(Lifecycle::Restart),
             };
@@ -262,7 +265,7 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
             // (surface dropped, ctl listener dies with the event loop, exit
             // code 0).
             return CommandOutcome {
-                reply: Command::QUIT_REPLY.to_string(),
+                reply: Reply::Ok(Command::QUIT_REPLY.to_string()),
                 effects: Vec::new(),
                 lifecycle: Some(Lifecycle::Quit),
             };
@@ -275,7 +278,7 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
             };
             let Some(target) = target else {
                 return CommandOutcome {
-                    reply: "error: no monitors reported".to_string(),
+                    reply: Reply::Error("error: no monitors reported".to_string()),
                     effects: Vec::new(),
                     lifecycle: None,
                 };
@@ -287,7 +290,9 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
                 let known = monitor_known(name, &crate::platform::compositor::detect().monitors());
                 if !known {
                     return CommandOutcome {
-                        reply: format!("error: no output named {name} (try 'hyprlay monitors')"),
+                        reply: Reply::Error(format!(
+                            "error: no output named {name} (try 'hyprlay monitors')"
+                        )),
                         effects: Vec::new(),
                         lifecycle: None,
                     };
@@ -301,7 +306,7 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
                     MonitorTarget::Named(name) => name.clone(),
                 };
                 return CommandOutcome {
-                    reply: format!("already on {where_at}"),
+                    reply: Reply::Ok(format!("already on {where_at}")),
                     effects: Vec::new(),
                     lifecycle: None,
                 };
@@ -320,8 +325,9 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
                     "aborting monitor change: daemon binary unavailable"
                 );
                 return CommandOutcome {
-                    reply: "error: could not relocate overlay: daemon binary is missing"
-                        .to_string(),
+                    reply: Reply::Error(
+                        "error: could not relocate overlay: daemon binary is missing".to_string(),
+                    ),
                     effects: Vec::new(),
                     lifecycle: None,
                 };
@@ -336,7 +342,7 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
             // the monitor choice.
             state.config_mut().save();
             return CommandOutcome {
-                reply: text,
+                reply: Reply::Ok(text),
                 effects: Vec::new(),
                 lifecycle: Some(Lifecycle::Restart),
             };
@@ -347,7 +353,7 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
                 Value::Cycle => !state.config().show_on_fullscreen,
                 _ => {
                     return CommandOutcome {
-                        reply: "error: show-on-fullscreen <on|off>".to_string(),
+                        reply: Reply::Error("error: show-on-fullscreen <on|off>".to_string()),
                         effects: Vec::new(),
                         lifecycle: None,
                     };
@@ -355,10 +361,10 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
             };
             if !show_on_fullscreen_change_restarts(state.config().show_on_fullscreen, requested) {
                 return CommandOutcome {
-                    reply: format!(
+                    reply: Reply::Ok(format!(
                         "already show-on-fullscreen={}",
                         if requested { "on" } else { "off" }
-                    ),
+                    )),
                     effects: Vec::new(),
                     lifecycle: None,
                 };
@@ -369,8 +375,10 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
                     "aborting show-on-fullscreen change: daemon binary unavailable"
                 );
                 return CommandOutcome {
-                    reply: "error: could not change overlay layer: daemon binary is missing"
-                        .to_string(),
+                    reply: Reply::Error(
+                        "error: could not change overlay layer: daemon binary is missing"
+                            .to_string(),
+                    ),
                     effects: Vec::new(),
                     lifecycle: None,
                 };
@@ -378,10 +386,10 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
             state.config_mut().show_on_fullscreen = requested;
             state.config_mut().save();
             return CommandOutcome {
-                reply: format!(
+                reply: Reply::Ok(format!(
                     "restarting (show-on-fullscreen={})",
                     if requested { "on" } else { "off" }
-                ),
+                )),
                 effects: Vec::new(),
                 lifecycle: Some(Lifecycle::Restart),
             };
@@ -393,7 +401,9 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
                     "aborting reset: daemon binary unavailable"
                 );
                 return CommandOutcome {
-                    reply: "error: could not reset overlay: daemon binary is missing".to_string(),
+                    reply: Reply::Error(
+                        "error: could not reset overlay: daemon binary is missing".to_string(),
+                    ),
                     effects: Vec::new(),
                     lifecycle: None,
                 };
@@ -404,10 +414,10 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
             state.config_mut().monitor = monitor;
             state.config_mut().save();
             return CommandOutcome {
-                reply: format!(
+                reply: Reply::Ok(format!(
                     "restarting (reset show-on-fullscreen={})",
                     if requested { "on" } else { "off" }
-                ),
+                )),
                 effects: Vec::new(),
                 lifecycle: Some(Lifecycle::Restart),
             };
@@ -421,7 +431,9 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
                     "aborting reset layout: daemon binary unavailable"
                 );
                 return CommandOutcome {
-                    reply: "error: could not reset layout: daemon binary is missing".to_string(),
+                    reply: Reply::Error(
+                        "error: could not reset layout: daemon binary is missing".to_string(),
+                    ),
                     effects: Vec::new(),
                     lifecycle: None,
                 };
@@ -440,10 +452,10 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
             }
             state.config_mut().save();
             return CommandOutcome {
-                reply: format!(
+                reply: Reply::Ok(format!(
                     "restarting (reset layout show-on-fullscreen={})",
                     if requested { "on" } else { "off" }
-                ),
+                )),
                 effects: Vec::new(),
                 lifecycle: Some(Lifecycle::Restart),
             };
@@ -460,7 +472,7 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
     if !hover_poll_enabled(state) && state.is_hovered() {
         state.set_hovered(false);
     }
-    if persists && !result.reply.starts_with("error:") {
+    if persists && result.reply.is_ok() {
         state.config().save();
     }
     CommandOutcome {

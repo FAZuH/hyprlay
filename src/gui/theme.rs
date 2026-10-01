@@ -21,6 +21,10 @@ pub(super) const ACCENT: Color = Color::from_rgb(0.345, 0.396, 0.949);
 pub(super) const ACCENT_LIT: Color = Color::from_rgb(0.42, 0.48, 0.98);
 pub(super) const AMBER: Color = Color::from_rgb(0.96, 0.72, 0.24);
 pub(super) const REPLY_GREEN: Color = Color::from_rgb(0.42, 0.72, 0.47);
+/// The palette's `danger`, as a constant: a failed command's reply paints
+/// in this instead of the success colour. Successes and errors used to
+/// share `REPLY_GREEN`, which hid failures.
+pub(super) const DANGER: Color = Color::from_rgb(0.95, 0.25, 0.26);
 
 pub(super) fn theme_for(_gui: &super::Gui) -> iced::Theme {
     theme()

@@ -44,6 +44,14 @@ use hyprlay_core::ctl;
 use hyprlay_core::daemon_control::DaemonControl;
 use hyprlay_core::domain::Command;
 use hyprlay_core::domain::Key;
+use hyprlay_core::domain::Reply;
+
+/// What the blocking-send wrapper reports when the socket connect fails, and
+/// when the off-thread task itself died. The daemon never sends either; they
+/// are this wrapper's own failures, and the only two texts that may mark the
+/// daemon down.
+pub(super) const DAEMON_UNREACHABLE: &str = "error: daemon unreachable";
+pub(super) const COMMAND_TASK_FAILED: &str = "error: command task failed";
 use hyprlay_core::singleton::AcquireError;
 use iced::Point;
 use iced::Subscription;
@@ -106,7 +114,7 @@ enum Message {
     ResetSection(Section),
     SwitchMonitor(Option<String>),
     Monitors(Vec<String>),
-    Applied(String),
+    Applied(Reply),
     RefreshStatus,
     /// Bottom-left toggle pressed; meaning (Start/Stop) is decided from the
     /// live state at press time, never baked into the message.
@@ -132,7 +140,9 @@ pub struct Gui {
     /// Same idea as `drafts`, but for numeric inputs keyed by config key.
     num_drafts: HashMap<Key, String>,
     /// Last daemon reply (or connection error), labeled in the status bar.
-    last_reply: String,
+    /// Carries its kind, so an error paints as one instead of the success
+    /// colour.
+    last_reply: Reply,
     /// Probe-driven view of the daemon: connecting → up/down.
     daemon_state: DaemonState,
     /// Boot watcher that auto-starts the daemon when the first probe
@@ -233,7 +243,7 @@ fn boot() -> (Gui, Task<Message>) {
             config: config::load(),
             drafts: HashMap::new(),
             num_drafts: HashMap::new(),
-            last_reply: String::new(),
+            last_reply: Reply::Ok(String::new()),
             daemon_state: DaemonState::Connecting,
             auto_start: AutoStart::watching(),
             control: Arc::new(SystemControl),
@@ -279,11 +289,25 @@ fn subscribe(_gui: &Gui) -> Subscription<Message> {
 }
 
 /// Blocking socket round-trip off the UI thread.
-async fn send(command: String) -> String {
+///
+/// This is the one place a reply's kind is decided. The socket returns an
+/// untyped string, and these two failure texts are the wrapper's own — the
+/// daemon never sends them. Classifying here rather than at each consumer
+/// means no caller inspects reply *content* to learn its *kind*.
+async fn send(command: String) -> Reply {
+    let classified = |txt: String| {
+        if txt == DAEMON_UNREACHABLE || txt == COMMAND_TASK_FAILED {
+            Reply::Error(txt)
+        } else {
+            Reply::Ok(txt)
+        }
+    };
     tokio::task::spawn_blocking(move || {
-        ctl::send_command_line(&crate::platform::ipc::control::Control, &command)
-            .unwrap_or_else(|| "error: daemon unreachable".into())
+        classified(
+            ctl::send_command_line(&crate::platform::ipc::control::Control, &command)
+                .unwrap_or_else(|| DAEMON_UNREACHABLE.into()),
+        )
     })
     .await
-    .unwrap_or_else(|_| "error: command task failed".into())
+    .unwrap_or_else(|_| classified(COMMAND_TASK_FAILED.into()))
 }

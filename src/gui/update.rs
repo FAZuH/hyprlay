@@ -14,6 +14,7 @@ use hyprlay_core::daemon_control::Toggle;
 use hyprlay_core::domain::Command;
 use hyprlay_core::domain::HexColor;
 use hyprlay_core::domain::Key;
+use hyprlay_core::domain::Reply;
 use hyprlay_core::domain::Value;
 use hyprlay_core::status::StatusFields;
 use iced::Task;
@@ -42,28 +43,28 @@ use super::send;
 pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
     match message {
         Message::Applied(reply) => {
-            let reply = reply.trim().to_string();
+            let reply = reply.trimmed();
             // Every reply is a potential probe outcome; only probe outcomes
             // actually move the state (see DaemonState::advance) — and
             // while the boot auto-start has the wheel, failures hold
             // `connecting…` instead of reporting the daemon dead.
             let launch = gui.auto_start.observe(&mut gui.daemon_state, &reply);
             // `dump` replies with the live runtime config as TOML — adopt it
-            // so the GUI reflects unsaved daemon state. The [position]
-            // header marks a dump; any other text is an ordinary reply. Any
-            // in-flight input drafts are stale after an external reset, so
-            // drop them too.
-            if reply.contains("[position]") {
-                if let Ok(live) = toml::from_str::<Config>(&reply) {
+            // so the GUI reflects unsaved daemon state. Any in-flight input
+            // drafts are stale after an external reset, so drop them too.
+            if reply.is_config_dump() {
+                if let Ok(live) = toml::from_str::<Config>(reply.text()) {
                     gui.config = live;
                     gui.drafts.clear();
                     gui.num_drafts.clear();
                 }
-            } else if reply == "saved" {
+            } else if reply.text() == "saved" {
                 gui.dirty = false;
-            } else if !reply.is_empty() && !StatusFields::is_status_line(&reply) {
+            } else if !reply.text().is_empty() && !StatusFields::is_status_line(reply.text()) {
                 // status= replies are consumed by the state chip above;
-                // everything else is ordinary status-bar traffic.
+                // everything else, successes and failures alike, is
+                // ordinary status-bar traffic. The colour comes from the
+                // variant in view, so a failure paints as one.
                 gui.last_reply = reply;
             }
             match launch {
@@ -95,7 +96,7 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
             // the connecting line on its behalf.
             gui.auto_start.settled();
             if let Some(text) = failure {
-                gui.last_reply = text;
+                gui.last_reply = Reply::Error(text);
             }
             // Whether it worked is only visible through a fresh probe; do
             // not wait for the next 2 s tick.
@@ -408,7 +409,7 @@ async fn run_toggle(control: Arc<dyn DaemonControl>, toggle: Toggle) -> Option<S
 /// Persist own-app credentials off the UI thread, then ask the daemon to
 /// restart so it re-runs detect() and picks up the new backend. The
 /// returned text lands in the status bar via [`Message::Applied`].
-async fn apply_auth_credentials(creds: AppCredentials) -> String {
+async fn apply_auth_credentials(creds: AppCredentials) -> Reply {
     // Read before the move: the decision text depends on what was applied.
     let cleared = creds.client_id.is_empty() && creds.client_secret.is_empty();
     let saved = tokio::task::spawn_blocking(move || hyprlay_core::credentials::save(&creds))
@@ -420,12 +421,12 @@ async fn apply_auth_credentials(creds: AppCredentials) -> String {
             // text for the status bar is ours.
             let _ = send("restart".to_string()).await;
             if cleared {
-                "credentials cleared, restarting daemon".to_string()
+                Reply::Ok("credentials cleared, restarting daemon".into())
             } else {
-                "credentials saved, restarting daemon".to_string()
+                Reply::Ok("credentials saved, restarting daemon".into())
             }
         }
-        Err(e) => format!("error: could not write credentials: {e}"),
+        Err(e) => Reply::Error(format!("error: could not write credentials: {e}")),
     }
 }
 
@@ -477,7 +478,7 @@ mod tests {
             config: Config::default(),
             drafts: HashMap::new(),
             num_drafts: HashMap::new(),
-            last_reply: String::new(),
+            last_reply: Reply::Ok(String::new()),
             daemon_state: DaemonState::Connecting,
             auto_start: AutoStart::watching(),
             control: Arc::new(crate::platform::service::SystemControl),

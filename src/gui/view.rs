@@ -3,6 +3,7 @@
 //! (unsaved marker, daemon toggle, last reply) — around the section pages
 //! that `fields` renders.
 
+use hyprlay_core::domain::Reply;
 use hyprlay_core::status::StatusFields;
 use iced::Alignment;
 use iced::Element;
@@ -22,6 +23,7 @@ use super::fields::settings_page;
 use super::scroll::widget_id;
 use super::theme::AMBER;
 use super::theme::BRIGHT;
+use super::theme::DANGER;
 use super::theme::HEADER_BG;
 use super::theme::MUTED;
 use super::theme::REPLY_GREEN;
@@ -131,7 +133,15 @@ fn status_bar(gui: &Gui) -> Element<'_, Message> {
             text(brief_status(gui.daemon_state.text())).size(11),
             iced::widget::Space::new().width(Length::Fill),
             text("last change").size(10).color(MUTED),
-            text(gui.last_reply.clone()).size(11).color(REPLY_GREEN),
+            text(match gui.last_reply {
+                Reply::Error(_) => "error".to_string(),
+                _ => gui.last_reply.text().to_string(),
+            })
+            .size(11)
+            .color(match gui.last_reply {
+                Reply::Error(_) => DANGER,
+                _ => REPLY_GREEN,
+            }),
         ]
         .spacing(8)
         .align_y(Alignment::Center),
