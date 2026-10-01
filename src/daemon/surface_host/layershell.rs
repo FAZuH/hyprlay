@@ -49,13 +49,41 @@ enum Message {
 }
 
 /// Build and run the layer-shell overlay application.
+/// The one conversion from [`geometry::SurfaceAnchor`] to the layer-shell
+/// `Anchor`. Lives here because this is the sanctioned composition point for
+/// platform crates (ADR-004): `geometry` stays free of `iced_layershell`
+/// imports and this module owns the renderer's types.
+fn to_wayland_anchor(anchor: geometry::SurfaceAnchor) -> iced_layershell::reexport::Anchor {
+    use iced_layershell::reexport::Anchor;
+    // The same construction the original inline code used: bitflag `|` over
+    // the four edges, which is what the wlr layer-shell protocol defines.
+    let mut out = Anchor::empty();
+    if anchor.0 {
+        out |= Anchor::Top;
+    }
+    if anchor.1 {
+        out |= Anchor::Right;
+    }
+    if anchor.2 {
+        out |= Anchor::Bottom;
+    }
+    if anchor.3 {
+        out |= Anchor::Left;
+    }
+    out
+}
+
 pub(crate) fn run(cfg: Config, auth: Option<OwnAppAuth>) -> ExitCode {
     // No text input in the overlay; skip the always-on clipboard worker.
     iced_layershell::disable_clipboard();
 
     let size = (cfg.width, 64);
     let offset = geometry::offset(&cfg);
-    let anchor = geometry::anchor(&cfg);
+    // The one conversion from geometry's own anchor vocabulary to the
+    // renderer's type. This is the sanctioned composition point for platform
+    // crates (ADR-004), so the conversion lives here and geometry stays free
+    // of iced_layershell imports.
+    let anchor = to_wayland_anchor(geometry::anchor(&cfg));
     let layer = if cfg.show_on_fullscreen {
         Layer::Overlay
     } else {
@@ -248,7 +276,9 @@ fn handle_ctl(
             hyprlay_core::domain::Effect::Resize => tasks.push(resize_task(state)),
             hyprlay_core::domain::Effect::Reanchor => {
                 state.reanchor();
-                let anchor = geometry::anchor(state.config());
+                // Same conversion as the boot path above: geometry owns the
+                // vocabulary, this module owns the renderer's type.
+                let anchor = to_wayland_anchor(geometry::anchor(state.config()));
                 tasks.push(Task::done(Message::AnchorChange(anchor)));
                 tasks.push(Task::done(Message::MarginChange(state.offset())));
             }

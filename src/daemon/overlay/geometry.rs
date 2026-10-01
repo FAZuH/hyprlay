@@ -1,6 +1,9 @@
 //! Surface placement: where the layer-shell surface sits on screen and how
 //! drag deltas move it. Pure functions over (Config, margins) — no runtime
-//! state, no iced types beyond the Wayland anchor vocabulary.
+//! state, no iced types. The Wayland `Anchor` is expressed in this module's
+//! own vocabulary ([`SurfaceAnchor`]) and converted once at the sanctioned
+//! composition point (`src/daemon/surface_host/layershell.rs`), which is
+//! where ADR-004 says platform crates are imported.
 
 use hyprlay_core::compositor::Monitor;
 use hyprlay_core::config::AnchorMode;
@@ -11,6 +14,50 @@ use hyprlay_core::config::VerticalAnchor;
 /// Margins are clamped so a long drag session can't overflow i32 or push
 /// the surface into undefined compositor territory.
 const MARGIN_LIMIT: i32 = 8000;
+
+/// This module's own anchor vocabulary: the edge combination a surface glues
+/// to, as (top, right, bottom, left). Owned here rather than borrowed from
+/// `iced_layershell`, so this file stays free of platform-crate imports
+/// (ADR-004) and the conversion to the renderer's type is the composition
+/// point's job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SurfaceAnchor(pub bool, pub bool, pub bool, pub bool);
+
+impl SurfaceAnchor {
+    pub const TOP: Self = Self(true, false, false, false);
+    pub const BOTTOM: Self = Self(false, false, true, false);
+    pub const LEFT: Self = Self(false, false, false, true);
+    pub const RIGHT: Self = Self(false, true, false, false);
+    // The full eight-combination vocabulary, not just the five the daemon
+    // glues to today. Dead code on the lib build (only the tests consume the
+    // diagonal pairs), but a vocabulary type that silently omits four of its
+    // eight states is the wrong shape; the winit arm is expected to reach for
+    // them if it ever grows an anchor concept.
+    #[allow(dead_code)]
+    pub const TOP_LEFT: Self = Self(true, false, false, true);
+    #[allow(dead_code)]
+    pub const TOP_RIGHT: Self = Self(true, true, false, false);
+    #[allow(dead_code)]
+    pub const BOTTOM_LEFT: Self = Self(false, false, true, true);
+    #[allow(dead_code)]
+    pub const BOTTOM_RIGHT: Self = Self(false, true, true, false);
+
+    /// Whether every edge `other` glues to, this glues to as well.
+    #[allow(dead_code)]
+    pub fn contains(self, other: Self) -> bool {
+        (self.0 | !other.0) && (self.1 | !other.1) && (self.2 | !other.2) && (self.3 | !other.3)
+    }
+
+    /// The edge set glued to by either.
+    pub fn union(self, other: Self) -> Self {
+        Self(
+            self.0 || other.0,
+            self.1 || other.1,
+            self.2 || other.2,
+            self.3 || other.3,
+        )
+    }
+}
 
 /// The vertical edge the surface actually glues to: `Auto` defers to the
 /// position's vertical side; an explicit anchor overrides it. Drag/nudge
@@ -31,22 +78,20 @@ fn effective_vertical(cfg: &Config) -> VerticalAnchor {
 /// list grows downward as users join, anchored bottom it grows upward, so
 /// the overlay never runs off screen.
 ///
-/// Linux/Wayland-only: this returns the layer-shell `Anchor` type, which does
-/// not exist on the winit arm. The winit arm positions the window absolutely
-/// via [`winit_frame`] instead.
-#[cfg(target_os = "linux")]
-pub fn anchor(cfg: &Config) -> iced_layershell::reexport::Anchor {
-    use iced_layershell::reexport::Anchor;
+/// Returns this module's [`SurfaceAnchor`], not the renderer's type: the
+/// conversion is the composition point's job, so this file stays free of
+/// platform-crate imports (ADR-004).
+pub fn anchor(cfg: &Config) -> SurfaceAnchor {
     let horizontal = match cfg.horizontal {
-        HorizontalAnchor::Left => Anchor::Left,
-        HorizontalAnchor::Right => Anchor::Right,
-        HorizontalAnchor::Center => Anchor::Left | Anchor::Right,
+        HorizontalAnchor::Left => SurfaceAnchor::LEFT,
+        HorizontalAnchor::Right => SurfaceAnchor::RIGHT,
+        HorizontalAnchor::Center => SurfaceAnchor::LEFT.union(SurfaceAnchor::RIGHT),
     };
     let vertical = match effective_vertical(cfg) {
-        VerticalAnchor::Top => Anchor::Top,
-        VerticalAnchor::Bottom => Anchor::Bottom,
+        VerticalAnchor::Top => SurfaceAnchor::TOP,
+        VerticalAnchor::Bottom => SurfaceAnchor::BOTTOM,
     };
-    horizontal | vertical
+    horizontal.union(vertical)
 }
 
 /// Initial (top, right, bottom, left) layer-shell margin for the configured
@@ -203,36 +248,34 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn anchor_combines_configured_edges() {
-        use iced_layershell::reexport::Anchor;
         assert_eq!(
             anchor(&cfg(HorizontalAnchor::Left, VerticalAnchor::Top)),
-            Anchor::Top | Anchor::Left
+            SurfaceAnchor::TOP_LEFT
         );
         assert_eq!(
             anchor(&cfg(HorizontalAnchor::Right, VerticalAnchor::Bottom)),
-            Anchor::Bottom | Anchor::Right
+            SurfaceAnchor::BOTTOM_RIGHT
         );
         assert_eq!(
             anchor(&cfg(HorizontalAnchor::Center, VerticalAnchor::Top)),
-            Anchor::Top | Anchor::Left | Anchor::Right
+            SurfaceAnchor::TOP_LEFT.union(SurfaceAnchor::TOP_RIGHT)
         );
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn anchor_override_decides_the_glue_edge() {
-        use iced_layershell::reexport::Anchor;
         // Auto follows the position's vertical edge...
-        assert!(anchor(&cfg(HorizontalAnchor::Left, VerticalAnchor::Top)).contains(Anchor::Top));
+        assert!(
+            anchor(&cfg(HorizontalAnchor::Left, VerticalAnchor::Top)).contains(SurfaceAnchor::TOP)
+        );
         // ...an explicit anchor overrides it.
         let mut c = cfg(HorizontalAnchor::Left, VerticalAnchor::Top);
         c.anchor = hyprlay_core::config::AnchorMode::Bottom;
         let anchored_bottom = anchor(&c);
-        assert!(anchored_bottom.contains(Anchor::Bottom));
-        assert!(!anchored_bottom.contains(Anchor::Top));
+        assert!(anchored_bottom.contains(SurfaceAnchor::BOTTOM));
+        assert!(!anchored_bottom.contains(SurfaceAnchor::TOP));
     }
 
     #[test]
