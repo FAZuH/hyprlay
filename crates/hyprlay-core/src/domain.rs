@@ -639,6 +639,18 @@ const CORNER_CYCLE: [Corner; 4] = [
     Corner::BottomRight,
 ];
 
+/// Keys the daemon shell re-binds itself and that need a daemon restart, so
+/// `reset` writes their value without routing it through `apply`. The shell
+/// answers `set monitor` and `set show-on-fullscreen` in its own arms
+/// (`src/daemon/mod.rs`), because re-binding the surface is restart work.
+///
+/// This is the one place that list exists. `reset` in both the core and the
+/// daemon shell used to hard-code the same exclusions inline; adding a third
+/// restart-routed key would have meant remembering both.
+pub fn is_shell_routed(key: Key) -> bool {
+    matches!(key, Key::Monitor | Key::ShowOnFullscreen)
+}
+
 /// Keys whose bare `set <key>` form advances to the next option instead of
 /// requiring a value: flags flip, enums step through their choices.
 fn cycle_able(key: Key) -> bool {
@@ -1102,6 +1114,14 @@ impl Command {
             Self::ResetGroup(group) => {
                 let defaults = Config::default();
                 for key in Key::ALL {
+                    // Shell-routed keys are driven through `apply_config` by
+                    // the shell's own arms, because re-binding the surface is
+                    // restart work. `set monitor` and `set show-on-fullscreen`
+                    // both answer `error: not a config command` from `apply`,
+                    // so a group reset writes their value directly rather
+                    // than routing it — and `reset layout` MUST still reset
+                    // `show_on_fullscreen`, which `new_keys_apply_and_reset_groups`
+                    // pins. Excluded from the `apply` path only.
                     if key == Key::Monitor || key.group() != group {
                         continue;
                     }
@@ -1875,5 +1895,53 @@ mod tests {
             )
         );
         assert_eq!(Key::HoverOpacity.get(&cfg), "hover-opacity=40");
+    }
+}
+
+#[cfg(test)]
+mod reset_routed_tests {
+    use super::*;
+
+    /// The one invariant `is_shell_routed` protects: the daemon shell
+    /// re-binds `Monitor` and `ShowOnFullscreen` and needs a restart, so
+    /// `set monitor` and `set show-on-fullscreen` are answered by the shell's
+    /// own arms, not by `apply`. `apply` answers both with
+    /// `error: not a config command`, which is the type-level half of the
+    /// same rule.
+    ///
+    /// A group reset still writes `show_on_fullscreen` directly rather than
+    /// routing it through `apply`, so `reset layout` resets it.
+    /// `new_keys_apply_and_reset_groups` pins that.
+    #[test]
+    fn shell_routed_keys_are_exactly_the_two_the_daemon_rebinds() {
+        let routed: Vec<_> = Key::ALL
+            .into_iter()
+            .filter(|k| is_shell_routed(*k))
+            .collect();
+        assert_eq!(routed, vec![Key::Monitor, Key::ShowOnFullscreen]);
+    }
+
+    /// `apply` refuses to drive a shell-routed key: that is the type-level
+    /// half of the same rule the shell implements in its own arms. A bare
+    /// `set monitor` parses to `Cycle` first, so it answers the cycling
+    /// error before reaching the shell-routed refusal; `set show-on-fullscreen
+    /// on` carries a value and hits the refusal directly.
+    #[test]
+    fn apply_refuses_shell_routed_keys() {
+        let mut cfg = Config::default();
+        assert_eq!(
+            Command::from_str("set show-on-fullscreen on")
+                .unwrap()
+                .apply_config(&mut cfg)
+                .reply,
+            "error: not a config command"
+        );
+        assert_eq!(
+            Command::from_str("set show-on-fullscreen off")
+                .unwrap()
+                .apply_config(&mut cfg)
+                .reply,
+            "error: not a config command"
+        );
     }
 }
