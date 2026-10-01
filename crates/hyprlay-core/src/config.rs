@@ -266,6 +266,43 @@ fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+/// Core of [`load`] with the path injected so tests can use a tempdir
+/// instead of the real config dir. The same shape as
+/// `credentials::load_from` — this module owned the most persistent state and
+/// was the one never given the injection point.
+pub fn load_from(path: &std::path::Path) -> Config {
+    let parsed = std::fs::read_to_string(path).and_then(|s| {
+        toml::from_str::<Config>(&s)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    });
+    match parsed {
+        Ok(mut cfg) => {
+            cfg.clamp();
+            cfg
+        }
+        // First run has no config file yet — that is normal.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
+        Err(e) => {
+            tracing::warn!(
+                event = "config_load_failed",
+                error = %e,
+                "could not read or parse config; using defaults"
+            );
+            Config::default()
+        }
+    }
+}
+
+/// Core of [`Config::save`] with the path injected; see [`load_from`].
+pub fn save_to(path: &std::path::Path, cfg: &Config) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let payload = toml::to_string_pretty(cfg)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(path, payload)
+}
+
 pub fn load() -> Config {
     let parsed = fs::read_to_string(config_path()).and_then(|s| {
         toml::from_str(&s).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
@@ -1001,5 +1038,86 @@ speaking = \"#00ff00\"
         assert_eq!(cfg.alphas_for(false), idle);
         assert_eq!(cfg.alphas_for(false).overall, 1.0);
         assert_eq!(cfg.alphas_for(true).overall, 0.4);
+    }
+}
+
+#[cfg(test)]
+mod fs_tests {
+    use super::*;
+    use std::fs;
+
+    /// A fresh directory per call, matching the helper the front integration
+    /// suites use. Cleaned up on drop.
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("hyprlay-cfg-test-{}-{tag}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    use std::path::Path;
+
+    /// `save_to` then `load_from` round-trip through a real temp directory.
+    /// This module owned the most persistent state and had no filesystem test
+    /// at all; the TOML round-trips elsewhere were pure and never touched
+    /// disk.
+    #[test]
+    fn config_roundtrips_through_a_real_temp_directory() {
+        let dir = TempDir::new("roundtrip");
+        let path = dir.path().join("config.toml");
+
+        let cfg = Config {
+            opacity: 70,
+            width: 500,
+            monitor: Some("eDP-1".into()),
+            rtl: true,
+            ..Config::default()
+        };
+
+        save_to(&path, &cfg).expect("save writes");
+        let loaded = load_from(&path);
+
+        assert_eq!(loaded.opacity, 70);
+        assert_eq!(loaded.width, 500);
+        assert_eq!(loaded.monitor.as_deref(), Some("eDP-1"));
+        assert!(loaded.rtl);
+    }
+
+    /// The `CONTEXT.md` invariant: *every numeric config value is clamped on
+    /// load; hand-edited configs can never produce a broken overlay.* A
+    /// hand-edited out-of-range file must come back clamped, not broken.
+    #[test]
+    fn a_hand_edited_out_of_range_config_is_clamped_on_load() {
+        let dir = TempDir::new("clamp");
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[layout]\nwidth = 999999999\n\n[opacity]\nopacity = 400\n",
+        )
+        .unwrap();
+
+        let loaded = load_from(&path);
+
+        assert_eq!(loaded.width, WIDTH.max);
+        assert_eq!(loaded.opacity, OPACITY.max);
+    }
+
+    /// A missing file is a normal first run, not an error.
+    #[test]
+    fn a_missing_config_file_loads_defaults() {
+        let dir = TempDir::new("missing");
+        let loaded = load_from(&dir.path().join("does-not-exist.toml"));
+        assert_eq!(loaded, Config::default());
     }
 }
