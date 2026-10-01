@@ -131,9 +131,35 @@ enum Message {
     AuthApply,
 }
 
+/// The one widget keyboard focus holds. Iced 0.14 has no focus concept for
+/// `button`, `checkbox`, `slider`, or `pick_list` — `grep -rn "Focused"
+/// iced_widget-0.14.2/src/` matches only `text_input.rs` and
+/// `text_editor.rs`, and `button.rs` handles zero keyboard events. So focus
+/// is tracked here, routed by the window-global shortcut dispatcher, and
+/// rendered as a visible ring by the style closures.
+///
+/// `Field(Key)` is the load-bearing variant: keying focus on the config `Key`
+/// rather than on widget identity means the 33 field renderers need no new
+/// per-widget registration, and tab order derives from `Key::ALL` instead of
+/// being hand-maintained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusTarget {
+    ClearChanges,
+    ResetAll,
+    Save,
+    /// Index into `Section::ALL` — the sidebar nav items.
+    Nav(usize),
+    ToggleDaemon,
+    /// One config key: a slider, a toggle, or an integer input.
+    Field(Key),
+}
+
 pub struct Gui {
     /// Local mirror of the daemon config; updated optimistically on change.
     config: Config,
+    /// The widget keyboard focus holds. `None` when the mouse is in use and
+    /// nothing has been Tab-reached yet.
+    focus: Option<FocusTarget>,
     /// In-progress hex text per color editor, kept only while invalid so the
     /// text input doesn't snap back while typing; cleared on a valid commit.
     drafts: HashMap<ColorTarget, String>,
@@ -241,6 +267,7 @@ fn boot() -> (Gui, Task<Message>) {
     (
         Gui {
             config: config::load(),
+            focus: None,
             drafts: HashMap::new(),
             num_drafts: HashMap::new(),
             last_reply: Reply::Ok(String::new()),

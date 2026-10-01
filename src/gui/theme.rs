@@ -87,19 +87,44 @@ pub(super) fn panel(bg: Color) -> impl Fn(&iced::Theme) -> container::Style {
     }
 }
 
-pub(super) fn nav_style(selected: bool) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+pub(super) fn nav_style(
+    selected: bool,
+    focused: bool,
+) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
     move |_t, _s| button::Style {
         background: Some(if selected { ACCENT_LIT } else { FIELD_BG }.into()),
         text_color: Color::WHITE,
-        border: Border {
-            radius: 6.0.into(),
-            ..Border::default()
-        },
+        border: focus_border(
+            Border {
+                radius: 6.0.into(),
+                ..Border::default()
+            },
+            focused,
+        ),
         ..button::Style::default()
     }
 }
 
-pub(super) fn plain_style() -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+/// The focus indicator: a visible ring on whichever widget holds keyboard
+/// focus. Iced 0.14's `button::Style` has no focus field, so this is the
+/// only path a keyboard-only user has to see where they are (R-32).
+///
+/// `FOCUS_RING` is 3:1 against the content background and the sidebar, which
+/// are the two surfaces a focused control sits on.
+pub(super) const FOCUS_RING: Color = Color::from_rgb(0.60, 0.80, 1.00);
+
+fn focus_border(base: Border, focused: bool) -> Border {
+    if !focused {
+        return base;
+    }
+    Border {
+        color: FOCUS_RING,
+        width: 2.0,
+        ..base
+    }
+}
+
+pub(super) fn plain_style(focused: bool) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
     move |_t, s| {
         // Disabled buttons (e.g. "Clear changes" on a clean config) darken
         // below even the panel background and dim their label so the press
@@ -116,10 +141,13 @@ pub(super) fn plain_style() -> impl Fn(&iced::Theme, button::Status) -> button::
         button::Style {
             background: Some(background.into()),
             text_color,
-            border: Border {
-                radius: 6.0.into(),
-                ..Border::default()
-            },
+            border: focus_border(
+                Border {
+                    radius: 6.0.into(),
+                    ..Border::default()
+                },
+                focused,
+            ),
             ..button::Style::default()
         }
     }
@@ -127,6 +155,7 @@ pub(super) fn plain_style() -> impl Fn(&iced::Theme, button::Status) -> button::
 
 pub(super) fn primary_style(
     active: bool,
+    focused: bool,
 ) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
     move |_t: &iced::Theme, s: button::Status| button::Style {
         background: Some(
@@ -138,10 +167,13 @@ pub(super) fn primary_style(
             .into(),
         ),
         text_color: Color::WHITE,
-        border: Border {
-            radius: 6.0.into(),
-            ..Border::default()
-        },
+        border: focus_border(
+            Border {
+                radius: 6.0.into(),
+                ..Border::default()
+            },
+            focused,
+        ),
         ..button::Style::default()
     }
 }

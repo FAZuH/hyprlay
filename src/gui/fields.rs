@@ -568,7 +568,7 @@ fn auth_apply_button() -> Element<'static, Message> {
     button(text("apply connection").size(12))
         .on_press(Message::AuthApply)
         .padding([5, 12])
-        .style(plain_style())
+        .style(plain_style(false))
         .into()
 }
 
@@ -645,7 +645,7 @@ fn section_header(section: Section) -> Element<'static, Message> {
         header = header.push(
             button(text("reset section").size(11))
                 .on_press(Message::ResetSection(section))
-                .style(plain_style()),
+                .style(plain_style(false)),
         );
     }
     let header_row = header.spacing(8).align_y(Alignment::Center);

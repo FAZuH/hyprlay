@@ -15,6 +15,7 @@ use iced::widget::row;
 use iced::widget::text;
 use iced::widget::text_input;
 
+use super::FocusTarget;
 use super::Gui;
 use super::Message;
 use super::fields::Section;
@@ -52,9 +53,12 @@ pub(super) fn view(gui: &Gui) -> Element<'_, Message> {
 
 /// Title, search box, and global actions on the darkest strip.
 fn header(gui: &Gui) -> Element<'_, Message> {
+    let focused = |t: FocusTarget| gui.focus == Some(t);
     // "Clear changes" only does something while the runtime config differs
-    // from disk; a disabled press target communicates that at a glance.
-    let mut clear = button(text("Clear changes")).style(plain_style());
+    // from disk; a disabled press target communicates that at a glance. It
+    // still takes focus, and reads as inert when disabled.
+    let mut clear =
+        button(text("Clear changes")).style(plain_style(focused(FocusTarget::ClearChanges)));
     if gui.dirty {
         clear = clear.on_press(Message::ClearChanges);
     }
@@ -69,10 +73,10 @@ fn header(gui: &Gui) -> Element<'_, Message> {
             clear,
             button(text("Reset all"))
                 .on_press(Message::ResetAll)
-                .style(plain_style()),
+                .style(plain_style(focused(FocusTarget::ResetAll))),
             button(text("Save"))
                 .on_press(Message::Save)
-                .style(primary_style(gui.dirty)),
+                .style(primary_style(gui.dirty, focused(FocusTarget::Save))),
         ]
         .spacing(10)
         .align_y(Alignment::Center),
@@ -100,7 +104,7 @@ fn sidebar(gui: &Gui) -> Element<'_, Message> {
             )
             .on_press(Message::Navigate(*s))
             .width(Length::Fill)
-            .style(nav_style(selected)),
+            .style(nav_style(selected, gui.focus == Some(FocusTarget::Nav(i)))),
         );
     }
     // Every shortcut the app implements, including Ctrl+Shift+R (Reset all),
@@ -156,7 +160,8 @@ fn status_bar(gui: &Gui) -> Element<'_, Message> {
 /// Bottom-left Start/Stop control. Disabled (no press target) while no
 /// probe has answered yet, mirroring how "Clear changes" disables itself.
 fn daemon_toggle(gui: &Gui) -> Element<'_, Message> {
-    let mut toggle = button(text(gui.daemon_state.label()).size(11)).style(plain_style());
+    let mut toggle = button(text(gui.daemon_state.label()).size(11))
+        .style(plain_style(gui.focus == Some(FocusTarget::ToggleDaemon)));
     if gui.daemon_state.toggle().is_some() {
         toggle = toggle.on_press(Message::ToggleDaemon);
     }

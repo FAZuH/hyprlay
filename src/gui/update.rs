@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use super::FocusTarget;
 use hyprlay_core::config::Config;
 use hyprlay_core::config::PALETTES;
 use hyprlay_core::config::{self};
@@ -368,6 +369,19 @@ fn shortcut(gui: &mut Gui, event: keyboard::Event) -> Task<Message> {
     let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
         return Task::none();
     };
+    // Tab / Shift+Tab move focus, Enter / Space activate it. Iced's button
+    // widget handles no keyboard events at all, so this is the only path a
+    // keyboard-only user has; see FocusTarget for why the focus concept lives
+    // in this app rather than in the framework.
+    if matches!(key, keyboard::Key::Named(key::Named::Tab)) {
+        return move_focus(gui, modifiers.shift());
+    }
+    if matches!(
+        key,
+        keyboard::Key::Named(key::Named::Enter) | keyboard::Key::Named(key::Named::Space)
+    ) {
+        return activate_focus(gui);
+    }
     if !modifiers.control() {
         if matches!(key, keyboard::Key::Named(key::Named::Escape)) && !gui.search.trim().is_empty()
         {
@@ -476,6 +490,7 @@ mod tests {
     fn gui_with_search(query: &str) -> Gui {
         Gui {
             config: Config::default(),
+            focus: None,
             drafts: HashMap::new(),
             num_drafts: HashMap::new(),
             last_reply: Reply::Ok(String::new()),
@@ -493,5 +508,252 @@ mod tests {
             auth_client_id: String::new(),
             auth_client_secret: String::new(),
         }
+    }
+}
+
+/// The tab order, derived from the visual order at `view.rs`
+/// (`column![header, row![sidebar, content], status_bar]`): header actions,
+/// then the sidebar nav items, then the content fields in `Key::ALL` order,
+/// then the status bar's toggle.
+///
+/// One place, not one list per control. A new field lands in `Key::ALL` and
+/// is reachable without touching this.
+fn tab_order() -> Vec<FocusTarget> {
+    let mut out = vec![
+        FocusTarget::ClearChanges,
+        FocusTarget::ResetAll,
+        FocusTarget::Save,
+    ];
+    out.extend((0..Section::ALL.len()).map(FocusTarget::Nav));
+    // Fields reachable by keyboard: every config key, in `Key::ALL` order.
+    // Keys the daemon answers itself (`monitor`, `show-on-fullscreen`) are
+    // still config keys the GUI renders, so they stay in the order.
+    out.extend(Key::ALL.into_iter().map(FocusTarget::Field));
+    out.push(FocusTarget::ToggleDaemon);
+    out
+}
+
+/// Tab / Shift+Tab: move focus to the next or previous target in the tab
+/// order, wrapping at both ends. `None` currently held starts from the top.
+fn move_focus(gui: &mut Gui, backwards: bool) -> Task<Message> {
+    let order = tab_order();
+    let next = match gui.focus {
+        None => {
+            if backwards {
+                order.last().copied()
+            } else {
+                order.first().copied()
+            }
+        }
+        Some(current) => {
+            let idx = order.iter().position(|t| *t == current);
+            match idx {
+                Some(i) => {
+                    let n = order.len();
+                    let next = if backwards {
+                        (i + n - 1) % n
+                    } else {
+                        (i + 1) % n
+                    };
+                    order.get(next).copied()
+                }
+                // Focus was on something no longer in the order (a field the
+                // search page dropped); start from the top.
+                None => order.first().copied(),
+            }
+        }
+    };
+    gui.focus = next;
+    Task::none()
+}
+
+/// Enter / Space: activate the focused control. A disabled control takes
+/// focus but is a no-op, mirroring how it drops its press target.
+fn activate_focus(gui: &mut Gui) -> Task<Message> {
+    let Some(target) = gui.focus else {
+        return Task::none();
+    };
+    match target {
+        FocusTarget::ClearChanges => update(gui, Message::ClearChanges),
+        FocusTarget::ResetAll => update(gui, Message::ResetAll),
+        FocusTarget::Save => update(gui, Message::Save),
+        FocusTarget::Nav(i) => match Section::at(i) {
+            Some(section) => update(gui, Message::Navigate(section)),
+            None => Task::none(),
+        },
+        FocusTarget::ToggleDaemon => update(gui, Message::ToggleDaemon),
+        FocusTarget::Field(key) => {
+            // A bare Space/Enter on a cycle-able key flips it, which is the
+            // same thing the bare `set <key>` form does on the wire: build
+            // the opposite of the current value. A non-cycle-able key has no
+            // activation — it is a slider or an integer input, which the
+            // arrow keys and typing drive.
+            if !matches!(key.parse_value(None), Ok(Value::Cycle)) {
+                return Task::none();
+            }
+            let Value::Flag(current) = key.value_of(&gui.config) else {
+                return Task::none();
+            };
+            update(gui, Message::SetFlag(key, !current))
+        }
+    }
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use std::collections::HashMap;
+
+    use iced::Point;
+
+    use super::*;
+    use crate::gui::FocusTarget;
+    use crate::gui::daemon::AutoStart;
+    use crate::gui::daemon::DaemonState;
+
+    use crate::platform::service::SystemControl;
+
+    /// A `Gui` with nothing focused and a clean config.
+    fn gui() -> Gui {
+        Gui {
+            config: Config::default(),
+            focus: None,
+            drafts: HashMap::new(),
+            num_drafts: HashMap::new(),
+            last_reply: Reply::Ok(String::new()),
+            daemon_state: DaemonState::Connecting,
+            auto_start: AutoStart::watching(),
+            control: Arc::new(SystemControl),
+            dirty: false,
+            monitors: Vec::new(),
+            section: Section::Position,
+            search: String::new(),
+            last_scroll_y: 0.0,
+            picker: None,
+            picker_drag: false,
+            picker_pos: Point::ORIGIN,
+            auth_client_id: String::new(),
+            auth_client_secret: String::new(),
+        }
+    }
+
+    /// Tab from nothing lands on the first target in the order; Tab again
+    /// advances; Shift+Tab reverses.
+    #[test]
+    fn tab_moves_focus_through_the_order() {
+        let mut g = gui();
+        let _ = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Tab))),
+        );
+        assert_eq!(g.focus, Some(FocusTarget::ClearChanges));
+
+        let _ = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Tab))),
+        );
+        assert_eq!(g.focus, Some(FocusTarget::ResetAll));
+
+        let _ = update(&mut g, Message::KeyPressed(shift_tab()));
+        assert_eq!(g.focus, Some(FocusTarget::ClearChanges));
+    }
+
+    /// Shift+Tab from nothing lands on the last target in the order.
+    #[test]
+    fn shift_tab_from_nothing_lands_on_the_last_target() {
+        let mut g = gui();
+        let _ = update(&mut g, Message::KeyPressed(shift_tab()));
+        assert_eq!(g.focus, Some(FocusTarget::ToggleDaemon));
+    }
+
+    /// Tab wraps at both ends.
+    #[test]
+    fn tab_wraps() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::ToggleDaemon);
+        let _ = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Tab))),
+        );
+        assert_eq!(g.focus, Some(FocusTarget::ClearChanges));
+
+        g.focus = Some(FocusTarget::ClearChanges);
+        let _ = update(&mut g, Message::KeyPressed(shift_tab()));
+        assert_eq!(g.focus, Some(FocusTarget::ToggleDaemon));
+    }
+
+    /// Enter activates the focused control: Save sets dirty false and sends.
+    #[test]
+    fn enter_activates_the_focused_control() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Save);
+        let _ = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Enter))),
+        );
+        assert!(!g.dirty);
+    }
+
+    /// Enter on a cycle-able field flips it, which is the same thing the
+    /// bare `set <key>` wire form does.
+    #[test]
+    fn enter_flips_a_cycle_able_field() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Rtl));
+        let before = g.config.rtl;
+        let _ = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Space))),
+        );
+        assert_eq!(g.config.rtl, !before);
+    }
+
+    /// Enter on a non-cycle-able field is a no-op: it is a slider or an
+    /// integer input, which the arrow keys and typing drive.
+    #[test]
+    fn enter_on_a_non_cycle_able_field_is_a_noop() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Opacity));
+        let before = g.config.opacity;
+        let _ = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Enter))),
+        );
+        assert_eq!(g.config.opacity, before);
+    }
+
+    /// Enter with nothing focused is a no-op.
+    #[test]
+    fn enter_with_no_focus_is_a_noop() {
+        let mut g = gui();
+        let _ = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Enter))),
+        );
+        assert_eq!(g.focus, None);
+    }
+
+    fn key_event(key: keyboard::Key, modifiers: keyboard::Modifiers) -> keyboard::Event {
+        keyboard::Event::KeyPressed {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            location: keyboard::Location::Standard,
+            modifiers,
+            repeat: false,
+            text: None,
+        }
+    }
+
+    fn no_key(key: keyboard::Key) -> keyboard::Event {
+        key_event(key, keyboard::Modifiers::default())
+    }
+
+    fn shift_tab() -> keyboard::Event {
+        key_event(
+            keyboard::Key::Named(keyboard::key::Named::Tab),
+            keyboard::Modifiers::SHIFT,
+        )
     }
 }
