@@ -1945,3 +1945,88 @@ mod reset_routed_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod silent_site_tests {
+    use super::*;
+
+    /// The audit's B2 flagged `num_bounds`'s `_ => None` as a silent site: a
+    /// new numeric key omitted from the match would get no bounds. It is not
+    /// silent. `parse_value`'s `num` closure does
+    /// `self.num_bounds().expect("numeric key")`, so a numeric key without
+    /// bounds panics the moment anyone runs `set <key> <value>`.
+    ///
+    /// This test drives every key through `parse_value` with a numeric
+    /// argument and asserts the ones that accept it are exactly the ones with
+    /// bounds — so the loudness is pinned, not assumed.
+    #[test]
+    fn every_key_accepting_a_numeric_argument_has_bounds() {
+        for key in Key::ALL {
+            if let Ok(Value::Num(_)) = key.parse_value(Some("1")) {
+                assert!(
+                    key.num_bounds().is_some(),
+                    "{key:?} accepts a numeric value but num_bounds returns None"
+                );
+            }
+        }
+    }
+
+    /// `cycle_able` is a `matches!` over the flag and enum keys. A new
+    /// enum-shaped key omitted from it would require a value instead of
+    /// cycling — silent, but visible the first time anyone runs the bare
+    /// form. This pins the exact set so the omission is loud in the test
+    /// suite rather than at the CLI.
+    #[test]
+    fn cycle_able_names_exactly_the_flag_and_enum_keys() {
+        let cycling: Vec<_> = Key::ALL.into_iter().filter(|k| cycle_able(*k)).collect();
+        assert_eq!(
+            cycling,
+            vec![
+                Key::Position,
+                Key::Anchor,
+                Key::Monitor,
+                Key::Rtl,
+                Key::TalkingOnly,
+                Key::OwnUser,
+                Key::Visible,
+                Key::AutoSave,
+                Key::ShowOnFullscreen,
+                Key::DimOnHover,
+                Key::RosterOrder,
+            ]
+        );
+    }
+
+    /// `should_persist`'s `_ => auto_save` catch-all: a new mutating key
+    /// omitted from the match defaults to the autosave behaviour, which is
+    /// the reasonable default and not a bug. The named arms are the policy
+    /// exceptions (force-write, read-only, runtime-only). This pins the
+    /// policy so a new key that must NOT persist is caught in the suite.
+    #[test]
+    fn should_persist_catch_all_is_the_autosave_default() {
+        // The named exceptions, all four directions.
+        assert!(
+            should_persist(&Command::Save, false),
+            "save is a force-write"
+        );
+        for cmd in [
+            Command::Status,
+            Command::Help,
+            Command::Dump,
+            Command::Get(Key::Opacity),
+            Command::Reload,
+            Command::Restart,
+            Command::Quit,
+            Command::Nudge(1, 1),
+        ] {
+            assert!(
+                !should_persist(&cmd, true),
+                "{cmd:?} must never touch disk, even under autosave"
+            );
+        }
+        // The catch-all: a Set command follows autosave either way.
+        let set = Command::Set(Key::Opacity, Value::Num(42));
+        assert!(should_persist(&set, true));
+        assert!(!should_persist(&set, false));
+    }
+}
