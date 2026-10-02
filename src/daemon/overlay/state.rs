@@ -57,6 +57,16 @@ impl AvatarCache {
         self.handles.get(user_id)
     }
 
+    /// Bound the cache to the current roster: handles and in-flight marks
+    /// for users who left would otherwise accumulate for the process
+    /// lifetime. Left users re-hydrate from the disk cache on rejoin.
+    fn retain_roster(&mut self, users: &[Participant]) {
+        self.handles
+            .retain(|id, _| users.iter().any(|u| &u.id == id));
+        self.requested
+            .retain(|id| users.iter().any(|u| &u.id == id));
+    }
+
     /// Pull any disk-cached avatars into memory (keyed by user + hash, so
     /// stale entries can never be served).
     fn hydrate(&mut self, users: &[Participant]) {
@@ -214,6 +224,7 @@ impl Overlay {
             DiscordEvent::Participants(users) => {
                 self.track_speakers(&users);
                 self.users = users;
+                self.avatars.retain_roster(&self.users);
                 if self.status == ConnectionStatus::Connected {
                     Roster {
                         channel: self.channel_name.clone(),
@@ -276,7 +287,7 @@ impl Overlay {
     fn sort_rows(&self, rows: &mut [&Participant]) {
         match self.config.roster_order {
             RosterOrder::JoinOrder => {}
-            RosterOrder::Name => rows.sort_by_key(|p| p.name.to_lowercase()),
+            RosterOrder::Name => rows.sort_by_cached_key(|p| p.name.to_lowercase()),
             RosterOrder::RecentSpeakers => {
                 rows.sort_by(|a, b| self.speakers.get(&b.id).cmp(&self.speakers.get(&a.id)))
             }
@@ -770,6 +781,32 @@ mod tests {
         ];
         state.insert_avatar("9".to_string(), png.to_vec());
         assert!(state.avatar("9").is_some());
+    }
+
+    #[test]
+    fn roster_change_evicts_avatars_of_departed_users() {
+        let mut state = overlay(
+            vec![
+                participant_with_avatar("1", "h1"),
+                participant_with_avatar("2", "h2"),
+            ],
+            Config::default(),
+        );
+        state.insert_avatar("1".to_string(), vec![1]);
+        state.insert_avatar("2".to_string(), vec![2]);
+        state.apply_discord(DiscordEvent::Participants(vec![participant_with_avatar(
+            "2", "h2",
+        )]));
+        assert!(state.avatar("1").is_none());
+        // When "1" returns, its fetch is allowed again: the in-flight mark
+        // was pruned with the handle.
+        state.apply_discord(DiscordEvent::Participants(vec![
+            participant_with_avatar("1", "h1"),
+            participant_with_avatar("2", "h2"),
+        ]));
+        let missing = state.claim_missing_avatars();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].0, "1");
     }
 
     #[test]
