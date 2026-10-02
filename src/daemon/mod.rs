@@ -81,7 +81,7 @@ pub fn run() -> ExitCode {
 /// Two outputs: machine-readable JSON wide events under
 /// `$XDG_STATE_HOME/hyprlay/logs/` (per the logging guidelines), and a
 /// human-friendly stream on stderr showing only our lifecycle messages and
-/// real errors — library noise (wgpu, layershellev) stays in the file.
+/// real errors — library noise (tiny-skia, layershellev) stays in the file.
 fn init_logging() {
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::Layer;
