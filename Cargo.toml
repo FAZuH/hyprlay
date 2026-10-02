@@ -10,8 +10,9 @@ repository = "https://github.com/FAZuH/hyprlay"
 [workspace]
 resolver = "3"
 members = ["crates/hyprlay-core"]
-# Standalone debug probes for Discord's wire protocols
-exclude = ["scripts"]
+# Standalone debug probes for Discord's wire protocols, and the vendored
+# softbuffer fork (a `[patch]` path, never a member — see below)
+exclude = ["scripts", "vendor/softbuffer"]
 
 # Members opt in with `dep = { workspace = true }`.
 [workspace.dependencies]
@@ -123,6 +124,16 @@ iced_layershell = { workspace = true }
 # the launchd adapter's `gui/<uid>` domain); Windows needs neither.
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+
+# Vendored softbuffer 0.4.8 with one patch: its Wayland backend hard-codes
+# `wl_shm::Format::Xrgb8888` (no alpha byte) for every shm buffer, so a
+# transparent tiny-skia surface arrives at the compositor as opaque black.
+# `vendor/softbuffer` is that crate verbatim except two `Xrgb8888` ->
+# `Argb8888` sites in `src/backends/wayland/buffer.rs`. Re-check that diff
+# against upstream when refreshing the vendored version. Excluded from
+# `[workspace] members` so `cargo install --git` still sees one binary.
+[patch.crates-io]
+softbuffer = { path = "vendor/softbuffer" }
 
 # Release tuning: trade build time and some runtime speed for much smaller
 # binaries. lto + codegen-units = 1 gives the optimizer full visibility;
