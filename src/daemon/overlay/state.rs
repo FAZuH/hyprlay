@@ -21,6 +21,59 @@ use crate::daemon::adapters::discord::Participant;
 /// Extra padding around an avatar reserved for the speaking ring.
 const RING_PADDING: f32 = 8.0;
 
+/// Avatar bytes in, a circular-alpha avatar handle out.
+///
+/// The circle is baked into the pixels here, once per user, because
+/// `image::Image::border_radius` is a no-op on the tiny-skia backend:
+/// `iced_tiny_skia`'s raster pipeline only ever builds a rectangular
+/// clip mask from the clip bounds and never reads `border_radius`, so the
+/// avatar rendered as a square. Baking the mask keeps the shape in the
+/// pixels, where every backend honours it.
+///
+/// Pixels stay **straight** (non-premultiplied) RGBA, which is what
+/// `Handle::from_rgba` documents and what both backends consume:
+/// `iced_graphics`'s `image::load` hands the bytes straight through for
+/// the `Rgba` variant, `iced_tiny_skia` premultiplies them itself on
+/// upload, and the wgpu blend state is `SrcAlpha / OneMinusSrcAlpha`
+/// (non-premultiplied). Premultiplying here instead would darken every
+/// antialiased edge twice on the wgpu path and is the classic source of
+/// dark halos.
+///
+/// Undecodable bytes fall back to `Handle::from_bytes`, exactly the
+/// behaviour before this change: the renderer reports the decode error and
+/// the row keeps whatever it was drawing. Nothing panics.
+fn circular_avatar(data: Vec<u8>) -> Handle {
+    let Ok(decoded) = image::load_from_memory(&data) else {
+        return Handle::from_bytes(data);
+    };
+    let mut rgba = decoded.into_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    if w == 0 || h == 0 {
+        return Handle::from_bytes(data);
+    }
+
+    // Coverage from the distance to the circle's edge, sampled at the pixel
+    // centre, over a one-pixel-wide linear ramp — the same falloff width the
+    // wgpu image shader uses for its own border radius
+    // (`iced_wgpu`'s `image.wgsl`: `clamp(1.0 - d, 0.0, 1.0)` where `d` is
+    // the signed distance to the edge). That ramp runs from the edge
+    // outward, so `radius + 1.0 - distance` reproduces it rather than
+    // centring the ramp on the edge, which would draw the disc half a pixel
+    // smaller than the wgpu build it replaces.
+    let cx = w as f32 / 2.0;
+    let cy = h as f32 / 2.0;
+    let radius = w.min(h) as f32 / 2.0;
+    for (x, y, px) in rgba.enumerate_pixels_mut() {
+        let dx = x as f32 + 0.5 - cx;
+        let dy = y as f32 + 0.5 - cy;
+        let distance = (dx * dx + dy * dy).sqrt();
+        let coverage = (radius + 1.0 - distance).clamp(0.0, 1.0);
+        px.0[3] = (px.0[3] as f32 * coverage).round() as u8;
+    }
+
+    Handle::from_rgba(w, h, rgba.into_raw())
+}
+
 /// In-memory avatar store: decoded handles keyed by user id, plus the set
 /// of fetches already in flight so a roster burst never double-fetches.
 #[derive(Default)]
@@ -50,7 +103,7 @@ impl AvatarCache {
     }
 
     fn insert(&mut self, user_id: String, data: Vec<u8>) {
-        self.handles.insert(user_id, Handle::from_bytes(data));
+        self.handles.insert(user_id, circular_avatar(data));
     }
 
     fn get(&self, user_id: &str) -> Option<&Handle> {
@@ -781,6 +834,123 @@ mod tests {
         ];
         state.insert_avatar("9".to_string(), png.to_vec());
         assert!(state.avatar("9").is_some());
+    }
+
+    /// A solid opaque square PNG, the shape the circle has to cut away.
+    fn opaque_square_png(size: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            size,
+            size,
+            image::Rgba([10, 200, 30, 255]),
+        ))
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .expect("encoding an in-memory PNG cannot fail");
+        bytes
+    }
+
+    /// The RGBA the handle was built with, or a panic naming what came back.
+    fn masked_pixels(data: Vec<u8>) -> (u32, u32, Vec<u8>) {
+        match circular_avatar(data) {
+            Handle::Rgba {
+                width,
+                height,
+                pixels,
+                ..
+            } => (width, height, pixels.to_vec()),
+            other => panic!("expected a masked RGBA handle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn circular_avatar_clears_the_corners_and_keeps_the_centre_opaque() {
+        let size = 64;
+        let (w, h, pixels) = masked_pixels(opaque_square_png(size));
+        assert_eq!((w, h), (size, size));
+        let alpha = |x: u32, y: u32| pixels[((y * w + x) * 4 + 3) as usize];
+
+        // The corner sits outside the inscribed circle: fully masked out.
+        assert_eq!(alpha(0, 0), 0, "top-left corner must be transparent");
+        assert_eq!(alpha(size - 1, 0), 0, "top-right corner");
+        assert_eq!(alpha(0, size - 1), 0, "bottom-left corner");
+        assert_eq!(alpha(size - 1, size - 1), 0, "bottom-right corner");
+
+        // The centre is deep inside: the source alpha survives untouched.
+        assert_eq!(alpha(size / 2, size / 2), 255, "centre alpha");
+
+        // RGB is never touched — only alpha is masked. Premultiplying here
+        // instead would halve the colour of every soft edge.
+        let centre = ((size / 2) * w + size / 2) * 4;
+        assert_eq!(
+            &pixels[centre as usize..centre as usize + 4],
+            &[10, 200, 30, 255]
+        );
+
+        // The cardinal edge midpoints sit half a pixel inside the circle, so
+        // they stay fully covered — this is where the wgpu build's own
+        // border-radius ramp lands, and matching it keeps the two backends
+        // pixel-comparable.
+        let mid = size / 2;
+        assert_eq!(alpha(mid, 0), 255, "top edge midpoint");
+        assert_eq!(alpha(mid, size - 1), 255, "bottom edge midpoint");
+        assert_eq!(alpha(0, mid), 255, "left edge midpoint");
+        assert_eq!(alpha(size - 1, mid), 255, "right edge midpoint");
+
+        // The one-pixel-wide ramp shows up where the edge cuts through pixel
+        // centres. Without it the disc would stair-step, so the presence of
+        // partially-covered pixels anywhere is the invariant. (Not on the
+        // exact diagonal: at even sizes the 45-degree line lands between
+        // pixels and every sample there is fully in or fully out.)
+        let partials = (0..size)
+            .flat_map(|y| (0..size).map(move |x| alpha(x, y)))
+            .filter(|&a| (1..=254).contains(&a))
+            .count();
+        assert!(
+            partials > 0,
+            "the edge must be antialiased, found no partially-covered pixel"
+        );
+        assert!(
+            alpha(size / 4, size / 4) == 255,
+            "a point inside the disc is untouched, got {}",
+            alpha(size / 4, size / 4)
+        );
+    }
+
+    #[test]
+    fn circular_avatar_leaves_the_disc_interior_intact() {
+        let size = 32;
+        let (w, _, pixels) = masked_pixels(opaque_square_png(size));
+        let alpha = |x: u32, y: u32| pixels[((y * w + x) * 4 + 3) as usize];
+
+        // Coverage only ever removes alpha, so the inscribed disc of a fully
+        // opaque source has to survive: the row must not come out blank.
+        let mut transparent = 0;
+        for y in 0..size {
+            for x in 0..size {
+                if alpha(x, y) == 0 {
+                    transparent += 1;
+                }
+            }
+        }
+        let area = size * size;
+        // Sanity on both ends: corners are gone, the interior is not.
+        assert!(transparent > 0, "corners must be masked away");
+        assert!(
+            transparent < area / 2,
+            "the disc interior must survive, {transparent}/{area} went transparent"
+        );
+    }
+
+    #[test]
+    fn circular_avatar_falls_back_to_raw_bytes_when_the_png_is_corrupt() {
+        // Not a PNG at all: the handle stays the plain encoded-bytes variant,
+        // exactly as before this change, so the renderer reports the decode
+        // error instead of the daemon panicking.
+        let data = b"definitely not an image".to_vec();
+        assert!(matches!(circular_avatar(data), Handle::Bytes(..)));
     }
 
     #[test]
