@@ -4,7 +4,6 @@
 
 use std::sync::Arc;
 
-use super::FocusTarget;
 use hyprlay_core::config::Config;
 use hyprlay_core::config::PALETTES;
 use hyprlay_core::config::{self};
@@ -22,6 +21,7 @@ use iced::Task;
 use iced::keyboard::key;
 use iced::keyboard::{self};
 
+use super::FocusTarget;
 use super::Gui;
 use super::Message;
 use super::commands::apply_num;
@@ -609,7 +609,6 @@ mod focus_tests {
     use crate::gui::FocusTarget;
     use crate::gui::daemon::AutoStart;
     use crate::gui::daemon::DaemonState;
-
     use crate::platform::service::SystemControl;
 
     /// A `Gui` with nothing focused and a clean config.

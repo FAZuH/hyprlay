@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Platforms
+
+- Reduced release download size by about half
+- Reduced memory use of the overlay and settings window by about 90%
+
 ## 0.3.2 (2026-09-16)
 
 ### Overlay

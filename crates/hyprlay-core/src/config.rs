@@ -1043,8 +1043,9 @@ speaking = \"#00ff00\"
 
 #[cfg(test)]
 mod fs_tests {
-    use super::*;
     use std::fs;
+
+    use super::*;
 
     /// A fresh directory per call, matching the helper the front integration
     /// suites use. Cleaned up on drop.

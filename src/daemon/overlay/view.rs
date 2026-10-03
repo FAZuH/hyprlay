@@ -84,11 +84,14 @@ fn participant_row<'a, M: 'static>(
     let avatar_px = scaled(state, state.config().avatar_size);
     let speaking = p.speaking;
 
+    // No `border_radius` here: the circular alpha is baked into the avatar
+    // pixels when the handle is built (`overlay::state::circular_avatar`),
+    // because tiny-skia never reads that field. Leaving it set would have
+    // the wgpu path clip a second time over the same circle.
     let avatar: Element<'_, M> = match state.avatar(&p.id) {
         Some(handle) => image::Image::new(handle.clone())
             .width(Length::Fixed(avatar_px))
             .height(Length::Fixed(avatar_px))
-            .border_radius(iced::border::Radius::from(avatar_px / 2.0))
             .opacity(alphas.avatar)
             .into(),
         None => fallback_avatar(&p.id, &p.name, avatar_px, alphas.avatar),
