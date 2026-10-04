@@ -112,12 +112,17 @@ core-graphics = { workspace = true }
 # iced's Wayland backend), a Linux-only concern: the winit arm builds on
 # Windows/macOS/X11 with plain iced. `x11rb` covers the X11 cursor query (the
 # Linux cursor path falls back from the Hyprland socket to X11, then no-ops on
-# Wayland). Feature sets on Linux are unchanged from a feature-complete build;
-# only non-Linux targets drop the Wayland crates.
+# Wayland). Both of iced's Linux backends are on, so Linux stays the
+# feature-complete build; only non-Linux targets drop the Wayland crates.
+#
+# `x11` is the settings window's only backend on an X11 session: iced's
+# `wayland` alone makes `hyprlay gui` fail to start there ("X11 is not
+# supported"), so the keyboard harness (scripts/gui-keyboard-e2e.sh) needs it.
+# The overlay daemon is untouched — it is layer-shell only (ADR-004).
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { workspace = true }
 x11rb = { workspace = true }
-iced = { workspace = true, features = ["wayland"] }
+iced = { workspace = true, features = ["wayland", "x11"] }
 iced_layershell = { workspace = true }
 
 # `libc` is used for `getuid` on unix (the Hyprland socket path resolution and
