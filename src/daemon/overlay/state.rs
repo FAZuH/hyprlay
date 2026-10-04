@@ -430,17 +430,30 @@ impl Overlay {
         self.offset = super::geometry::drag(self.offset, &self.config, dx, dy);
     }
 
-    /// Adopt the last-known roster from disk so a restart renders
-    /// immediately; the RPC connection reconciles it within moments.
-    pub fn hydrate_roster(&mut self) {
-        if let Some(roster) = crate::daemon::adapters::cache::load_roster() {
-            self.channel_name = roster.channel;
-            self.me_id = roster.me_id;
-            // Deserialization already restored the persisted fields; the
-            // live-only speaking flag came back as false.
-            self.users = roster.users;
-            self.avatars.hydrate(&self.users);
+    /// The overlay a surface host boots with: config plus the last-known
+    /// roster, already sized to it. Read before the surface is created so the
+    /// surface starts at the height that roster needs, instead of a placeholder
+    /// that clips the last rows until the first live roster event.
+    pub fn boot(config: Config) -> Self {
+        Self::boot_from(config, &crate::daemon::adapters::cache::cache_dir())
+    }
+
+    /// [`Self::boot`] with the roster cache root injected, so a test can boot
+    /// from a tempdir instead of the real `$XDG_CACHE_HOME`.
+    pub fn boot_from(config: Config, cache: &std::path::Path) -> Self {
+        let mut overlay = Self::new(config);
+        if let Some(roster) = crate::daemon::adapters::cache::load_roster_from(cache) {
+            overlay.channel_name = roster.channel;
+            overlay.me_id = roster.me_id;
+            // The live-only speaking flag came back as false.
+            overlay.users = roster.users;
+            overlay.avatars.hydrate(&overlay.users);
+            // The host creates the surface from `desired_size()`, so recording
+            // it here is what keeps the first live roster event from emitting a
+            // `SizeChange` for a height the surface already has.
+            overlay.size = overlay.desired_size();
         }
+        overlay
     }
 }
 

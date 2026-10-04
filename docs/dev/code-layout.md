@@ -49,11 +49,11 @@ boundary.
 | `src/cli/install.rs` | `run_install`/`run_uninstall` | Thin resolver: real config/data/exe dirs in, the platform's install/uninstall flow out (`src/platform/service/`), report printed; the unit/registry writing lives in the platform adapters |
 | `src/bin/hyprlayd.rs` | thin main → `daemon::run()` | Process entry only |
 | `src/daemon/mod.rs` | daemon shell (`run()`, effect → `Task` translation, subscription wiring, logging init) | Shell-answered commands, single-instance guard, re-exec paths, command resolution shared by both surface hosts; domain logic lives in the modules below |
-| `src/daemon/surface_host/mod.rs` | `run(cfg, auth) -> ExitCode` | `#[cfg]` dispatch between the two overlay shells; roster state and domain logic stay in the parent `daemon` module |
-| `src/daemon/surface_host/layershell.rs` | Linux/Wayland overlay shell | The existing `iced_layershell` app, behaviour byte-identical: edge anchoring with margins, hover polling |
-| `src/daemon/surface_host/winit.rs` | Windows/macOS overlay shell | Frameless, transparent, always-on-top `iced` window moved to the computed on-screen position; same shared logic and hover poll |
+| `src/daemon/surface_host/mod.rs` | `run(cfg, auth) -> ExitCode`, `boot_size`, `take_boot` | `#[cfg]` dispatch between the two overlay shells; `boot_size` turns a booted roster into the surface size (floored at `EMPTY_HEIGHT`, since layer-shell rejects a zero height on a surface not anchored to opposite edges) and `take_boot` hands that same overlay to the boot closure, which iced may call more than once; roster state and domain logic stay in the parent `daemon` module |
+| `src/daemon/surface_host/layershell.rs` | Linux/Wayland overlay shell | The existing `iced_layershell` app: edge anchoring with margins, hover polling, surface created at `boot_size` so a cached roster is never clipped |
+| `src/daemon/surface_host/winit.rs` | Windows/macOS overlay shell | Frameless, transparent, always-on-top `iced` window moved to the computed on-screen position, created at the same `boot_size`; same shared logic and hover poll |
 | `src/daemon/ctl_server.rs` | `incoming()` stream of `CtlRequest` | Serves the core `ControlListener` on a dedicated thread (accept loop never stalls the async host), one thread per connection; the wire vocabulary itself lives in core (single source of truth) |
-| `src/daemon/overlay/state.rs` | `Overlay` model methods (`desired_size`, `displayed`, `hidden_rows`, `apply_discord`) | Roster filtering, sizing, avatar cache/dedup |
+| `src/daemon/overlay/state.rs` | `Overlay` model methods (`desired_size`, `displayed`, `hidden_rows`, `apply_discord`), `boot`/`boot_from` | Roster filtering, sizing, avatar cache/dedup; `boot` reads the roster cache and records the size that roster needs, so the surface and the model agree on the first frame |
 | `src/daemon/overlay/geometry.rs` | `anchor/margin/drag(cfg, …)` | All screen-placement math |
 | `src/daemon/overlay/view.rs` | `view(&Overlay)` | Widget construction only |
 | `src/daemon/overlay/glyph.rs` | `mark_of(&Participant) -> Option<Mark>` | Mute/deafen glyph mapping for roster rows, free of widgets |

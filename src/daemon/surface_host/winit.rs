@@ -8,6 +8,7 @@
 
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use hyprlay_core::config::Config;
 use hyprlay_core::platform::Platform;
@@ -28,6 +29,8 @@ use crate::daemon::overlay::state;
 use crate::daemon::overlay::state::Overlay;
 use crate::daemon::overlay::view;
 use crate::daemon::resolve_command;
+use crate::daemon::surface_host::boot_size;
+use crate::daemon::surface_host::take_boot;
 
 /// The state of the winit overlay. Wraps the shared [`Overlay`] model and
 /// adds the winit-only plumbing: the window id (needed for `resize`/`move_to`
@@ -60,7 +63,11 @@ enum Message {
 
 /// Build and run the winit overlay application.
 pub(crate) fn run(cfg: Config, auth: Option<OwnAppAuth>) -> ExitCode {
-    let start_size = (cfg.width, 64);
+    // The same one-overlay boot as the layer-shell arm: the window height and
+    // the model's height are one read of the roster cache, not two.
+    let overlay = Overlay::boot(cfg.clone());
+    let start_size = boot_size(&overlay);
+    let boot_overlay = Mutex::new(Some(overlay));
     let offset = geometry::offset(&cfg);
     let monitor = monitor_for_overlay(&cfg);
     // The winit arm places the window absolutely at the anchored logical
@@ -69,7 +76,6 @@ pub(crate) fn run(cfg: Config, auth: Option<OwnAppAuth>) -> ExitCode {
     let position = iced::window::Position::Specific(iced::Point::new(frame.x, frame.y));
 
     let rpc_auth = DiscordRpc(auth.map(Arc::new));
-    let cfg_for_boot = cfg.clone();
 
     // `iced::application` takes (boot, update, view) — unlike the layer-shell
     // builder there is no namespace argument. The window title defaults to
@@ -77,12 +83,10 @@ pub(crate) fn run(cfg: Config, auth: Option<OwnAppAuth>) -> ExitCode {
     // top overlay.
     let result = iced::application(
         move || {
-            let mut overlay = Overlay::new(cfg_for_boot.clone());
-            overlay.hydrate_roster();
             let window = iced::window::latest().map(Message::WindowId);
             (
                 WinitState {
-                    overlay,
+                    overlay: take_boot(&boot_overlay, &cfg),
                     window: None,
                     last_frame: Some(frame),
                 },
