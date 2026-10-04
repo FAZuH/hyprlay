@@ -29,14 +29,17 @@ use super::commands::command_for;
 use super::commands::mark_dirty;
 use super::commands::num_in_bounds;
 use super::commands::revert_commands;
+use super::fields;
 use super::fields::Section;
 use super::picker::ColorTarget;
 use super::picker::apply_hue;
 use super::picker::apply_sv;
 use super::scroll::BOTTOM_SLACK;
+use super::scroll::Jump;
 use super::scroll::active_section_for;
 use super::scroll::measure_sections;
 use super::scroll::restore_scroll;
+use super::scroll::scroll_content_to;
 use super::scroll::scroll_to_section;
 use super::scroll::widget_id;
 use super::send;
@@ -188,7 +191,7 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
             // Immediate highlight — don't make the sidebar wait for the
             // measure round-trip.
             gui.section = section;
-            measure_sections(Some(section))
+            measure_sections(Some(Jump::Section(section)))
         }
         Message::Scrolled(offset_y) => {
             // Continuously tracked so a search-clear can restore it (D4);
@@ -226,11 +229,35 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
             // on the offset tracked before the search began.
             let restore = !gui.search.trim().is_empty() && query.trim().is_empty();
             gui.search = query;
+            // A narrower query drops rows, so the focused one may be among
+            // them: the ring is drawn where the page renders a row carrying
+            // that key, and `activate_focus` reads `gui.focus` directly. Left
+            // alone, nothing is ringed anywhere and Enter still fires the
+            // command for a row that is off screen.
+            if gui.focus.is_some_and(|t| !tab_order(gui).contains(&t)) {
+                gui.focus = None;
+            }
             if restore {
                 restore_scroll(gui)
             } else {
                 Task::none()
             }
+        }
+        // A programmatic scroll never fires `on_scroll`, so the GUI's own idea
+        // of where the page is would stay where the last user scroll left it:
+        // the search-clear restore needs the offset the user actually left
+        // from, so a reveal records it here. It deliberately does not re-run
+        // the scrollspy — a target past the end of the page clamps to the end
+        // and reads as "scrolled to the end" (see `move_focus`). The highlight
+        // belongs to the focus that asked for the reveal; the scrollspy still
+        // tracks the user's own scrolling.
+        Message::ScrollContentTo(y) => {
+            // A search-page reveal scrolls the search results, not the
+            // one-pager, so it must not become the one-pager's restore point.
+            if gui.search.trim().is_empty() {
+                gui.last_scroll_y = y;
+            }
+            scroll_content_to(y)
         }
         Message::KeyPressed(event) => shortcut(gui, event),
         Message::PickerToggle(target) => {
@@ -455,9 +482,7 @@ mod tests {
     use crate::gui::daemon::DaemonState;
 
     /// D3: a sidebar click or Ctrl+1..5 while a search is up first drops
-    /// the query (returning to the one-page view) and shows the target
-    /// section's highlight immediately, without waiting for the measure
-    /// round-trip.
+    /// the query and shows the target section's highlight immediately.
     #[test]
     fn navigating_while_searching_clears_the_search_and_sets_the_section() {
         let mut gui = gui_with_search("avatar");
@@ -482,6 +507,21 @@ mod tests {
         let _ = update(&mut gui, Message::Search(String::new()));
         assert!(gui.search.is_empty());
         assert!((gui.last_scroll_y - 412.5).abs() < f32::EPSILON);
+    }
+
+    /// A reveal on the search page must not overwrite the one-pager's tracked
+    /// offset: `restore_scroll` would then land the one-pager at an offset that
+    /// belonged to the search results instead of where the user left it.
+    #[test]
+    fn a_reveal_while_searching_leaves_the_one_pager_offset_alone() {
+        let mut gui = gui_with_search("avatar");
+        // A non-zero sentinel, so "unchanged" cannot pass by accident.
+        gui.last_scroll_y = 412.5;
+        let _ = update(&mut gui, Message::ScrollContentTo(640.0));
+        assert_eq!(
+            gui.last_scroll_y, 412.5,
+            "a search-content offset is not the one-pager's restore point"
+        );
     }
 
     /// Minimal `Gui` for state-transition tests: `boot()` touches the real
@@ -513,22 +553,22 @@ mod tests {
 
 /// The tab order, derived from the visual order at `view.rs`
 /// (`column![header, row![sidebar, content], status_bar]`): header actions,
-/// then the sidebar nav items, then the content fields in `Key::ALL` order,
-/// then the status bar's toggle.
+/// then the sidebar nav items, then the content fields in the order
+/// [`fields::FIELDS`] renders them, then the status bar's toggle.
 ///
-/// One place, not one list per control. A new field lands in `Key::ALL` and
-/// is reachable without touching this.
-fn tab_order() -> Vec<FocusTarget> {
+/// One place, not one list per control. A new field lands in `FIELDS` and is
+/// reachable without touching this. The order is `FIELDS`, not `Key::ALL`:
+/// the rows are grouped by section while `Key::ALL` is grouped by wire order,
+/// so walking `Key::ALL` puts `monitor` (the last Position row) third and
+/// `rtl` (the third) eighth, and Tab ping-pongs the viewport.
+fn tab_order(gui: &Gui) -> Vec<FocusTarget> {
     let mut out = vec![
         FocusTarget::ClearChanges,
         FocusTarget::ResetAll,
         FocusTarget::Save,
     ];
     out.extend((0..Section::ALL.len()).map(FocusTarget::Nav));
-    // Fields reachable by keyboard: every config key, in `Key::ALL` order.
-    // Keys the daemon answers itself (`monitor`, `show-on-fullscreen`) are
-    // still config keys the GUI renders, so they stay in the order.
-    out.extend(Key::ALL.into_iter().map(FocusTarget::Field));
+    out.extend(fields::rendered_keys(&gui.search).map(FocusTarget::Field));
     out.push(FocusTarget::ToggleDaemon);
     out
 }
@@ -536,7 +576,7 @@ fn tab_order() -> Vec<FocusTarget> {
 /// Tab / Shift+Tab: move focus to the next or previous target in the tab
 /// order, wrapping at both ends. `None` currently held starts from the top.
 fn move_focus(gui: &mut Gui, backwards: bool) -> Task<Message> {
-    let order = tab_order();
+    let order = tab_order(gui);
     let next = match gui.focus {
         None => {
             if backwards {
@@ -564,7 +604,23 @@ fn move_focus(gui: &mut Gui, backwards: bool) -> Task<Message> {
         }
     };
     gui.focus = next;
-    Task::none()
+    // Tab walks the field rows down a one-page scroll, so landing on a field
+    // has to bring it into view; a row already on screen leaves the page alone.
+    match next {
+        Some(FocusTarget::Field(key)) => {
+            // The ring is on that row, so the sidebar names its section and
+            // Ctrl+R resets that one. The scroll position cannot say which: a row
+            // in the page's last screenful has a reveal target past `max_scroll`,
+            // the scrollable clamps it to the end, and that reads as "scrolled to
+            // its end" — which names Connection, the one section with no config
+            // group, so Ctrl+R would reset nothing.
+            if let Some(section) = fields::section_of(key) {
+                gui.section = section;
+            }
+            measure_sections(Some(Jump::Field(key)))
+        }
+        _ => Task::none(),
+    }
 }
 
 /// Enter / Space: activate the focused control. A disabled control takes
@@ -585,9 +641,15 @@ fn activate_focus(gui: &mut Gui) -> Task<Message> {
         FocusTarget::Field(key) => {
             // A bare Space/Enter on a cycle-able key flips it, which is the
             // same thing the bare `set <key>` form does on the wire: build
-            // the opposite of the current value. A non-cycle-able key has no
-            // activation — it is a slider or an integer input, which the
-            // arrow keys and typing drive.
+            // the opposite of the current value.
+            //
+            // A key with no cycle-able form gets nothing here, and nothing
+            // else picks it up either: in iced 0.14.2 `button.rs` handles no
+            // keyboard event, `slider.rs` takes arrows only while the cursor
+            // is over it, and no widget walks a focus chain, so the 16 number
+            // rows, 4 chip groups and 3 colour editors ring but do not
+            // activate. Handing focus to iced's widgets is the fix, not this
+            // pass.
             if !matches!(key.parse_value(None), Ok(Value::Cycle)) {
                 return Task::none();
             }
@@ -706,8 +768,11 @@ mod focus_tests {
         assert_eq!(g.config.rtl, !before);
     }
 
-    /// Enter on a non-cycle-able field is a no-op: it is a slider or an
-    /// integer input, which the arrow keys and typing drive.
+    /// Enter on a key with no cycle-able form does nothing, and nothing else
+    /// picks it up either: in iced 0.14.2 `button` handles no keyboard event
+    /// and `slider` needs the cursor over it, so a ringed number row, chip
+    /// group or colour editor is inert. The ring promises more than the
+    /// activation delivers; see `activate_focus`.
     #[test]
     fn enter_on_a_non_cycle_able_field_is_a_noop() {
         let mut g = gui();
@@ -718,6 +783,182 @@ mod focus_tests {
             Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Enter))),
         );
         assert_eq!(g.config.opacity, before);
+    }
+
+    /// Tab far enough down to the page's last field row, then run the reveal
+    /// that row needs: it sits in the final screenful, so the reveal target is
+    /// past the end of the page, which is where a scrollable clamps it. The
+    /// sidebar must still name the row's own section — the ring is on it, and
+    /// Ctrl+R resets whatever the sidebar names. The trap is Connection: a page
+    /// read as "scrolled to its end" names it, and it is the one section with no
+    /// config group, so Ctrl+R then resets nothing at all.
+    #[test]
+    fn the_sidebar_names_the_section_of_the_focused_row_at_the_page_end() {
+        let mut g = gui();
+        // Three header actions and five sidebar buttons come first, so Tab
+        // once per keyed row after them lands on the last one.
+        let rows = fields::rendered_keys("").count();
+        for _ in 0..(3 + Section::ALL.len() + rows) {
+            let _ = update(
+                &mut g,
+                Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Tab))),
+            );
+        }
+        assert_eq!(field(&g), Key::BoxColor, "the last keyed row on the page");
+
+        // The reveal that row needs: its top minus the margin, which is past
+        // the end of the page. A `Task` is inert in a unit test, so this is the
+        // request the reveal issues and the state it leaves behind, never the
+        // position a scrollable would settle on. It must move the page and
+        // nothing else.
+        let _ = update(&mut g, Message::ScrollContentTo(2100.0));
+        assert_eq!(
+            g.section,
+            Section::Colors,
+            "the ring is on a Colors row, so the sidebar has to name Colors"
+        );
+    }
+
+    /// A narrowed search drops the rows it does not render, so Tab walks only
+    /// the hits.
+    #[test]
+    fn a_search_narrows_the_tab_order_to_the_rows_it_renders() {
+        let mut g = gui();
+        g.search = "color".to_string();
+        let order = tab_order(&g);
+        let fields: Vec<Key> = order
+            .iter()
+            .filter_map(|t| match t {
+                FocusTarget::Field(key) => Some(*key),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            fields,
+            [Key::SpeakingColor, Key::TextColor, Key::BoxColor],
+            "only the three hits the search page renders are in the order"
+        );
+    }
+
+    /// Tab on the search page reaches the hits: the chrome and the sidebar come
+    /// first, so the first field is the next press after them.
+    #[test]
+    fn tab_on_the_search_page_walks_the_hits() {
+        let mut g = gui();
+        g.search = "color".to_string();
+        for _ in 0..(4 + Section::ALL.len()) {
+            let _ = update(
+                &mut g,
+                Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Tab))),
+            );
+        }
+        assert_eq!(
+            field(&g),
+            Key::SpeakingColor,
+            "the press after the chrome lands on the first hit"
+        );
+    }
+
+    /// Clearing the search lands the one-pager back on the offset tracked
+    /// before it, but nothing re-derived the highlight for that offset:
+    /// `move_focus` had left `gui.section` naming the search hit's section,
+    /// so the sidebar named a row the restored viewport does not show.
+    /// Restoring therefore has to measure as well as scroll. A `Task` counts
+    /// the operations it runs in `units()`, which is the only thing a unit
+    /// test can read off it — the highlighted section itself only changes
+    /// when the pass this guard asks for reports back below.
+    #[test]
+    fn clearing_the_search_re_derives_the_highlight_at_the_restored_offset() {
+        let mut g = gui();
+        // Where the user left the one-pager: a screenful into Opacity.
+        let _ = update(&mut g, Message::Scrolled(1900.0));
+        let _ = update(
+            &mut g,
+            Message::Measured {
+                offsets: one_pager_headers(),
+                max_scroll: 2600.0,
+                jump: None,
+            },
+        );
+        assert_eq!(g.section, Section::Opacity);
+
+        // The search page renders no sections, but the ring is on a hit and
+        // Ctrl+R has to reach that hit's section while the search is up.
+        g.search = "color".to_string();
+        for _ in 0..(4 + Section::ALL.len()) {
+            let _ = update(
+                &mut g,
+                Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Tab))),
+            );
+        }
+        let _ = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Tab))),
+        );
+        assert_eq!(field(&g), Key::TextColor);
+        assert_eq!(g.section, Section::Colors, "the ring is on a Colors row");
+
+        // Esc empties the search, so the one-pager returns and the sidebar
+        // must name the section of the offset it returns to, not the hit.
+        let task = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Escape))),
+        );
+        assert_eq!(
+            task.units(),
+            2,
+            "the restore has to run the measure pass that re-derives the \
+             highlight, not only the scroll"
+        );
+        // The typed clear takes the same path, so it must measure too.
+        g.search = "color".to_string();
+        let task = update(&mut g, Message::Search(String::new()));
+        assert_eq!(
+            task.units(),
+            2,
+            "same restore, reached by emptying the input"
+        );
+
+        // What that pass reports: Opacity, the section the restored offset
+        // is in, rather than the Colors the search page left behind.
+        let _ = update(
+            &mut g,
+            Message::Measured {
+                offsets: one_pager_headers(),
+                max_scroll: 2600.0,
+                jump: None,
+            },
+        );
+        assert_eq!(g.section, Section::Opacity);
+    }
+
+    /// Section header offsets of a one-pager tall enough to scroll, in
+    /// `Section::ALL` order. Same numbers the scrollspy's own tests use.
+    fn one_pager_headers() -> [f32; Section::ALL.len()] {
+        [8.0, 900.0, 1500.0, 2100.0, 2600.0]
+    }
+
+    /// Narrowing the search can drop the focused row: the ring is drawn only
+    /// where the page renders a row carrying that key, so keeping the focus
+    /// would leave nothing ringed anywhere while Enter still fired the command
+    /// for a row that is not on screen.
+    #[test]
+    fn narrowing_the_search_drops_a_focus_it_no_longer_renders() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Rtl));
+        let _ = update(&mut g, Message::Search("color".to_string()));
+        assert_eq!(
+            g.focus, None,
+            "`rtl` is not one of the rows the search page renders, so it cannot stay focused"
+        );
+    }
+
+    /// The focused field's key, or a panic naming what focus is on instead.
+    fn field(g: &Gui) -> Key {
+        match g.focus {
+            Some(FocusTarget::Field(key)) => key,
+            other => panic!("expected a focused field, got {other:?}"),
+        }
     }
 
     /// Enter with nothing focused is a no-op.

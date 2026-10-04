@@ -124,6 +124,22 @@ fn focus_border(base: Border, focused: bool) -> Border {
     }
 }
 
+/// The same ring as a container border, for the config-field rows: those are
+/// toggles, chips, sliders and number rows rather than buttons, so the
+/// indicator has to be a box around the whole row instead of a button border.
+pub(super) fn focus_ring(focused: bool) -> impl Fn(&iced::Theme) -> container::Style {
+    move |_t| container::Style {
+        border: focus_border(
+            Border {
+                radius: 6.0.into(),
+                ..Border::default()
+            },
+            focused,
+        ),
+        ..container::Style::default()
+    }
+}
+
 pub(super) fn plain_style(focused: bool) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
     move |_t, s| {
         // Disabled buttons (e.g. "Clear changes" on a clean config) darken
