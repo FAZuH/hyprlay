@@ -30,6 +30,7 @@ use iced::widget::text_input;
 use iced::widget::toggler;
 use iced::widget::tooltip;
 
+use super::FocusTarget;
 use super::Gui;
 use super::Message;
 use super::picker::ColorTarget;
@@ -39,6 +40,7 @@ use super::theme::ACCENT;
 use super::theme::BRIGHT;
 use super::theme::FIELD_BG;
 use super::theme::MUTED;
+use super::theme::focus_ring;
 use super::theme::plain_style;
 use super::theme::scrollbar_style;
 
@@ -121,6 +123,10 @@ pub(super) struct Field {
     pub(super) section: Section,
     pub(super) label: &'static str,
     pub(super) tip: &'static str,
+    /// The config key this row edits, or `None` for a row that edits none
+    /// (the palettes row, the two credential inputs) — the keyboard cannot
+    /// land on those, and the tab order leaves them out.
+    pub(super) key: Option<Key>,
     pub(super) render: fn(&Gui) -> Element<'_, Message>,
 }
 
@@ -129,198 +135,231 @@ pub(super) const FIELDS: &[Field] = &[
         section: Section::Position,
         label: "corner preset",
         tip: "Snap the overlay to a screen corner. The right side automatically enables right-to-left layout.",
+        key: Some(Key::Position),
         render: f_presets,
     },
     Field {
         section: Section::Position,
         label: "anchor",
         tip: "Which edge the overlay glues to vertically. Auto follows the position's vertical side, top pins the top edge so rows grow downward, bottom pins the bottom edge so rows grow upward.",
+        key: Some(Key::Anchor),
         render: f_anchor,
     },
     Field {
         section: Section::Position,
         label: "right-to-left",
         tip: "Avatar on the right, username to its left, right-aligned. Enabled automatically on right-side presets.",
+        key: Some(Key::Rtl),
         render: f_rtl,
     },
     Field {
         section: Section::Position,
         label: "offset slider minimum",
         tip: "Lower bound of the two offset sliders below, in pixels. Lets you reach far-out positions without typing numbers.",
+        key: Some(Key::OffsetMin),
         render: f_offset_min,
     },
     Field {
         section: Section::Position,
         label: "offset slider maximum",
         tip: "Upper bound of the two offset sliders below, in pixels.",
+        key: Some(Key::OffsetMax),
         render: f_offset_max,
     },
     Field {
         section: Section::Position,
         label: "offset x",
         tip: "Horizontal distance in px from the anchored screen edge. Negative values push the other way.",
+        key: Some(Key::OffsetX),
         render: f_offset_x,
     },
     Field {
         section: Section::Position,
         label: "offset y",
         tip: "Vertical distance in px from the anchored screen edge. Negative values push the other way.",
+        key: Some(Key::OffsetY),
         render: f_offset_y,
     },
     Field {
         section: Section::Position,
         label: "monitor",
         tip: "Output to show the overlay on. 'active' follows the focused monitor. Changing it restarts the overlay instantly.",
+        key: Some(Key::Monitor),
         render: f_monitor,
     },
     Field {
         section: Section::Layout,
         label: "visible",
         tip: "Show or hide the overlay entirely. Hiding collapses it to an empty surface while the daemon keeps running and tracking the channel.",
+        key: Some(Key::Visible),
         render: f_visible,
     },
     Field {
         section: Section::Layout,
         label: "auto-save",
         tip: "Persist every change to config.toml the moment the daemon applies it. Turn off to keep changes session-only until an explicit Save.",
+        key: Some(Key::AutoSave),
         render: f_auto_save,
     },
     Field {
         section: Section::Layout,
         label: "show over fullscreen",
         tip: "Keep overlay visible when any window is fullscreen. Changing it restarts the overlay instantly. Restart required.",
+        key: Some(Key::ShowOnFullscreen),
         render: f_show_on_fullscreen,
     },
     Field {
         section: Section::Layout,
         label: "dim on hover",
         tip: "When on, hovering the overlay dims it to hover opacity for click-through visibility. Hyprland-only, poll every 50 ms.",
+        key: Some(Key::DimOnHover),
         render: f_dim_on_hover,
     },
     Field {
         section: Section::Layout,
         label: "talking-only",
         tip: "Only show participants who are currently speaking.",
+        key: Some(Key::TalkingOnly),
         render: f_talking_only,
     },
     Field {
         section: Section::Layout,
         label: "show own user",
         tip: "Include yourself in the overlay.",
+        key: Some(Key::OwnUser),
         render: f_own_user,
     },
     Field {
         section: Section::Layout,
         label: "roster order",
         tip: "How participants are ordered. Join order keeps Discord's arrival order, name sorts alphabetically, recent speakers bubble the last person who talked to the top.",
+        key: Some(Key::RosterOrder),
         render: f_roster_order,
     },
     Field {
         section: Section::Layout,
         label: "width",
         tip: "Panel width in logical pixels.",
+        key: Some(Key::Width),
         render: f_width,
     },
     Field {
         section: Section::Layout,
         label: "scale",
         tip: "Global scale in percent; multiplies every size (avatar, text, spacing).",
+        key: Some(Key::Scale),
         render: f_scale,
     },
     Field {
         section: Section::Layout,
         label: "avatar size",
         tip: "Avatar diameter in logical pixels.",
+        key: Some(Key::AvatarSize),
         render: f_avatar_size,
     },
     Field {
         section: Section::Layout,
         label: "text size",
         tip: "Username font size in logical pixels.",
+        key: Some(Key::TextSize),
         render: f_text_size,
     },
     Field {
         section: Section::Layout,
         label: "spacing",
         tip: "Gap between participant rows in logical pixels.",
+        key: Some(Key::Spacing),
         render: f_spacing,
     },
     Field {
         section: Section::Layout,
         label: "max name length",
         tip: "Usernames longer than this are truncated with an ellipsis.",
+        key: Some(Key::MaxName),
         render: f_max_name,
     },
     Field {
         section: Section::Layout,
         label: "max rows",
         tip: "Cap how many participant rows render. Overflow rows hide behind a +N pill; 0 shows everyone.",
+        key: Some(Key::MaxRows),
         render: f_max_rows,
     },
     Field {
         section: Section::Opacity,
         label: "overall",
         tip: "Dims everything together: avatars, usernames, glyphs and the speaking ring.",
+        key: Some(Key::Opacity),
         render: f_opacity,
     },
     Field {
         section: Section::Opacity,
         label: "hover opacity",
         tip: "Overall opacity while hovered (0-100). Only used when dim on hover is on.",
+        key: Some(Key::HoverOpacity),
         render: f_hover_opacity,
     },
     Field {
         section: Section::Opacity,
         label: "profile picture",
         tip: "Avatar opacity on top of overall.",
+        key: Some(Key::AvatarOpacity),
         render: f_avatar_opacity,
     },
     Field {
         section: Section::Opacity,
         label: "username text",
         tip: "Username text opacity on top of overall.",
+        key: Some(Key::TextOpacity),
         render: f_text_opacity,
     },
     Field {
         section: Section::Opacity,
         label: "username background",
         tip: "Opacity of the chip behind the username. Set to 0 to hide the chip entirely.",
+        key: Some(Key::BoxOpacity),
         render: f_box_opacity,
     },
     Field {
         section: Section::Colors,
         label: "palettes",
         tip: "Color templates that set all three colors at once. Discord is the default look.",
+        key: None,
         render: f_palettes,
     },
     Field {
         section: Section::Colors,
         label: "speaking color",
         tip: "Ring color around the avatar while someone talks. Click the swatch to open the picker.",
+        key: Some(Key::SpeakingColor),
         render: f_speaking_color,
     },
     Field {
         section: Section::Colors,
         label: "username text color",
         tip: "Username color. Click the swatch to open the picker.",
+        key: Some(Key::TextColor),
         render: f_text_color,
     },
     Field {
         section: Section::Colors,
         label: "username background color",
         tip: "Color of the chip behind the username. Click the swatch to open the picker.",
+        key: Some(Key::BoxColor),
         render: f_box_color,
     },
     Field {
         section: Section::Connection,
         label: "client id",
         tip: "Client ID of your own Discord application, from discord.com/developers/applications. Also register the redirect URI http://127.0.0.1/callback under OAuth2 in the developer portal; Discord requires it even though nothing opens.",
+        key: None,
         render: f_auth_client_id,
     },
     Field {
         section: Section::Connection,
         label: "client secret",
         tip: "Client secret of your own Discord application; Apply writes both fields to ~/.config/hyprlay/auth.json (owner-only, never on the ctl socket) and restarts the daemon. Until a complete pair exists the daemon logs credentials_missing and the overlay stays offline.",
+        key: None,
         render: f_auth_client_secret,
     },
 ];
@@ -615,7 +654,40 @@ pub(super) fn search_page(gui: &Gui) -> Element<'_, Message> {
             .color(MUTED),
         );
     }
-    scroll_page(col).into()
+    // The same id the one-pager carries: the reveal operation matches on it,
+    // so without it `Jump::Field` finds no scrollable and yields nothing, and
+    // Tab on the search page rings a row without bringing it into view.
+    scroll_page(col)
+        .id(iced::widget::Id::new(CONTENT_SCROLL_ID))
+        .into()
+}
+
+/// The keyed rows the current page renders, in render order: every keyed row
+/// when the one-pager is up, only the search hits on the search page. The tab
+/// order walks exactly these, so Tab cannot land on a row that is not in the
+/// tree — and because it is `FIELDS` order, the order *is* the visual order.
+///
+/// The query is trimmed here because `view` picks the page on
+/// `gui.search.trim()` and `search_page` filters with the trimmed query: a
+/// trailing space must narrow neither the page nor the tab order, or Tab skips
+/// every field row.
+pub(super) fn rendered_keys(query: &str) -> impl Iterator<Item = Key> + '_ {
+    let query = query.trim();
+    FIELDS
+        .iter()
+        .filter(move |f| query.is_empty() || search_matches(f, query))
+        .filter_map(|f| f.key)
+}
+
+/// The section a keyed row is declared under — the sidebar entry that owns
+/// it, and so the section a keyboard user is in once focus lands on it.
+/// `None` only for a key no field declares, which
+/// `every_config_field_declares_its_key_exactly_once` rules out.
+pub(super) fn section_of(key: Key) -> Option<Section> {
+    FIELDS
+        .iter()
+        .find(|f| f.key == Some(key))
+        .map(|f| f.section)
 }
 
 /// Search covers the label, the tooltip text, and the section name — so
@@ -688,9 +760,18 @@ fn section_anchor(section: Section) -> Element<'static, Message> {
 }
 
 fn field_row<'a>(gui: &'a Gui, field: &Field) -> Element<'a, Message> {
-    column![tip_label(field.label), (field.render)(gui),]
-        .spacing(4)
-        .into()
+    // The row is the focus target: a box around label + control, because only
+    // this one place renders every field row.
+    let focused = field
+        .key
+        .is_some_and(|key| gui.focus == Some(FocusTarget::Field(key)));
+    let mut row = container(column![tip_label(field.label), (field.render)(gui)].spacing(4))
+        .width(Length::Fill)
+        .style(focus_ring(focused));
+    if let Some(key) = field.key {
+        row = row.id(iced::widget::Id::new(key.name()));
+    }
+    row.into()
 }
 
 /// Field label with a hover tooltip.
@@ -726,8 +807,8 @@ fn label_tip_lookup(label: &str) -> &'static str {
 
 /// The dressed scrollable every page rides on: padding, scrollbar, style,
 /// and fill height. Callers attach what makes the page addressable before
-/// `.into()` — the one-pager adds [`CONTENT_SCROLL_ID`] and the
-/// [`Message::Scrolled`] hook; the search page needs neither.
+/// `.into()` — both pages add [`CONTENT_SCROLL_ID`], the one that also adds
+/// the [`Message::Scrolled`] hook.
 fn scroll_page(content: Column<'_, Message>) -> iced::widget::Scrollable<'_, Message> {
     let page_padding = iced::Padding {
         top: 8.0,
@@ -855,12 +936,81 @@ fn preset_button<'a>(cfg: &'a Config, h: H, v: V, label: &'a str) -> Element<'a,
 mod tests {
     use super::*;
 
+    /// The focus ring is drawn by comparing `Gui::focus` against
+    /// `FocusTarget::Field(key)` for the key a row declares, and the tab
+    /// order walks `rendered_keys`, so the keyed rows must be exactly the
+    /// config keys: one row per key, no key claimed twice, no key missing.
+    /// Compared as sets on purpose — the *order* is what the visual order
+    /// means, and it is the next test's job to pin.
+    #[test]
+    fn every_config_field_declares_its_key_exactly_once() {
+        let mut claimed: Vec<&str> = FIELDS.iter().filter_map(|f| f.key).map(Key::name).collect();
+        claimed.sort_unstable();
+        let mut expected: Vec<&str> = Key::ALL.iter().map(|k| k.name()).collect();
+        expected.sort_unstable();
+        assert_eq!(
+            claimed, expected,
+            "the rows claim a different set of config keys than the tab order walks"
+        );
+    }
+
+    /// `rendered_keys` is the tab order, and the tab order has to be the visual
+    /// order: a keyless row drops out of it and the keyed rows keep the
+    /// sequence the page renders them in, which is `Section::ALL` order, not
+    /// `FIELDS` order. One Layout row declared between two Position rows would
+    /// tab fourth and paint ninth, so the grouping is the assertion.
+    #[test]
+    fn the_tab_order_follows_the_visual_order() {
+        let order: Vec<&str> = rendered_keys("").map(Key::name).collect();
+        let rows: Vec<&str> = Section::ALL
+            .iter()
+            .flat_map(|section| FIELDS.iter().filter(move |f| f.section == *section))
+            .filter_map(|f| f.key)
+            .map(Key::name)
+            .collect();
+        assert_eq!(order, rows, "the tab order is not the row order");
+
+        // `monitor` is the last Position row and `rtl` the third. Walking
+        // `Key::ALL` instead puts them third and eighth, which scrolls the
+        // viewport backwards and forwards on consecutive presses.
+        assert_eq!(
+            order.iter().position(|k| *k == "rtl"),
+            Some(2),
+            "rtl is the third row of the page, so it is the third field"
+        );
+        assert_eq!(
+            order.iter().position(|k| *k == "monitor"),
+            Some(7),
+            "monitor is the eighth row of the page, so it is the eighth field"
+        );
+    }
+
+    /// `view` picks the page on `gui.search.trim()` and `search_page` filters
+    /// with the trimmed query, so `rendered_keys` has to trim too. It does not:
+    /// a trailing space matches nothing at all and a lone space matches
+    /// nothing, so either one leaves Tab with no field target at all.
+    #[test]
+    fn the_tab_order_reads_the_trimmed_query_the_page_does() {
+        assert_eq!(
+            rendered_keys("colors ").collect::<Vec<_>>(),
+            [Key::SpeakingColor, Key::TextColor, Key::BoxColor],
+            "a trailing space narrows nothing, so it must not narrow the tab order"
+        );
+        assert_eq!(
+            rendered_keys(" ").count(),
+            FIELDS.iter().filter(|f| f.key.is_some()).count(),
+            "a whitespace-only query is an empty one, and the page then renders \
+             the one-pager"
+        );
+    }
+
     #[test]
     fn search_matches_label_tip_and_section_name() {
         let field = Field {
             section: Section::Position,
             label: "offset x",
             tip: "Horizontal distance in px from the anchored screen edge.",
+            key: Some(Key::OffsetX),
             render: f_offset_x,
         };
         assert!(search_matches(&field, "offset"));

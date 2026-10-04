@@ -77,6 +77,7 @@ pub(super) fn command_for(message: Message) -> Command {
         | Message::Navigate(_)
         | Message::Scrolled(_)
         | Message::Measured { .. }
+        | Message::ScrollContentTo(_)
         | Message::Search(_)
         | Message::KeyPressed(_)
         | Message::Save

@@ -105,6 +105,11 @@ enum Message {
         max_scroll: f32,
         jump: Option<Section>,
     },
+    /// Scroll the one-pager so `f32` px into it sit at the viewport top, and
+    /// re-derive the sidebar highlight from it: the reveal the measure
+    /// operation decides on when keyboard focus lands on a field the viewport
+    /// does not show.
+    ScrollContentTo(f32),
     Search(String),
     KeyPressed(keyboard::Event),
     Save,
@@ -139,9 +144,9 @@ enum Message {
 /// rendered as a visible ring by the style closures.
 ///
 /// `Field(Key)` is the load-bearing variant: keying focus on the config `Key`
-/// rather than on widget identity means the 33 field renderers need no new
-/// per-widget registration, and tab order derives from `Key::ALL` instead of
-/// being hand-maintained.
+/// rather than on widget identity means the field renderers need no new
+/// per-widget registration, and tab order derives from the field registry
+/// rather than being hand-maintained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusTarget {
     ClearChanges,
@@ -185,9 +190,9 @@ pub struct Gui {
     /// (scrollspy). Drives the sidebar highlight and Ctrl+R's target.
     section: Section,
     search: String,
-    /// Scroll offset of the one-page content, tracked from Scrolled.
-    /// Frozen while the search page is up (its scrollable reports nothing)
-    /// and used to restore the position on search-clear.
+    /// Scroll offset of the one-page content, used to restore the position on
+    /// search-clear. Frozen while the search page is up: its scrollable reports
+    /// no `Scrolled`, and a search-page reveal is not the one-pager's offset.
     last_scroll_y: f32,
     /// Which color editor has its HSV picker expanded.
     picker: Option<ColorTarget>,
