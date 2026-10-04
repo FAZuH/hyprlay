@@ -9,7 +9,9 @@ use hyprlay_core::config::PALETTES;
 use hyprlay_core::config::RosterOrder;
 use hyprlay_core::config::VerticalAnchor as V;
 use hyprlay_core::domain::Key;
+use hyprlay_core::domain::MonitorTarget;
 use hyprlay_core::domain::Value;
+use hyprlay_core::domain::corner_of;
 use iced::Alignment;
 use iced::Border;
 use iced::Color;
@@ -392,15 +394,15 @@ pub(super) const FIELDS: &[Field] = &[
 
 fn f_presets(gui: &Gui) -> Element<'_, Message> {
     let cfg = &gui.config;
+    // Two per row, so the grid reads left to right: the keyboard steps
+    // through `PRESETS` in this same order, and the two cannot drift because
+    // there is only one list.
+    let [top_left, top_right, bottom_left, bottom_right] = PRESETS;
     column![
+        row![preset_button(cfg, top_left), preset_button(cfg, top_right),].spacing(8),
         row![
-            preset_button(cfg, H::Left, V::Top, "top-left"),
-            preset_button(cfg, H::Right, V::Top, "top-right"),
-        ]
-        .spacing(8),
-        row![
-            preset_button(cfg, H::Left, V::Bottom, "bottom-left"),
-            preset_button(cfg, H::Right, V::Bottom, "bottom-right"),
+            preset_button(cfg, bottom_left),
+            preset_button(cfg, bottom_right),
         ]
         .spacing(8),
     ]
@@ -437,12 +439,11 @@ pub(super) fn f_offset_y(gui: &Gui) -> Element<'_, Message> {
 }
 
 pub(super) fn f_monitor(gui: &Gui) -> Element<'_, Message> {
-    let mut chips = row![monitor_chip(None, gui.config.monitor.is_none())].spacing(6);
-    for name in &gui.monitors {
-        chips = chips.push(monitor_chip(
-            Some(name.clone()),
-            gui.config.monitor.as_deref() == Some(name),
-        ));
+    let current = Key::Monitor.value_of(&gui.config);
+    let mut chips = row![].spacing(6);
+    for value in options(gui, Key::Monitor) {
+        let selected = value == current;
+        chips = chips.push(monitor_chip(value, selected));
     }
     chips.into()
 }
@@ -462,15 +463,10 @@ pub(super) fn f_own_user(gui: &Gui) -> Element<'_, Message> {
 /// Tri-state roster-order selector: join-order | name | recent-speakers as
 /// chips, mirroring the anchor chip pattern (selected state highlighted).
 pub(super) fn f_roster_order(gui: &Gui) -> Element<'_, Message> {
-    let modes = [
-        (RosterOrder::JoinOrder, "join-order"),
-        (RosterOrder::Name, "name"),
-        (RosterOrder::RecentSpeakers, "recent-speakers"),
-    ];
     let mut chips = row![].spacing(6);
-    for (mode, label) in modes {
-        let selected = gui.config.roster_order == mode;
-        chips = chips.push(roster_order_chip(mode, label, selected));
+    for order in ROSTER_ORDERS {
+        let selected = gui.config.roster_order == order;
+        chips = chips.push(roster_order_chip(order, order.as_str(), selected));
     }
     chips.into()
 }
@@ -952,7 +948,8 @@ pub(super) fn reset_button(reset: Message) -> Element<'static, Message> {
         .into()
 }
 
-fn monitor_chip(name: Option<String>, selected: bool) -> Element<'static, Message> {
+fn monitor_chip(value: Value, selected: bool) -> Element<'static, Message> {
+    let name = monitor_name(&value);
     let label = name.clone().unwrap_or_else(|| "active".to_string());
     let bg = if selected { ACCENT } else { FIELD_BG };
     button(text(label))
@@ -966,18 +963,24 @@ fn monitor_chip(name: Option<String>, selected: bool) -> Element<'static, Messag
         .into()
 }
 
+/// The output a monitor option stands for, as the value [`Message::SwitchMonitor`]
+/// carries: `None` is the focused monitor, `Some` a named one. Also how the
+/// chip labels itself, so the label and the target cannot name different things.
+pub(super) fn monitor_name(value: &Value) -> Option<String> {
+    match value {
+        Value::Target(MonitorTarget::Active) => None,
+        Value::Target(MonitorTarget::Named(name)) => Some(name.clone()),
+        other => unreachable!("the monitor row only offers targets, not {other:?}"),
+    }
+}
+
 /// Tri-state glue-edge selector: auto | top | bottom as chips, mirroring
 /// the monitor chip pattern (selected state highlighted).
 pub(super) fn f_anchor(gui: &Gui) -> Element<'_, Message> {
-    let modes = [
-        (AnchorMode::Auto, "auto"),
-        (AnchorMode::Top, "top"),
-        (AnchorMode::Bottom, "bottom"),
-    ];
     let mut chips = row![].spacing(6);
-    for (mode, label) in modes {
+    for mode in ANCHORS {
         let selected = gui.config.anchor == mode;
-        chips = chips.push(anchor_chip(mode, label, selected));
+        chips = chips.push(anchor_chip(mode, mode.as_str(), selected));
     }
     chips.into()
 }
@@ -995,7 +998,7 @@ fn anchor_chip(mode: AnchorMode, label: &str, selected: bool) -> Element<'static
         .into()
 }
 
-fn preset_button<'a>(cfg: &'a Config, h: H, v: V, label: &'a str) -> Element<'a, Message> {
+fn preset_button<'a>(cfg: &'a Config, (h, v, label): (H, V, &'static str)) -> Element<'a, Message> {
     let selected = cfg.horizontal == h && cfg.vertical == v;
     let base_bg = if selected { ACCENT } else { FIELD_BG };
     button(text(label.to_string()))
@@ -1010,9 +1013,161 @@ fn preset_button<'a>(cfg: &'a Config, h: H, v: V, label: &'a str) -> Element<'a,
         .into()
 }
 
+/// The corner presets, in reading order: top-left, top-right, bottom-left,
+/// bottom-right. `f_presets` paints two per row in this order and
+/// [`options`] steps through it in this order, so what Right moves to is what
+/// the eye reads next.
+const PRESETS: [(H, V, &str); 4] = [
+    (H::Left, V::Top, "top-left"),
+    (H::Right, V::Top, "top-right"),
+    (H::Left, V::Bottom, "bottom-left"),
+    (H::Right, V::Bottom, "bottom-right"),
+];
+
+/// The vertical glue edges, in chip order: auto, top, bottom.
+const ANCHORS: [AnchorMode; 3] = [AnchorMode::Auto, AnchorMode::Top, AnchorMode::Bottom];
+
+/// The roster orderings, in chip order: join-order, name, recent-speakers.
+const ROSTER_ORDERS: [RosterOrder; 3] = [
+    RosterOrder::JoinOrder,
+    RosterOrder::Name,
+    RosterOrder::RecentSpeakers,
+];
+
+/// The options one row offers, in the order the row renders them — the order
+/// Enter and Right step forward through and Left steps back through, so the
+/// keyboard moves between choices exactly as they sit on screen.
+///
+/// Empty for a row with no fixed set of choices: the number rows, the colour
+/// editors, the togglers. That is what makes a step on one of those inert
+/// rather than a guess. `palettes` is absent on purpose — it is keyless and
+/// mouse-only, and it writes three keys at once instead of offering a choice
+/// between them.
+pub(super) fn options(gui: &Gui, key: Key) -> Vec<Value> {
+    match key {
+        Key::Position => PRESETS
+            .iter()
+            .map(|(h, v, _)| Value::Corner(corner_of(*h, *v)))
+            .collect(),
+        Key::Anchor => ANCHORS.iter().map(|mode| Value::Anchor(*mode)).collect(),
+        Key::RosterOrder => ROSTER_ORDERS
+            .iter()
+            .map(|order| Value::RosterOrder(*order))
+            .collect(),
+        // "active" first, then every output the compositor reported, which is
+        // the order `f_monitor` paints the chips in.
+        Key::Monitor => std::iter::once(Value::Target(MonitorTarget::Active))
+            .chain(
+                gui.monitors
+                    .iter()
+                    .map(|name| Value::Target(MonitorTarget::Named(name.clone()))),
+            )
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use hyprlay_core::domain::Corner;
+    use hyprlay_core::domain::MonitorTarget;
+
     use super::*;
+
+    /// The keyboard order has to be the visual order, or Right moves to a chip
+    /// the row does not show next. Every option-select row's list is read off
+    /// the very table its renderer paints from, so these assertions are about
+    /// what that table says, not about two lists agreeing by luck.
+    #[test]
+    fn the_options_are_in_the_rows_visual_order() {
+        let mut gui = crate::gui::test_gui("");
+        assert_eq!(
+            options(&gui, Key::Position),
+            [
+                Value::Corner(Corner::TopLeft),
+                Value::Corner(Corner::TopRight),
+                Value::Corner(Corner::BottomLeft),
+                Value::Corner(Corner::BottomRight),
+            ],
+            "the presets read left to right, then down, as the 2x2 grid paints them"
+        );
+        assert_eq!(
+            options(&gui, Key::Anchor),
+            [
+                Value::Anchor(AnchorMode::Auto),
+                Value::Anchor(AnchorMode::Top),
+                Value::Anchor(AnchorMode::Bottom),
+            ],
+            "the anchor chips paint in this order"
+        );
+        assert_eq!(
+            options(&gui, Key::RosterOrder),
+            [
+                Value::RosterOrder(RosterOrder::JoinOrder),
+                Value::RosterOrder(RosterOrder::Name),
+                Value::RosterOrder(RosterOrder::RecentSpeakers),
+            ],
+            "and so do the roster-order chips"
+        );
+
+        // "active" leads the monitor row, then every output the compositor
+        // reported — the order `f_monitor` paints them in.
+        gui.monitors = ["DP-1".to_string(), "HDMI-A-1".to_string()].into();
+        assert_eq!(
+            options(&gui, Key::Monitor),
+            [
+                Value::Target(MonitorTarget::Active),
+                Value::Target(MonitorTarget::Named("DP-1".into())),
+                Value::Target(MonitorTarget::Named("HDMI-A-1".into())),
+            ],
+            "the monitor row leads with the focused output"
+        );
+    }
+
+    /// Every option must be distinct, or a step lands on a value the row
+    /// cannot tell apart from the one it left: `step_command` finds the
+    /// current option by value, so a duplicate would make two chips the same
+    /// choice and one of them unsteppable.
+    #[test]
+    fn no_row_offers_the_same_option_twice() {
+        let mut gui = crate::gui::test_gui("");
+        gui.monitors = ["DP-1".to_string(), "HDMI-A-1".to_string()].into();
+        for key in [Key::Position, Key::Anchor, Key::RosterOrder, Key::Monitor] {
+            let options = options(&gui, key);
+            let mut sorted = options.clone();
+            sorted.sort_by_key(|value| format!("{value}"));
+            sorted.dedup();
+            assert_eq!(
+                sorted.len(),
+                options.len(),
+                "{} offers a duplicate option, which one step cannot leave",
+                key.name()
+            );
+        }
+    }
+
+    /// `palettes` is a row of fixed choices with no key of its own, so it is
+    /// the one row a reader might expect in `options`. It is deliberately not
+    /// there: it writes three keys at once rather than selecting one of them,
+    /// and it has no current value for a step to move away from. Pinned so the
+    /// omission stays a decision instead of drifting into an oversight.
+    #[test]
+    fn the_palettes_row_is_not_an_option_select() {
+        let palettes = FIELDS
+            .iter()
+            .find(|f| f.label == "palettes")
+            .expect("the palettes row is registered");
+        assert_eq!(
+            palettes.key, None,
+            "it edits no single key, so no step can name it"
+        );
+        assert_eq!(
+            focus_target_of(palettes),
+            None,
+            "and it has no focus target yet: no keyless row is keyboard-reachable \
+             before the per-field work, so nothing can step it"
+        );
+    }
 
     /// The focus ring is drawn by comparing `Gui::focus` against the target
     /// `focus_target_of` gives a row, and the tab order walks

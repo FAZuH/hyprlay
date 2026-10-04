@@ -11,6 +11,7 @@ use iced::Task;
 
 use super::Gui;
 use super::Message;
+use super::fields;
 use super::send;
 
 /// Commit one numeric value to the mirror and the daemon. The caller has
@@ -38,6 +39,27 @@ pub(super) fn num_in_bounds(key: Key, v: i64) -> bool {
         .is_some_and(|(min, max)| v >= min && v <= max)
 }
 
+/// The command one keyboard step along an option-select row sends: the next
+/// choice forward (Enter, Space, Right) or the previous one back (Left), read
+/// in the order the row renders them.
+///
+/// `None` at either end. The selection stops at the boundary and does not
+/// wrap, so there is nothing to send — the daemon must not be asked to move
+/// somewhere the user cannot see. Also `None` for a row that offers no fixed
+/// set of choices at all (a number row, a colour editor), which is what keeps
+/// a step on one of those inert.
+pub(super) fn step_command(gui: &Gui, key: Key, forward: bool) -> Option<Command> {
+    let options = fields::options(gui, key);
+    let current = key.value_of(&gui.config);
+    let index = options.iter().position(|value| *value == current)?;
+    let next = if forward {
+        options.get(index + 1)
+    } else {
+        index.checked_sub(1).and_then(|i| options.get(i))
+    }?;
+    Some(Command::Set(key, next.clone()))
+}
+
 /// Commands that bring `live` back to `saved`, one per differing key.
 /// Used by "clear changes"; empty when there is nothing to revert. Walking
 /// the shared [`Key`] table means a newly added setting can never be
@@ -60,6 +82,7 @@ pub(super) fn command_for(message: Message) -> Command {
         // the same wire command the CLI would.
         Message::Anchor(mode) => Command::Set(Key::Anchor, Value::Anchor(mode)),
         Message::RosterOrder(order) => Command::Set(Key::RosterOrder, Value::RosterOrder(order)),
+        Message::SetOption(key, value) => Command::Set(key, value),
         Message::SetFlag(..) => unreachable!("flags are handled directly in update"),
         // Handled directly in `update`; unreachable here.
         Message::NumText(..)
@@ -98,10 +121,126 @@ pub(super) fn command_for(message: Message) -> Command {
 
 #[cfg(test)]
 mod tests {
+    use hyprlay_core::config::AnchorMode;
     use hyprlay_core::config::HorizontalAnchor as H;
+    use hyprlay_core::config::RosterOrder;
     use hyprlay_core::config::VerticalAnchor as V;
+    use hyprlay_core::domain::Corner;
+    use hyprlay_core::domain::MonitorTarget;
 
     use super::*;
+    use crate::gui::test_gui;
+
+    /// The GUI with two monitors reported, which is the only shape of the
+    /// monitor row that has more than one option to step between.
+    fn gui() -> Gui {
+        let mut g = test_gui("");
+        g.monitors = ["DP-1".to_string(), "HDMI-A-1".to_string()].into();
+        g
+    }
+
+    /// Every option-select row's step sends exactly the choice next door in
+    /// the row's own order, and it is the wire text the daemon parses. This is
+    /// the whole of "the change reaches the daemon" that no screenshot can
+    /// show: the daemon is not running in the GUI harness, so the command is
+    /// asserted here instead.
+    #[test]
+    fn an_option_step_sends_the_neighbouring_choice() {
+        let mut g = gui();
+        assert_eq!(
+            step_command(&g, Key::Position, true),
+            Some(Command::Set(Key::Position, Value::Corner(Corner::TopRight))),
+            "Right on top-left is top-right"
+        );
+        assert_eq!(
+            step_command(&g, Key::Anchor, true),
+            Some(Command::Set(Key::Anchor, Value::Anchor(AnchorMode::Top))),
+            "Right on auto is top"
+        );
+        assert_eq!(
+            step_command(&g, Key::RosterOrder, true),
+            Some(Command::Set(
+                Key::RosterOrder,
+                Value::RosterOrder(RosterOrder::Name)
+            )),
+            "Right on join-order is name"
+        );
+        assert_eq!(
+            step_command(&g, Key::Monitor, true),
+            Some(Command::Set(
+                Key::Monitor,
+                Value::Target(MonitorTarget::Named("DP-1".into()))
+            )),
+            "Right on active is the first reported output"
+        );
+
+        // And Left is the same walk in reverse, from a row that has moved.
+        g.config.anchor = AnchorMode::Bottom;
+        assert_eq!(
+            step_command(&g, Key::Anchor, false),
+            Some(Command::Set(Key::Anchor, Value::Anchor(AnchorMode::Top))),
+            "Left on bottom is top"
+        );
+        assert_eq!(
+            Command::Set(Key::Anchor, Value::Anchor(AnchorMode::Top)).to_string(),
+            "set anchor top",
+            "the step sends the canonical wire form"
+        );
+    }
+
+    /// Both ends stop. The owner ruled out wrapping, and the reason is in the
+    /// assertion: a wrap would send a command for a choice the keyboard has
+    /// visibly run past, so the daemon would be told to move while the row
+    /// says it has not.
+    #[test]
+    fn an_option_step_at_either_end_sends_nothing() {
+        let mut g = gui();
+        assert_eq!(
+            step_command(&g, Key::Anchor, false),
+            None,
+            "Left on the first option has no previous one"
+        );
+        assert_eq!(
+            step_command(&g, Key::Position, false),
+            None,
+            "and neither has Left on the first preset"
+        );
+        g.config.anchor = AnchorMode::Bottom;
+        assert_eq!(
+            step_command(&g, Key::Anchor, true),
+            None,
+            "Right on the last option has no next one"
+        );
+        g.config.horizontal = H::Right;
+        g.config.vertical = V::Bottom;
+        assert_eq!(
+            step_command(&g, Key::Position, true),
+            None,
+            "and neither has Right on the last preset"
+        );
+        g.config.monitor = Some("HDMI-A-1".into());
+        assert_eq!(
+            step_command(&g, Key::Monitor, true),
+            None,
+            "or on the last reported output"
+        );
+    }
+
+    /// A row with no fixed set of choices has no step at all, so an arrow on a
+    /// number row or a colour editor cannot move anything — those rows have no
+    /// choices to move between yet, and guessing would send a wrong command.
+    #[test]
+    fn a_row_with_no_options_has_no_step() {
+        let g = gui();
+        for key in [Key::Opacity, Key::Width, Key::Rtl, Key::SpeakingColor] {
+            assert_eq!(
+                step_command(&g, key, true),
+                None,
+                "{} offers no options, so it must produce no command",
+                key.name()
+            );
+        }
+    }
 
     #[test]
     fn anchor_setting_roundtrips_through_apply_and_revert() {

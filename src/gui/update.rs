@@ -30,6 +30,7 @@ use super::commands::command_for;
 use super::commands::mark_dirty;
 use super::commands::num_in_bounds;
 use super::commands::revert_commands;
+use super::commands::step_command;
 use super::fields;
 use super::fields::Section;
 use super::picker::ColorTarget;
@@ -418,7 +419,16 @@ fn shortcut(gui: &mut Gui, event: keyboard::Event) -> Task<Message> {
             // its pre-search offset.
             return restore_scroll(gui);
         }
-        return Task::none();
+        // Left and Right step a focused option select, and they are free to:
+        // iced spends an arrow on the text input that holds real focus, so
+        // reaching here means no input owns typing and the focused row is
+        // the only thing an arrow could mean. A row that is not an option
+        // select has no step, and the keystroke does nothing.
+        return match &key {
+            keyboard::Key::Named(key::Named::ArrowLeft) => step_option(gui, false),
+            keyboard::Key::Named(key::Named::ArrowRight) => step_option(gui, true),
+            _ => Task::none(),
+        };
     }
     let keyboard::Key::Character(ch) = &key else {
         return Task::none();
@@ -474,13 +484,7 @@ async fn apply_auth_credentials(creds: AppCredentials) -> Reply {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use iced::Point;
-
     use super::*;
-    use crate::gui::daemon::AutoStart;
-    use crate::gui::daemon::DaemonState;
 
     /// D3: a sidebar click or Ctrl+1..5 while a search is up first drops
     /// the query and shows the target section's highlight immediately.
@@ -529,26 +533,7 @@ mod tests {
     /// config file, so build the struct with test values instead. Only the
     /// navigation fields matter here.
     fn gui_with_search(query: &str) -> Gui {
-        Gui {
-            config: Config::default(),
-            focus: None,
-            drafts: HashMap::new(),
-            num_drafts: HashMap::new(),
-            last_reply: Reply::Ok(String::new()),
-            daemon_state: DaemonState::Connecting,
-            auto_start: AutoStart::watching(),
-            control: Arc::new(crate::platform::service::SystemControl),
-            dirty: false,
-            monitors: Vec::new(),
-            section: Section::Position,
-            search: query.to_string(),
-            last_scroll_y: 0.0,
-            picker: None,
-            picker_drag: false,
-            picker_pos: Point::ORIGIN,
-            auth_client_id: String::new(),
-            auth_client_secret: String::new(),
-        }
+        crate::gui::test_gui(query)
     }
 }
 
@@ -678,63 +663,62 @@ fn activate_focus(gui: &mut Gui) -> Task<Message> {
         // per-section resets.
         FocusTarget::Credential(_) => Task::none(),
         FocusTarget::Field(key) => {
-            // A bare Space/Enter on a cycle-able key flips it, which is the
-            // same thing the bare `set <key>` form does on the wire: build
-            // the opposite of the current value.
-            //
-            // A key with no cycle-able form gets nothing here, and nothing
-            // else picks it up either: in iced 0.14.2 `button.rs` handles no
-            // keyboard event, `slider.rs` takes arrows only while the cursor
-            // is over it, and no widget walks a focus chain, so the 16 number
-            // rows, 4 chip groups and 3 colour editors ring but do not
-            // activate. Handing focus to iced's widgets is the fix, not this
-            // pass.
-            if !matches!(key.parse_value(None), Ok(Value::Cycle)) {
-                return Task::none();
+            // A bare Space/Enter on a flag flips it, which is the same thing
+            // the bare `set <key>` form does on the wire.
+            if matches!(key.parse_value(None), Ok(Value::Cycle))
+                && let Value::Flag(current) = key.value_of(&gui.config)
+            {
+                return update(gui, Message::SetFlag(key, !current));
             }
-            let Value::Flag(current) = key.value_of(&gui.config) else {
-                return Task::none();
-            };
-            update(gui, Message::SetFlag(key, !current))
+            // Any other row that offers a fixed set of choices is an option
+            // select, and Enter activates it by stepping forward — the same
+            // step Left and Right take. What is left rings but stays inert:
+            // in iced 0.14.2 `slider.rs` takes arrows only while the cursor is
+            // over it and nothing walks a focus chain, so the number rows and
+            // the colour editors have no keyboard path yet. Handing focus to
+            // iced's widgets is the fix for those, not this pass.
+            step_option(gui, true)
         }
     }
 }
 
+/// One step along the focused option select: to the next choice (`forward`)
+/// or the previous one, and the command for it goes to the daemon exactly as
+/// a click on that chip's button would.
+///
+/// Focus does not move. The row keeps the ring the whole way, because the
+/// ring is on the row, not on a chip within it.
+///
+/// Stops at both ends: the selection does not wrap, so a step past either end
+/// sends nothing and leaves the value where it is.
+fn step_option(gui: &mut Gui, forward: bool) -> Task<Message> {
+    let Some(FocusTarget::Field(key)) = gui.focus else {
+        return Task::none();
+    };
+    let Some(Command::Set(_, value)) = step_command(gui, key, forward) else {
+        return Task::none();
+    };
+    // `set monitor` is answered by the daemon shell rather than by config
+    // application, and it is the one option row whose local mirror its own
+    // message has to write. Every other row rides the generic apply path its
+    // chip click takes.
+    if key == Key::Monitor {
+        return update(gui, Message::SwitchMonitor(fields::monitor_name(&value)));
+    }
+    update(gui, Message::SetOption(key, value))
+}
+
 #[cfg(test)]
 mod focus_tests {
-    use std::collections::HashMap;
-
-    use iced::Point;
+    use hyprlay_core::config::AnchorMode;
 
     use super::*;
     use crate::gui::Credential;
     use crate::gui::FocusTarget;
-    use crate::gui::daemon::AutoStart;
-    use crate::gui::daemon::DaemonState;
-    use crate::platform::service::SystemControl;
 
     /// A `Gui` with nothing focused and a clean config.
     fn gui() -> Gui {
-        Gui {
-            config: Config::default(),
-            focus: None,
-            drafts: HashMap::new(),
-            num_drafts: HashMap::new(),
-            last_reply: Reply::Ok(String::new()),
-            daemon_state: DaemonState::Connecting,
-            auto_start: AutoStart::watching(),
-            control: Arc::new(SystemControl),
-            dirty: false,
-            monitors: Vec::new(),
-            section: Section::Position,
-            search: String::new(),
-            last_scroll_y: 0.0,
-            picker: None,
-            picker_drag: false,
-            picker_pos: Point::ORIGIN,
-            auth_client_id: String::new(),
-            auth_client_secret: String::new(),
-        }
+        crate::gui::test_gui("")
     }
 
     /// Tab from nothing lands on the first target in the order; Tab again
@@ -809,20 +793,126 @@ mod focus_tests {
     }
 
     /// Enter on a key with no cycle-able form does nothing, and nothing else
-    /// picks it up either: in iced 0.14.2 `button` handles no keyboard event
-    /// and `slider` needs the cursor over it, so a ringed number row, chip
-    /// group or colour editor is inert. The ring promises more than the
-    /// activation delivers; see `activate_focus`.
+    /// picks it up either: in iced 0.14.2 `slider` needs the cursor over it and
+    /// no widget walks a focus chain, so a ringed number row or colour editor
+    /// is inert. The option selects are the other kind of row and they do
+    /// activate; the ring does not promise more than that here.
     #[test]
     fn enter_on_a_non_cycle_able_field_is_a_noop() {
         let mut g = gui();
         g.focus = Some(FocusTarget::Field(Key::Opacity));
         let before = g.config.opacity;
-        let _ = update(
+        let task = update(
             &mut g,
             Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Enter))),
         );
         assert_eq!(g.config.opacity, before);
+        assert_eq!(task.units(), 0, "a number row has no choice to step to");
+    }
+
+    /// The option selects: Enter and Right move to the next choice and Left to
+    /// the previous one, and the ring stays on the row for all three — the
+    /// choice is what moves, not the focus.
+    #[test]
+    fn enter_and_right_step_forward_and_left_steps_back() {
+        for key in [
+            keyboard::Key::Named(key::Named::Enter),
+            keyboard::Key::Named(key::Named::ArrowRight),
+        ] {
+            let mut g = gui();
+            g.focus = Some(FocusTarget::Field(Key::Anchor));
+            let task = update(&mut g, Message::KeyPressed(no_key(key.clone())));
+            assert_eq!(
+                g.config.anchor,
+                AnchorMode::Top,
+                "{key:?} from auto lands on top"
+            );
+            assert_eq!(
+                g.focus,
+                Some(FocusTarget::Field(Key::Anchor)),
+                "{key:?} moves the choice, not the focus"
+            );
+            assert_eq!(
+                task.units(),
+                1,
+                "{key:?} sends exactly one command to the daemon"
+            );
+        }
+
+        // Left walks the same row backwards, from where it already stands.
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Anchor));
+        g.config.anchor = AnchorMode::Bottom;
+        let task = update(&mut g, Message::KeyPressed(arrow_left()));
+        assert_eq!(g.config.anchor, AnchorMode::Top, "Left from bottom is top");
+        assert_eq!(task.units(), 1, "and it sends one command");
+    }
+
+    /// Both ends stop, and "nothing happens" is asserted as nothing spawned: a
+    /// boundary step must not put a command on the socket. Held arrows run the
+    /// same step, so a key the user leans on at the last option stays there
+    /// rather than running past it.
+    #[test]
+    fn a_step_at_either_end_stops_where_the_row_is() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Anchor));
+
+        let first = update(&mut g, Message::KeyPressed(arrow_left()));
+        assert_eq!(
+            g.config.anchor,
+            AnchorMode::Auto,
+            "Left on auto does not wrap to bottom"
+        );
+        assert_eq!(first.units(), 0, "and puts no command on the socket");
+
+        // Three steps from auto reach bottom; four more, held, must not move.
+        for _ in 0..3 {
+            let _ = update(&mut g, Message::KeyPressed(arrow_right()));
+        }
+        assert_eq!(g.config.anchor, AnchorMode::Bottom);
+        let held = update(&mut g, Message::KeyPressed(held_right()));
+        assert_eq!(
+            g.config.anchor,
+            AnchorMode::Bottom,
+            "a held Right at the last option stops there"
+        );
+        assert_eq!(held.units(), 0, "and sends nothing while held");
+    }
+
+    /// A held key is a stream of further KeyPressed events, and one repeat is
+    /// one step. X11 auto-repeat is how a keyboard user holds an arrow, so a
+    /// repeat that did nothing would leave held keys worse than tapped ones.
+    #[test]
+    fn a_held_arrow_repeats_the_step() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Anchor));
+        let _ = update(&mut g, Message::KeyPressed(held_right()));
+        let _ = update(&mut g, Message::KeyPressed(held_right()));
+        assert_eq!(
+            g.config.anchor,
+            AnchorMode::Bottom,
+            "two repeats from auto land on bottom"
+        );
+    }
+
+    /// The arrows are inert anywhere they cannot mean a choice: a chrome
+    /// button, a credential row (where iced's own focus owns them, to move the
+    /// caret), and a number row with nothing to step between.
+    #[test]
+    fn the_arrows_do_nothing_off_an_option_select() {
+        for target in [
+            FocusTarget::Save,
+            FocusTarget::Nav(0),
+            FocusTarget::Credential(Credential::ClientId),
+            FocusTarget::Field(Key::Width),
+        ] {
+            let mut g = gui();
+            g.focus = Some(target);
+            for key in [arrow_left(), arrow_right()] {
+                let task = update(&mut g, Message::KeyPressed(key));
+                assert_eq!(task.units(), 0, "{target:?} must ignore the arrows");
+            }
+        }
     }
 
     /// Tab far enough down to the page's last *keyed* row, then run the reveal
@@ -1154,6 +1244,39 @@ mod focus_tests {
 
     fn no_key(key: keyboard::Key) -> keyboard::Event {
         key_event(key, keyboard::Modifiers::default())
+    }
+
+    fn arrow_left() -> keyboard::Event {
+        no_key(keyboard::Key::Named(key::Named::ArrowLeft))
+    }
+
+    fn arrow_right() -> keyboard::Event {
+        no_key(keyboard::Key::Named(key::Named::ArrowRight))
+    }
+
+    /// The same key as [`arrow_right`], arriving the way a held one does: X11
+    /// auto-repeat is a stream of further KeyPressed events, each one a step.
+    fn held_right() -> keyboard::Event {
+        match arrow_right() {
+            keyboard::Event::KeyPressed {
+                key,
+                modified_key,
+                physical_key,
+                location,
+                modifiers,
+                text,
+                ..
+            } => keyboard::Event::KeyPressed {
+                key,
+                modified_key,
+                physical_key,
+                location,
+                modifiers,
+                repeat: true,
+                text,
+            },
+            other => other,
+        }
     }
 
     fn shift_tab() -> keyboard::Event {

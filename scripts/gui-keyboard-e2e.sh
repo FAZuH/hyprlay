@@ -302,9 +302,21 @@ WIN_Y=${Y:-0}
 
 key() { printf '  key   %-12s sleep %s\n' "$1" "$2"; xdotool key "$1"; sleep "$2"; }
 typ() { printf '  type  %-12s sleep %s\n' "$1" "$2"; xdotool type --delay 60 "$1"; sleep "$2"; }
-# tab N: the same key N times, one step at a time, so a focus reveal per step
-# settles instead of racing the next keystroke.
-tab() { printf '  key   Tab x%-8s sleep 1\n' "$1"; for _ in $(seq "$1"); do xdotool key Tab; sleep 0.2; done; sleep 1; }
+# walk KEY N: the same key N times, one step at a time, so a focus reveal per
+# step settles instead of racing the next keystroke.
+walk() { printf '  key   %-12s x%-8s sleep 1\n' "$1" "$2"; for _ in $(seq "$2"); do xdotool key "$1"; sleep 0.2; done; sleep 1; }
+tab() { walk Tab "$1"; }
+# hold KEY SECONDS: the key stays down for SECONDS, which is what X11
+# auto-repeat delivers to a client that leans on an arrow — a stream of further
+# KeyPressed events. This Xvfb seat does repeat (a held Tab walks several
+# targets), so the repeat is testable here rather than only in a unit test.
+hold() {
+	printf '  hold  %-12s %ss sleep 1\n' "$1" "$2"
+	xdotool keydown "$1"
+	sleep "$2"
+	xdotool keyup "$1"
+	sleep 1
+}
 
 printf '\nwindow %s = %s\n\n' "$W" "$(xdotool getwindowname "$W")"
 
@@ -617,6 +629,116 @@ assert_region_pixels "reset all leaves the secret's value alone" \
 assert_region_pixels "and the page where it stood" \
 	cred_revealed cred_after_reset 1216x30+176+792 same
 
+# ------------------------------------------------------ the option selects ---
+# The rows that present a fixed set of choices: the corner presets, the anchor
+# chips, the roster-order chips and the monitor chips. Enter, Space and Right
+# pick the next option, Left the previous one, and the selection stops at either
+# end rather than wrapping. Every check below probes the colour of the chip
+# itself — accent for the selected one, the idle chip background for the rest —
+# so it cannot be satisfied by the window merely changing.
+#
+# Focus is on the client id here, which is tab-order index 38: three header
+# actions, five sidebar items, one press per keyed row, then the two credential
+# rows. The corner presets are the first keyed row, index 8, so 30 Shift+Tabs
+# walk back onto them, and the last of those reveals the row and parks the page
+# 45 px down. Re-derive the geometries after any layout change, in this state:
+#   magick opt_first.png -crop 1x220+700+40 -depth 8 txt:-   # the row's bands
+#   magick opt_first.png -crop 500x1+600+90 -depth 8 txt:-    # a chip row's runs
+# The presets row then spans y 55..147 with its fill, the chip grid on y 75..106
+# and y 116..147, each chip half the content width: 176..773 on the left and
+# 782..1379 on the right. The anchor row below has its three chips on y 180..207
+# at x 176..231 (auto), 238..283 (top) and 291..367 (bottom). The probes sit
+# clear of every chip's glyphs: x 700 and 1000 on the presets, x 180, 240 and
+# 295 on the anchor row, and x 774 in the row's own fill margin between two
+# chips. Nothing below the two rows (y 300..500) is touched by any step, which
+# is what makes it the yardstick for "the choice moved, the page did not".
+walk shift+Tab 30
+shot opt_first
+assert_pixel "the first preset is selected on a clean config" opt_first 700 90 "$ACCENT"
+assert_pixel "and the other three are not" opt_first 1000 90 "$FIELD_BG"
+assert_pixel "the focused row wears the fill behind its chips" opt_first 774 60 "$FOCUS_FILL"
+
+# Left on the first option: the boundary. Nothing wraps, and nothing moves —
+# not one pixel of the row, and not the window.
+key Left 1
+shot opt_first_boundary
+assert_pixels "Left on the first option changes nothing" opt_first opt_first_boundary same
+assert_region_pixels "and not one pixel of the row" \
+	opt_first opt_first_boundary 1220x100+176+50 same
+assert_pixel "the first preset is still the selected one" \
+	opt_first_boundary 700 90 "$ACCENT"
+
+# Enter steps to the next option, and the row keeps the fill: the chip moved,
+# not the focus and not the page.
+key Enter 1
+shot opt_enter
+assert_pixels "Enter selects the next option" opt_first_boundary opt_enter differs
+assert_pixel "the next preset is now selected" opt_enter 1000 90 "$ACCENT"
+assert_pixel "and the one Enter left is not" opt_enter 700 90 "$FIELD_BG"
+assert_pixel "the last preset is still not selected" opt_enter 1000 130 "$FIELD_BG"
+assert_pixel "focus stayed on the row" opt_enter 774 60 "$FOCUS_FILL"
+assert_region_pixels "Enter moved the choice, not the page" \
+	opt_first_boundary opt_enter 1220x200+176+300 same
+
+# Right steps to the next option, which is the chip below-and-left here: the
+# order the arrow walks is the order the 2x2 grid paints.
+key Right 1
+shot opt_right
+assert_pixel "Right selects the next option" opt_right 700 130 "$ACCENT"
+assert_pixel "and the one before it is unselected" opt_right 1000 90 "$FIELD_BG"
+
+# Left walks the same row back.
+key Left 1
+shot opt_left
+assert_pixel "Left selects the previous option" opt_left 1000 90 "$ACCENT"
+assert_pixel "and the one it left is unselected" opt_left 700 130 "$FIELD_BG"
+
+# A held key repeats, and stops on the last option. Held from top-right for
+# three seconds: if the repeat were ignored the row would sit on bottom-left,
+# and if the last option wrapped it would be back on top-left — so the
+# bottom-right chip being the accent one says both.
+hold Right 3
+shot opt_held
+assert_pixel "a held Right repeats the step" opt_held 1000 130 "$ACCENT"
+assert_pixel "the option before the last one is not selected" opt_held 700 130 "$FIELD_BG"
+assert_pixel "and the selection did not wrap to the first one" opt_held 700 90 "$FIELD_BG"
+assert_region_pixels "a held key moved the choice, not the page" \
+	opt_left opt_held 1220x200+176+300 same
+
+# Held at that last option it stops there: the boundary holds under repeat too.
+hold Right 3
+shot opt_held_stop
+assert_pixels "a held Right on the last option changes nothing" opt_held opt_held_stop same
+assert_region_pixels "and not one pixel of the row" \
+	opt_held opt_held_stop 1220x100+176+50 same
+assert_pixel "the last preset is still the selected one" opt_held_stop 1000 130 "$ACCENT"
+
+# A second row of the same shape, three chips in a line: Tab reaches it, the
+# presets row unfocuses behind it, and Right moves one chip along.
+key Tab 1
+shot opt_anchor
+assert_pixel "Tab reaches the anchor row" opt_anchor 180 185 "$ACCENT"
+assert_pixel "and the presets row is unfocused behind it" opt_anchor 700 90 "$FIELD_BG"
+key Right 1
+shot opt_anchor_step
+assert_pixel "Right moves the anchor one chip along" opt_anchor_step 240 185 "$ACCENT"
+assert_pixel "the chip it left is unselected" opt_anchor_step 180 185 "$FIELD_BG"
+assert_pixel "and so is the one it did not reach" opt_anchor_step 295 185 "$FIELD_BG"
+assert_region_pixels "the presets row above did not move" \
+	opt_anchor opt_anchor_step 1220x100+176+50 same
+
+# Left on the first anchor chip is that row's boundary too, and it stops the
+# same way: the second press above left auto behind, so one Left returns to it
+# and a second changes nothing.
+key Left 1
+shot opt_anchor_back
+key Left 1
+shot opt_anchor_first
+assert_pixel "Left walks the anchor back to auto" opt_anchor_back 180 185 "$ACCENT"
+assert_pixels "and Left on it again stops at the boundary" \
+	opt_anchor_back opt_anchor_first same
+assert_pixel "with auto still selected" opt_anchor_first 180 185 "$ACCENT"
+
 # ------------------------------------------------------------------- summary ---
 cat <<SUMMARY
 
@@ -624,14 +746,23 @@ cat <<SUMMARY
 
   Not exercised by this harness:
     - No daemon runs, so only the GUI's own rendering is compared. That a
-      keystroke reached the daemon (Save, Reset, Ctrl+R) is unproven here.
+      keystroke reached the daemon (Save, Reset, Ctrl+R) is unproven here —
+      and that includes the option step's own command: what the arrow keys
+      send is asserted at the Command seam instead, by
+      an_option_step_sends_the_neighbouring_choice and
+      an_option_step_at_either_end_sends_nothing in src/gui/commands.rs.
     - The overlay daemon is layer-shell only (ADR-004), so it cannot run on
       X11 at all and this harness never sees a surface.
     - Modifier delivery on a Wayland seat: the gap this harness exists for.
-    - Enter and Space, which activate the focused row: no check above
-      presses them.
+    - Space. Enter presses the same step the arrows do (see activate_focus in
+      src/gui/update.rs), so nothing here presses Space itself.
+    - The roster-order and monitor chip rows. They are the same code path as
+      the two rows above; the roster-order row is 14 Tabs further down the
+      page and the monitor row has only one chip here, because this seat
+      reports no outputs.
     - A pixel diff says "something changed", never "the right thing changed":
-      no assertion here reads what is drawn.
+      an assertion that reads the drawn colour (assert_pixel, assert_label_lift)
+      is the only kind that can.
 
   screenshots: $SHOTS
   app log:     $ROOT/gui.log

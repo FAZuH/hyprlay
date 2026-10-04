@@ -45,6 +45,7 @@ use hyprlay_core::daemon_control::DaemonControl;
 use hyprlay_core::domain::Command;
 use hyprlay_core::domain::Key;
 use hyprlay_core::domain::Reply;
+use hyprlay_core::domain::Value;
 
 /// What the blocking-send wrapper reports when the socket connect fails, and
 /// when the off-thread task itself died. The daemon never sends either; they
@@ -71,6 +72,10 @@ enum Message {
     Anchor(hyprlay_core::config::AnchorMode),
     /// Pick the roster ordering strategy.
     RosterOrder(hyprlay_core::config::RosterOrder),
+    /// One option-select row's keyboard step: the chosen option's value. The
+    /// same shape a chip click's own message carries, so a step and a click
+    /// reach the daemon by one route.
+    SetOption(Key, Value),
     /// Flip one boolean config key (rtl, talking-only, own user).
     SetFlag(Key, bool),
     /// Integer text edited for a numeric knob; invalid or out-of-range
@@ -340,6 +345,34 @@ fn subscribe(_gui: &Gui) -> Subscription<Message> {
         // triggers shortcuts.
         keyboard::listen().map(Message::KeyPressed),
     ])
+}
+
+/// A `Gui` for the state-transition tests, built from test values because
+/// `boot()` reads and writes the real config file. One constructor for every
+/// test module, so a new field is filled in one place instead of one copy per
+/// module; the query is the only thing a test differs on.
+#[cfg(test)]
+pub(super) fn test_gui(search: &str) -> Gui {
+    Gui {
+        config: Config::default(),
+        focus: None,
+        drafts: HashMap::new(),
+        num_drafts: HashMap::new(),
+        last_reply: Reply::Ok(String::new()),
+        daemon_state: DaemonState::Connecting,
+        auto_start: AutoStart::watching(),
+        control: Arc::new(crate::platform::service::SystemControl),
+        dirty: false,
+        monitors: Vec::new(),
+        section: Section::Position,
+        search: search.to_string(),
+        last_scroll_y: 0.0,
+        picker: None,
+        picker_drag: false,
+        picker_pos: Point::ORIGIN,
+        auth_client_id: String::new(),
+        auth_client_secret: String::new(),
+    }
 }
 
 /// Blocking socket round-trip off the UI thread.
