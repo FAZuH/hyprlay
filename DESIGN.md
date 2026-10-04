@@ -64,10 +64,12 @@ Be honest, this product is:
   `spacing(8)`, and that is the whole rhythm. Declaring 1 makes the uniformity
   a decision rather than a template artifact.
 - **MOTION 1** — hover states only. The speaking ring changes thickness and
-  colour and never animates; there are no loops anywhere in the UI.
+  colour and never animates; there are no loops anywhere in the UI. Focusing a
+  field off screen jumps the page to it in one step, with no tween.
 
-MOTION 1 is what makes the stillness a choice. If a future pass adds scroll
-reveal or parallax, it must also raise this dial and say so.
+MOTION 1 is what makes the stillness a choice. If a future pass adds animated
+scroll reveal or parallax, it must also raise this dial and say so. An instant
+jump is a cut, not motion, so the keyboard focus reveal does not move it.
 
 ## Accent's one job
 
