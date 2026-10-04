@@ -189,6 +189,79 @@ assert_region_pixels() {
 	fi
 }
 
+# ---------------------------------------------------------------- the shape ---
+# Everything above proves pixels changed. None of it can tell a fill from a
+# stroke, because both change the window and both are "some blue". These four
+# helpers name what is drawn instead, which is the only way to assert a shape.
+#
+# The palette the probes name, as the bytes the renderer writes them:
+# `theme::FOCUS_FILL` 0.33/0.35/0.42 -> #54596b, `FIELD_BG` 0.16/0.17/0.20 ->
+# #292b33, the disabled background 0.108/0.112/0.130 -> #1c1d21, `ACCENT`
+# 0.345/0.396/0.949 -> #5865f2, `ACCENT_LIT` -> #5966e6.
+FOCUS_FILL='#54596b'
+FIELD_BG='#292b33'
+DISABLED_BG='#1c1d21'
+ACCENT='#5865f2'
+ACCENT_LIT='#5966e6'
+# The old focus ring (`theme::FOCUS_RING`, since deleted). No pixel of the
+# window may still be this colour, which is what says the ring is gone rather
+# than merely covered over.
+FOCUS_RING='#99ccff'
+
+# The header's three buttons all sit on row 23 of the capture, and each probe
+# below is a patch of that button's body clear of its glyphs: Clear changes
+# 1082..1215, Reset all 1226..1315, Save 1325..1384, and the first sidebar item
+# 9..152 on row 68. Re-derive them after any layout change:
+#   convert f1.png -crop 500x60+900+0 +repage -depth 8 txt: | grep -o '#.......'
+# shows every run on a row, and the geometry of each run is the button.
+
+# assert_pixel LABEL SHOT X Y HEX -- what is drawn at one point
+assert_pixel() {
+	local got
+	got=$(convert "$SHOTS/$2.png" -format "%[hex:p{$3,$4}]" info: 2>>"$ROOT/import.log")
+	# `%[hex:p{..}]` prints bare uppercase hex; the palette constants carry a
+	# leading `#`, so put the two in the same shape before comparing.
+	if [ "#${got,,}" = "$5" ]; then
+		pass "$1: $got at ($3,$4) of $2"
+	else
+		fail "$1: $got at ($3,$4) of $2, expected $5"
+	fi
+}
+
+# assert_no_stroke LABEL SHOT HEX -- no pixel of that colour anywhere
+assert_no_stroke() {
+	local n
+	n=$(convert "$SHOTS/$2.png" -format %c histogram:info:- 2>>"$ROOT/import.log" |
+		grep -ci "#$3")
+	[ "$n" = 0 ] && pass "$1: no #${3} pixel anywhere in $2" ||
+		fail "$1: $n #${3} pixels still in $2"
+}
+
+# label_peak SHOT GEOMETRY -- the brightest channel in a crop, 0-255. A dim
+# disabled label peaks near 120 (#787a82, 0.47 grey) and a lifted one near 219
+# (#dbdee0 = BRIGHT), so this reads "is the focus cue here" for a control that
+# cannot take a fill.
+label_peak() {
+	# `-colorspace Gray` first: `maxima` is a per-channel value on an RGB
+	# image, so without this it reports one arbitrary channel rather than the
+	# label's luminance.
+	convert "$SHOTS/$1.png" -crop "$2" +repage -colorspace Gray \
+		-format "%[fx:int(255*maxima)]" info: 2>>"$ROOT/import.log"
+}
+
+# assert_label_lift LABEL FOCUSED_SHOT UNFOCUSED_SHOT GEOMETRY
+# (three arguments after the label: the geometry is $4, not $5)
+assert_label_lift() {
+	local before after
+	before=$(label_peak "$3" "$4")
+	after=$(label_peak "$2" "$4")
+	if [ "$before" -lt 160 ] && [ "$after" -gt 200 ]; then
+		pass "$1: label peak $before -> $after"
+	else
+		fail "$1: label peak $before -> $after, expected dim then lifted"
+	fi
+}
+
 key() { printf '  key   %-12s sleep %s\n' "$1" "$2"; xdotool key "$1"; sleep "$2"; }
 typ() { printf '  type  %-12s sleep %s\n' "$1" "$2"; xdotool type --delay 60 "$1"; sleep "$2"; }
 # tab N: the same key N times, one step at a time, so a focus reveal per step
@@ -232,6 +305,53 @@ assert_pixels "Tab is deterministic" f2 f2b same
 key shift+Tab 1
 shot f1b
 assert_pixels "Shift+Tab is deterministic" f1a f1b same
+
+# Two Tabs past Reset all reach the first sidebar item — the fifth of the nine
+# chrome controls, and the one whose selected accent the focus fill takes.
+key Tab 1
+key Tab 1
+shot nav_focus
+
+# ------------------------------------------------- the indicator is a fill ---
+# Focus is on "Reset all" in f1b, on Save in f2, on the first sidebar item in
+# nav_focus, and on "Clear changes" in focus_none/settled — the config in
+# $ROOT/home is clean, so that button has no press target and the run's first
+# Tab lands on it disabled. Those four states cover the shapes below.
+
+# An enabled chrome button fills, and the same button unfocused does not: a
+# stroke would put the ring colour on the edge and leave the body at its idle
+# background in both states.
+assert_pixel "a focused enabled button fills" f1b 1233 23 "$FOCUS_FILL"
+assert_pixel "the same button unfocused does not" f2 1233 23 "$FIELD_BG"
+assert_no_stroke "no stroke survives on a focused button" f1b "$FOCUS_RING"
+
+# Requirement: a disabled control must not wear the enabled cue. Its body is
+# byte-identical focused and unfocused, so it cannot read as pressable — and
+# the lifted label is the only thing left that says where focus is.
+assert_pixel "a focused disabled button does not fill" focus_none 1090 23 "$DISABLED_BG"
+assert_pixel "the same disabled button unfocused is identical" f1b 1090 23 "$DISABLED_BG"
+assert_no_stroke "no stroke survives on the disabled button" focus_none "$FOCUS_RING"
+assert_label_lift "focus on a disabled button lifts its label" \
+	focus_none f1b 110x20+1090+13
+
+# The primary button and the selected sidebar item are the two elements the
+# accent is reserved for, and the fill takes the accent from both while
+# focused. Named here because it is the visible cost of one shape everywhere.
+assert_pixel "Save loses its accent while focused" f2 1332 23 "$FOCUS_FILL"
+assert_pixel "Save keeps its accent unfocused" f1b 1332 23 "$ACCENT"
+assert_pixel "the selected sidebar item loses its accent while focused" \
+	nav_focus 90 68 "$FOCUS_FILL"
+assert_pixel "the selected sidebar item is accent-lit unfocused" f2 90 68 "$ACCENT_LIT"
+
+# The fill is a background, so it moves no pixel of layout: everything below the
+# header is byte-identical with focus on one header button and on the next.
+assert_region_pixels "focus moves the button, not the page" f1b f2 600x760+176+60 same
+
+# Back to Reset all, so the checks below start from the state they expect.
+key shift+Tab 1
+key shift+Tab 1
+shot back_to_reset
+assert_pixels "focus walks back to where it came from" f1b back_to_reset same
 
 # 'f' alone must do nothing: no control is a text field yet, so if this one
 # changes the screen, the Ctrl+F check below proves nothing.

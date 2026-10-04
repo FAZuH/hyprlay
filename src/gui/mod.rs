@@ -141,7 +141,7 @@ enum Message {
 /// iced_widget-0.14.2/src/` matches only `text_input.rs` and
 /// `text_editor.rs`, and `button.rs` handles zero keyboard events. So focus
 /// is tracked here, routed by the window-global shortcut dispatcher, and
-/// rendered as a visible ring by the style closures.
+/// rendered as a background fill by the style closures.
 ///
 /// `Field(Key)` is the load-bearing variant: keying focus on the config `Key`
 /// rather than on widget identity means the field renderers need no new

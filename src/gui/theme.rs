@@ -87,68 +87,65 @@ pub(super) fn panel(bg: Color) -> impl Fn(&iced::Theme) -> container::Style {
     }
 }
 
-pub(super) fn nav_style(
-    selected: bool,
-    focused: bool,
-) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
-    move |_t, _s| button::Style {
-        background: Some(if selected { ACCENT_LIT } else { FIELD_BG }.into()),
-        text_color: Color::WHITE,
-        border: focus_border(
-            Border {
-                radius: 6.0.into(),
-                ..Border::default()
-            },
-            focused,
-        ),
-        ..button::Style::default()
-    }
-}
-
-/// The focus indicator: a visible ring on whichever widget holds keyboard
-/// focus. Iced 0.14's `button::Style` has no focus field, so this is the
-/// only path a keyboard-only user has to see where they are (R-32).
+/// The focus indicator: a fill behind whichever widget holds keyboard focus —
+/// the body of a chrome button, the whole of a config row. Iced 0.14's
+/// `button::Style` has no focus field, so a style closure is the only path a
+/// keyboard-only user has to see where they are (R-32).
 ///
-/// `FOCUS_RING` is 3:1 against the content background and the sidebar, which
-/// are the two surfaces a focused control sits on.
-pub(super) const FOCUS_RING: Color = Color::from_rgb(0.60, 0.80, 1.00);
-
-fn focus_border(base: Border, focused: bool) -> Border {
-    if !focused {
-        return base;
-    }
-    Border {
-        color: FOCUS_RING,
-        width: 2.0,
-        ..base
-    }
-}
-
-/// The focus indicator on a config-field row: a fill behind the label and the
-/// control, not a box drawn around them.
-///
-/// A border's edge runs straight through the label text — on a slider row it
-/// strikes the label and clips the number input's own frame, which is what the
-/// owner reported. A fill is painted behind the row's content instead, so
-/// nothing crosses what is being read. `Container`'s layout reads no style at
-/// all, so neither the ring nor the fill moves a pixel of the page when focus
-/// moves.
+/// One shape everywhere, and no stroke anywhere: a border's edge runs straight
+/// through the label text — on a slider row it strikes the label and clips the
+/// number input's own frame, which is what the owner reported. Neither
+/// `Container` nor `Button` reads a style into its layout, so a fill moves no
+/// pixel of the page when focus moves.
 ///
 /// The fill is *lighter* than the panel, and that has a consequence: no darker
 /// fill can be an indicator here, because the panel is so dark that even pure
 /// black below it is only 1.27:1, while a lighter fill is what a 1216x50 band
 /// needs to read. Lightening it costs `MUTED` its audited contrast — `MUTED`
 /// clears 4.78:1 on a fill at most as light as the panel, i.e. on nothing — so
-/// the focused row's own label lifts to `BRIGHT`, which holds 5.1:1 on this
-/// fill. Unfocused rows keep `MUTED` on the panel.
+/// a focused row's own label lifts to `BRIGHT`, which holds 5.1:1 on this fill.
+/// Unfocused rows keep `MUTED` on the panel.
 pub(super) const FOCUS_FILL: Color = Color::from_rgb(0.33, 0.35, 0.42);
+
+/// The background a chrome control paints, with the focus fill folded in.
+///
+/// A disabled control takes none of it. "Clear changes" on a clean config is
+/// the case that decides this: the fill *is* the enabled cue, and this fill is
+/// lighter than the panel, so a disabled button wearing one would read as
+/// brighter than its enabled neighbours and claim to be pressable. It keeps
+/// its inert background instead and marks focus by lifting the label
+/// (`plain_style`).
+fn focus_background(focused: bool, status: button::Status, background: Color) -> Color {
+    if focused && !matches!(status, button::Status::Disabled) {
+        FOCUS_FILL
+    } else {
+        background
+    }
+}
+
+pub(super) fn nav_style(
+    selected: bool,
+    focused: bool,
+) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+    move |_t, s| button::Style {
+        background: Some(
+            focus_background(focused, s, if selected { ACCENT_LIT } else { FIELD_BG }).into(),
+        ),
+        text_color: Color::WHITE,
+        border: Border {
+            radius: 6.0.into(),
+            ..Border::default()
+        },
+        ..button::Style::default()
+    }
+}
 
 pub(super) fn focus_fill(focused: bool) -> impl Fn(&iced::Theme) -> container::Style {
     move |_t| container::Style {
         background: focused.then(|| FOCUS_FILL.into()),
-        // The corner radius the ring had, so the focused row keeps its shape.
         // A border with no width and no colour draws nothing; iced clips the
-        // fill to its radius.
+        // fill to the radius, so the focused row keeps the rounded shape it
+        // has unfocused.
         border: Border {
             radius: 6.0.into(),
             ..Border::default()
@@ -165,22 +162,25 @@ pub(super) fn plain_style(focused: bool) -> impl Fn(&iced::Theme, button::Status
         // label is still lifted to 3.93:1 against its own background; the
         // old value sat at 2.60:1 and was unreadable rather than merely dim.
         let (background, text_color) = match s {
+            // Focused as well as disabled: the label lifts to say where focus
+            // is, since the background cannot (see `focus_background`).
             button::Status::Disabled => (
                 Color::from_rgb(0.108, 0.112, 0.130),
-                Color::from_rgb(0.47, 0.48, 0.51),
+                if focused {
+                    BRIGHT
+                } else {
+                    Color::from_rgb(0.47, 0.48, 0.51)
+                },
             ),
             _ => (FIELD_BG, BRIGHT),
         };
         button::Style {
-            background: Some(background.into()),
+            background: Some(focus_background(focused, s, background).into()),
             text_color,
-            border: focus_border(
-                Border {
-                    radius: 6.0.into(),
-                    ..Border::default()
-                },
-                focused,
-            ),
+            border: Border {
+                radius: 6.0.into(),
+                ..Border::default()
+            },
             ..button::Style::default()
         }
     }
@@ -192,21 +192,22 @@ pub(super) fn primary_style(
 ) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
     move |_t: &iced::Theme, s: button::Status| button::Style {
         background: Some(
-            if matches!(s, button::Status::Hovered) || active {
-                ACCENT_LIT
-            } else {
-                ACCENT
-            }
+            focus_background(
+                focused,
+                s,
+                if matches!(s, button::Status::Hovered) || active {
+                    ACCENT_LIT
+                } else {
+                    ACCENT
+                },
+            )
             .into(),
         ),
         text_color: Color::WHITE,
-        border: focus_border(
-            Border {
-                radius: 6.0.into(),
-                ..Border::default()
-            },
-            focused,
-        ),
+        border: Border {
+            radius: 6.0.into(),
+            ..Border::default()
+        },
         ..button::Style::default()
     }
 }
@@ -250,6 +251,21 @@ mod tests {
         );
     }
 
+    /// Every chrome button now fills instead of ringing, and the fill is
+    /// lighter than the panel, so the label sits on a background it was not
+    /// audited against. `BRIGHT` is what a plain button carries and white is
+    /// what Save and the sidebar carry; both have to clear the bar on the fill.
+    #[test]
+    fn button_text_stays_audited_on_the_focus_fill() {
+        for (name, text) in [("BRIGHT", BRIGHT), ("white", Color::WHITE)] {
+            let ratio = contrast(text, FOCUS_FILL);
+            assert!(
+                ratio >= 4.78,
+                "{name} on the focus fill is {ratio:.2}:1, under the audited 4.78:1"
+            );
+        }
+    }
+
     /// A focused row is a fill and nothing else: a stroke around the row is
     /// what crossed the label text, so the border has to stay widthless and
     /// colourless, and an unfocused row has to paint no background at all.
@@ -273,5 +289,97 @@ mod tests {
                 "the {row} row's stroke has colour"
             );
         }
+    }
+
+    /// The nine chrome controls take the same fill the rows take, and none of
+    /// them draws a stroke any more. Every style is checked in both focus
+    /// states, because the ring this replaced was drawn on top of an otherwise
+    /// identical button: a widthless border in the unfocused state is what
+    /// keeps a focused button's layout the same pixels as an unfocused one's.
+    #[test]
+    fn a_focused_button_is_a_fill_and_not_a_stroke() {
+        // (name, focused style, unfocused style, what the unfocused one paints)
+        let styles = [
+            (
+                "plain",
+                plain_style(true)(&theme(), button::Status::Active),
+                plain_style(false)(&theme(), button::Status::Active),
+                FIELD_BG,
+            ),
+            (
+                "primary",
+                primary_style(false, true)(&theme(), button::Status::Active),
+                primary_style(false, false)(&theme(), button::Status::Active),
+                ACCENT,
+            ),
+            (
+                "nav, unselected",
+                nav_style(false, true)(&theme(), button::Status::Active),
+                nav_style(false, false)(&theme(), button::Status::Active),
+                FIELD_BG,
+            ),
+            (
+                "nav, selected",
+                nav_style(true, true)(&theme(), button::Status::Active),
+                nav_style(true, false)(&theme(), button::Status::Active),
+                ACCENT_LIT,
+            ),
+        ];
+
+        for (name, focused, unfocused, idle) in styles {
+            assert_eq!(
+                focused.background,
+                Some(FOCUS_FILL.into()),
+                "the focused {name} button does not take the focus fill"
+            );
+            assert_eq!(
+                unfocused.background,
+                Some(idle.into()),
+                "the unfocused {name} button changed what it paints"
+            );
+            for (state, style) in [("focused", &focused), ("unfocused", &unfocused)] {
+                assert_eq!(
+                    style.border.width, 0.0,
+                    "the {state} {name} button draws a stroke"
+                );
+                assert_eq!(
+                    style.border.color.a, 0.0,
+                    "the {state} {name} button's stroke has colour"
+                );
+            }
+        }
+    }
+
+    /// "Clear changes" is disabled whenever the config is clean, and a fill is
+    /// the enabled cue — so a focused disabled button must keep its inert
+    /// background. It still has to show where focus is, and a lifted label is
+    /// the only thing left that says so without claiming pressability.
+    #[test]
+    fn a_focused_disabled_button_keeps_reading_as_disabled() {
+        let focused = plain_style(true)(&theme(), button::Status::Disabled);
+        let unfocused = plain_style(false)(&theme(), button::Status::Disabled);
+
+        assert_eq!(
+            focused.background, unfocused.background,
+            "the focused disabled button filled, so it claims to be pressable"
+        );
+        assert_ne!(
+            focused.background,
+            Some(FOCUS_FILL.into()),
+            "the focused disabled button wears the enabled cue"
+        );
+        assert_eq!(
+            focused.text_color, BRIGHT,
+            "the focused disabled button gives no cue that focus is here"
+        );
+        assert_ne!(
+            focused.text_color, unfocused.text_color,
+            "a focused disabled button is then indistinguishable from an unfocused one"
+        );
+        let lifted = contrast(BRIGHT, Color::from_rgb(0.108, 0.112, 0.130));
+        assert!(
+            lifted >= 4.78,
+            "the lifted label on the disabled background is {lifted:.2}:1"
+        );
     }
 }
