@@ -124,18 +124,35 @@ fn focus_border(base: Border, focused: bool) -> Border {
     }
 }
 
-/// The same ring as a container border, for the config-field rows: those are
-/// toggles, chips, sliders and number rows rather than buttons, so the
-/// indicator has to be a box around the whole row instead of a button border.
-pub(super) fn focus_ring(focused: bool) -> impl Fn(&iced::Theme) -> container::Style {
+/// The focus indicator on a config-field row: a fill behind the label and the
+/// control, not a box drawn around them.
+///
+/// A border's edge runs straight through the label text — on a slider row it
+/// strikes the label and clips the number input's own frame, which is what the
+/// owner reported. A fill is painted behind the row's content instead, so
+/// nothing crosses what is being read. `Container`'s layout reads no style at
+/// all, so neither the ring nor the fill moves a pixel of the page when focus
+/// moves.
+///
+/// The fill is *lighter* than the panel, and that has a consequence: no darker
+/// fill can be an indicator here, because the panel is so dark that even pure
+/// black below it is only 1.27:1, while a lighter fill is what a 1216x50 band
+/// needs to read. Lightening it costs `MUTED` its audited contrast — `MUTED`
+/// clears 4.78:1 on a fill at most as light as the panel, i.e. on nothing — so
+/// the focused row's own label lifts to `BRIGHT`, which holds 5.1:1 on this
+/// fill. Unfocused rows keep `MUTED` on the panel.
+pub(super) const FOCUS_FILL: Color = Color::from_rgb(0.33, 0.35, 0.42);
+
+pub(super) fn focus_fill(focused: bool) -> impl Fn(&iced::Theme) -> container::Style {
     move |_t| container::Style {
-        border: focus_border(
-            Border {
-                radius: 6.0.into(),
-                ..Border::default()
-            },
-            focused,
-        ),
+        background: focused.then(|| FOCUS_FILL.into()),
+        // The corner radius the ring had, so the focused row keeps its shape.
+        // A border with no width and no colour draws nothing; iced clips the
+        // fill to its radius.
+        border: Border {
+            radius: 6.0.into(),
+            ..Border::default()
+        },
         ..container::Style::default()
     }
 }
@@ -191,5 +208,70 @@ pub(super) fn primary_style(
             focused,
         ),
         ..button::Style::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WCAG 2.x relative luminance of a colour.
+    fn luminance(c: Color) -> f32 {
+        let channel = |v: f32| {
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)
+    }
+
+    /// WCAG 2.x contrast ratio between two colours, order-independent.
+    fn contrast(a: Color, b: Color) -> f32 {
+        let (hi, lo) = {
+            let (x, y) = (luminance(a), luminance(b));
+            if x > y { (x, y) } else { (y, x) }
+        };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// The focused row fills behind its own content, so the label has to stay
+    /// readable on the fill. The audit bar is 4.78:1, the value the audit
+    /// measured `MUTED` at on the content background. `BRIGHT` is what the
+    /// focused row's label lifts to (`tip_label`), so that pairing is the one
+    /// that has to clear the bar on the fill.
+    #[test]
+    fn the_focus_fill_keeps_the_audited_label_contrast() {
+        let bright = contrast(BRIGHT, FOCUS_FILL);
+        assert!(
+            bright >= 4.78,
+            "BRIGHT on the focus fill is {bright:.2}:1, under the audited 4.78:1"
+        );
+    }
+
+    /// A focused row is a fill and nothing else: a stroke around the row is
+    /// what crossed the label text, so the border has to stay widthless and
+    /// colourless, and an unfocused row has to paint no background at all.
+    #[test]
+    fn a_focused_row_is_a_fill_and_not_a_stroke() {
+        let focused = focus_fill(true)(&theme());
+        let unfocused = focus_fill(false)(&theme());
+
+        assert!(
+            focused.background.is_some(),
+            "the focused row paints no fill, so nothing marks it"
+        );
+        assert!(
+            unfocused.background.is_none(),
+            "an unfocused row paints a fill it did not before"
+        );
+        for (row, style) in [("focused", &focused), ("unfocused", &unfocused)] {
+            assert_eq!(style.border.width, 0.0, "the {row} row draws a stroke");
+            assert_eq!(
+                style.border.color.a, 0.0,
+                "the {row} row's stroke has colour"
+            );
+        }
     }
 }

@@ -40,7 +40,7 @@ use super::theme::ACCENT;
 use super::theme::BRIGHT;
 use super::theme::FIELD_BG;
 use super::theme::MUTED;
-use super::theme::focus_ring;
+use super::theme::focus_fill;
 use super::theme::plain_style;
 use super::theme::scrollbar_style;
 
@@ -760,14 +760,15 @@ fn section_anchor(section: Section) -> Element<'static, Message> {
 }
 
 fn field_row<'a>(gui: &'a Gui, field: &Field) -> Element<'a, Message> {
-    // The row is the focus target: a box around label + control, because only
+    // The row is the focus target: a fill behind label + control, because only
     // this one place renders every field row.
     let focused = field
         .key
         .is_some_and(|key| gui.focus == Some(FocusTarget::Field(key)));
-    let mut row = container(column![tip_label(field.label), (field.render)(gui)].spacing(4))
-        .width(Length::Fill)
-        .style(focus_ring(focused));
+    let mut row =
+        container(column![tip_label(field.label, focused), (field.render)(gui)].spacing(4))
+            .width(Length::Fill)
+            .style(focus_fill(focused));
     if let Some(key) = field.key {
         row = row.id(iced::widget::Id::new(key.name()));
     }
@@ -775,9 +776,15 @@ fn field_row<'a>(gui: &'a Gui, field: &Field) -> Element<'a, Message> {
 }
 
 /// Field label with a hover tooltip.
-fn tip_label(label: &str) -> Element<'static, Message> {
+///
+/// The label lifts to `BRIGHT` on a focused row: that row is filled, and
+/// `MUTED` cannot hold the audited contrast against a fill light enough to
+/// read as an indicator (see `theme::FOCUS_FILL`).
+fn tip_label(label: &str, focused: bool) -> Element<'static, Message> {
     tooltip(
-        text(format!("{label}:")).size(12).color(MUTED),
+        text(format!("{label}:"))
+            .size(12)
+            .color(if focused { BRIGHT } else { MUTED }),
         text(label_tip_lookup(label)).size(11).color(BRIGHT),
         tooltip::Position::FollowCursor,
     )

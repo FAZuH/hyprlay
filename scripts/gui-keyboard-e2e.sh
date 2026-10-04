@@ -168,8 +168,32 @@ assert_pixels() {
 	fi
 }
 
+# assert_region_pixels LABEL BEFORE AFTER GEOMETRY same|differs
+# The same check over one rectangle of both shots (ImageMagick geometry), for
+# the claims a whole-window diff cannot make: the window differs either way
+# when focus moves, so only a crop of the part that must NOT have changed can
+# say "the page did not move".
+assert_region_pixels() {
+	local raw n
+	raw=$(compare -metric AE -extract "$4" "$SHOTS/$2.png" "$SHOTS/$3.png" null: 2>&1)
+	n=${raw%% *}
+	case "$n" in
+	'' | *[!0-9.]*) fail "$1: compare failed on $4: $raw"; return ;;
+	esac
+	if [ "$5" = same ]; then
+		[ "$n" = 0 ] && pass "$1: 0 px differ ($4 of $2 == $3)" ||
+			fail "$1: $n px differ ($4 of $2, $3), expected no change"
+	else
+		[ "$n" = 0 ] && fail "$1: 0 px differ ($4 of $2 == $3), expected a change" ||
+			pass "$1: $n px differ ($4 of $2 -> $3)"
+	fi
+}
+
 key() { printf '  key   %-12s sleep %s\n' "$1" "$2"; xdotool key "$1"; sleep "$2"; }
 typ() { printf '  type  %-12s sleep %s\n' "$1" "$2"; xdotool type --delay 60 "$1"; sleep "$2"; }
+# tab N: the same key N times, one step at a time, so a focus reveal per step
+# settles instead of racing the next keystroke.
+tab() { printf '  key   Tab x%-8s sleep 1\n' "$1"; for _ in $(seq "$1"); do xdotool key Tab; sleep 0.2; done; sleep 1; }
 
 printf '\nwindow %s = %s\n\n' "$W" "$(xdotool getwindowname "$W")"
 
@@ -230,6 +254,25 @@ assert_pixels "Escape leaves the search view" typed escape differs
 key ctrl+2 2
 shot ctrl_2
 assert_pixels "Ctrl+2 scrolls to a section" escape ctrl_2 differs
+
+# Focus held on a field row rather than a chrome button: the rows are what the
+# keyboard user spends the run in, and the slider rows carry a track and a
+# number input at once, so they are where an indicator painted over its own
+# content shows. The tab order is Clear-changes, Reset all, Save, the five
+# sidebar buttons, then the field rows in visual order (see `tab_order`), and
+# focus still sits on Reset all here, so `offset x` — the first row with a
+# slider — is Tab 12.
+tab 12
+shot slider_row
+
+# Tab 13 is `offset y`: the next slider row, adjacent to this one and on
+# screen with it, so the reveal leaves the page where it is and everything
+# below the two rows is a fixed yardstick for "focus moved, nothing else did".
+key Tab 1
+shot slider_row_next
+assert_pixels "Tab walks focus to the next slider row" slider_row slider_row_next differs
+assert_region_pixels "focus moves the indicator, not the page" \
+	slider_row slider_row_next 1216x300+176+520 same
 
 # ------------------------------------------------------------------- summary ---
 cat <<SUMMARY
