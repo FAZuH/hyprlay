@@ -16,7 +16,7 @@ binary package.
 |---|---|---|
 | `Cargo.toml` + `src/` | 2 bins + doc-hidden lib | Everything user-facing: the `hyprlay` and `hyprlayd` binaries plus their shared code. The launcher runs its `gui`/`tray` fronts in-process (`hyprlay gui`, `hyprlay tray`) through the composition root in `src/lib.rs`. A bare `cargo install --git <repo>` installs both |
 | `crates/hyprlay-core` | lib | Shared foundation: domain vocabulary (commands, keys, replies), persisted config with its bounds table (single source of truth), framework-free color math, Discord credential storage, compositor/cursor port traits, the `Platform` facade, ctl socket protocol |
-| `scripts/` | examples only | Standalone debug probes (`wsprobe`, `ipcprobe`) for raw Discord traffic; run via `cargo run -p hyprlay-scripts --example <name>` from that directory |
+| `scripts/` | examples only + one shell script | Standalone debug probes (`wsprobe`, `ipcprobe`) for raw Discord traffic; run via `cargo run -p hyprlay-scripts --example <name>` from that directory. `gui-keyboard-e2e.sh` is the keyboard harness for the settings window: it drives the real binary under Xvfb + i3, sends keystrokes and diffs screenshots, so keyboard behaviour is asserted rather than assumed |
 | `vendor/softbuffer/` | patched path dep | crates.io `softbuffer` 0.4.8 with its Wayland shm format fixed to `Argb8888`, so tiny-skia surfaces keep their alpha; see `vendor/softbuffer/PATCH.md` before touching it |
 
 ## Module interfaces
