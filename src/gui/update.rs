@@ -20,6 +20,7 @@ use hyprlay_core::status::StatusFields;
 use iced::Task;
 use iced::keyboard::key;
 use iced::keyboard::{self};
+use iced_runtime::widget::operation;
 
 use super::FocusTarget;
 use super::Gui;
@@ -426,7 +427,7 @@ fn shortcut(gui: &mut Gui, event: keyboard::Event) -> Task<Message> {
         "s" => update(gui, Message::Save),
         "r" if modifiers.shift() => update(gui, Message::ResetAll),
         "r" => update(gui, Message::ResetSection(gui.section)),
-        "f" => iced_runtime::widget::operation::focus(widget_id()),
+        "f" => operation::focus(widget_id()),
         _ => match ch.parse::<usize>() {
             // Ctrl+1..5 scroll the one-pager to the section's header.
             Ok(n) if (1..=Section::ALL.len()).contains(&n) => {
@@ -553,14 +554,17 @@ mod tests {
 
 /// The tab order, derived from the visual order at `view.rs`
 /// (`column![header, row![sidebar, content], status_bar]`): header actions,
-/// then the sidebar nav items, then the content fields in the order
+/// then the sidebar nav items, then the content rows in the order
 /// [`fields::FIELDS`] renders them, then the status bar's toggle.
 ///
 /// One place, not one list per control. A new field lands in `FIELDS` and is
 /// reachable without touching this. The order is `FIELDS`, not `Key::ALL`:
 /// the rows are grouped by section while `Key::ALL` is grouped by wire order,
 /// so walking `Key::ALL` puts `monitor` (the last Position row) third and
-/// `rtl` (the third) eighth, and Tab ping-pongs the viewport.
+/// `rtl` (the third) eighth, and Tab ping-pongs the viewport. It is
+/// `rendered_targets`, not `Key::ALL`, so the two credential rows are walked
+/// in their own right — they edit no key, and the walk has to reach them all
+/// the same.
 fn tab_order(gui: &Gui) -> Vec<FocusTarget> {
     let mut out = vec![
         FocusTarget::ClearChanges,
@@ -568,7 +572,7 @@ fn tab_order(gui: &Gui) -> Vec<FocusTarget> {
         FocusTarget::Save,
     ];
     out.extend((0..Section::ALL.len()).map(FocusTarget::Nav));
-    out.extend(fields::rendered_keys(&gui.search).map(FocusTarget::Field));
+    out.extend(fields::rendered_targets(&gui.search));
     out.push(FocusTarget::ToggleDaemon);
     out
 }
@@ -604,23 +608,52 @@ fn move_focus(gui: &mut Gui, backwards: bool) -> Task<Message> {
         }
     };
     gui.focus = next;
-    // Tab walks the field rows down a one-page scroll, so landing on a field
+    // Tab walks the field rows down a one-page scroll, so landing on a row
     // has to bring it into view; a row already on screen leaves the page alone.
     match next {
-        Some(FocusTarget::Field(key)) => {
+        Some(target @ (FocusTarget::Field(_) | FocusTarget::Credential(_))) => {
             // The ring is on that row, so the sidebar names its section and
             // Ctrl+R resets that one. The scroll position cannot say which: a row
             // in the page's last screenful has a reveal target past `max_scroll`,
             // the scrollable clamps it to the end, and that reads as "scrolled to
             // its end" — which names Connection, the one section with no config
             // group, so Ctrl+R would reset nothing.
-            if let Some(section) = fields::section_of(key) {
+            if let Some(section) = fields::section_of(target) {
                 gui.section = section;
             }
-            measure_sections(Some(Jump::Field(key)))
+            // Iced 0.14 still owns typing: a `text_input` is the one widget
+            // that has real keyboard focus, and a credential row is one. So
+            // landing on it hands typing over — the same operation Ctrl+F uses
+            // for the search box — and Tab away hands it back by focusing
+            // nothing, which is what unfocuses the input. Without the second
+            // half, Tab would leave focus off the row and typing would go on
+            // editing the credential, which is the bug this half prevents.
+            let typing = match target {
+                FocusTarget::Credential(credential) => operation::focus(credential.input_id()),
+                _ => release_typing(),
+            };
+            let reveal = fields::row_id(target).map(|id| measure_sections(Some(Jump::Row(id))));
+            match reveal {
+                Some(reveal) => Task::batch([typing, reveal]),
+                None => typing,
+            }
         }
-        _ => Task::none(),
+        // Focus left the rows for chrome, or was dropped entirely. Same
+        // hand-back, so no credential is left holding typing the ring has
+        // moved off; a no-op when nothing was focused, which is every Tab
+        // that never touched a credential.
+        _ => release_typing(),
     }
+}
+
+/// Drop iced's own focus, so typing goes nowhere instead of into whatever text
+/// input the ring has walked away from. `operation::focus` only does this as a
+/// side effect of focusing something else, so a Tab that lands on chrome after
+/// a credential needs it said outright. Iced keeps no public
+/// `operation::unfocus`, but the operation itself is reachable through the
+/// re-exported core.
+fn release_typing() -> Task<Message> {
+    iced_runtime::task::widget(iced_runtime::core::widget::operation::focusable::unfocus())
 }
 
 /// Enter / Space: activate the focused control. A disabled control takes
@@ -638,6 +671,12 @@ fn activate_focus(gui: &mut Gui) -> Task<Message> {
             None => Task::none(),
         },
         FocusTarget::ToggleDaemon => update(gui, Message::ToggleDaemon),
+        // Typing already went into the input: `move_focus` handed iced's focus
+        // to it when the row took focus, so the keystrokes were never ours and
+        // there is nothing for Enter here to do. Committing the pair is the
+        // "apply connection" button's job, deliberately mouse-only like the
+        // per-section resets.
+        FocusTarget::Credential(_) => Task::none(),
         FocusTarget::Field(key) => {
             // A bare Space/Enter on a cycle-able key flips it, which is the
             // same thing the bare `set <key>` form does on the wire: build
@@ -668,6 +707,7 @@ mod focus_tests {
     use iced::Point;
 
     use super::*;
+    use crate::gui::Credential;
     use crate::gui::FocusTarget;
     use crate::gui::daemon::AutoStart;
     use crate::gui::daemon::DaemonState;
@@ -785,7 +825,7 @@ mod focus_tests {
         assert_eq!(g.config.opacity, before);
     }
 
-    /// Tab far enough down to the page's last field row, then run the reveal
+    /// Tab far enough down to the page's last *keyed* row, then run the reveal
     /// that row needs: it sits in the final screenful, so the reveal target is
     /// past the end of the page, which is where a scrollable clamps it. The
     /// sidebar must still name the row's own section — the ring is on it, and
@@ -795,10 +835,14 @@ mod focus_tests {
     #[test]
     fn the_sidebar_names_the_section_of_the_focused_row_at_the_page_end() {
         let mut g = gui();
-        // Three header actions and five sidebar buttons come first, so Tab
-        // once per keyed row after them lands on the last one.
-        let rows = fields::rendered_keys("").count();
-        for _ in 0..(3 + Section::ALL.len() + rows) {
+        // Three header actions and five sidebar buttons come first, so Tab once
+        // per keyed row after them lands on the last one. The credential rows
+        // render after every keyed row, so counting them in here would land on
+        // a credential instead and lose the row this test is about.
+        let keyed = fields::rendered_targets("")
+            .filter(|t| matches!(t, FocusTarget::Field(_)))
+            .count();
+        for _ in 0..(3 + Section::ALL.len() + keyed) {
             let _ = update(
                 &mut g,
                 Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Tab))),
@@ -816,6 +860,128 @@ mod focus_tests {
             g.section,
             Section::Colors,
             "the ring is on a Colors row, so the sidebar has to name Colors"
+        );
+    }
+
+    /// The two credential rows are the last rows the page renders, so from a
+    /// known start they are a known number of Tabs away: three header actions,
+    /// five sidebar items, and one press per row before them. Tabbed *to* them
+    /// in both directions, because Tab reaching a row only in one direction
+    /// means a Shift+Tab user cannot reach it at all.
+    #[test]
+    fn tab_reaches_the_credential_rows_from_the_top_and_from_the_bottom() {
+        let mut g = gui();
+        // Forward from nothing: three header actions, five sidebar items, one
+        // press per keyed row, then the credential.
+        let to_first = 3 + Section::ALL.len() + keyed_rows() + 1;
+        tab_n(&mut g, to_first);
+        assert_eq!(g.focus, Some(FocusTarget::Credential(Credential::ClientId)));
+
+        tab_n(&mut g, 1);
+        assert_eq!(
+            g.focus,
+            Some(FocusTarget::Credential(Credential::ClientSecret))
+        );
+
+        // Shift+Tab back out of the pair lands on the last keyed row, which is
+        // what the pair was appended after: adding credentials renumbered no
+        // Tab above them.
+        shift_tab_n(&mut g, 2);
+        assert_eq!(
+            g.focus,
+            Some(FocusTarget::Field(Key::BoxColor)),
+            "the row before the first credential is still the last keyed row"
+        );
+    }
+
+    /// Both ends of the order wrap onto the credential rows the same way every
+    /// other target does: Shift+Tab off the daemon toggle (the last) reaches
+    /// the last credential by wrapping past the header, and Tab forward off
+    /// the end reaches the first credential. Getting this wrong strands a
+    /// keyboard user on a row they cannot leave in one direction.
+    #[test]
+    fn tab_wraps_onto_and_off_the_credential_rows() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::ToggleDaemon);
+        shift_tab_n(&mut g, 1);
+        assert_eq!(
+            g.focus,
+            Some(FocusTarget::Credential(Credential::ClientSecret)),
+            "Shift+Tab off the last target wraps to the last credential"
+        );
+
+        shift_tab_n(&mut g, 1);
+        assert_eq!(
+            g.focus,
+            Some(FocusTarget::Credential(Credential::ClientId)),
+            "and Shift+Tab again reaches the first credential"
+        );
+
+        // Tab off the last target still wraps to the first, so the pair is
+        // inside the same cycle rather than appended after it.
+        g.focus = Some(FocusTarget::ToggleDaemon);
+        tab_n(&mut g, 1);
+        assert_eq!(g.focus, Some(FocusTarget::ClearChanges));
+        tab_n(&mut g, 3 + Section::ALL.len() + keyed_rows());
+        assert_eq!(
+            g.focus,
+            Some(FocusTarget::Credential(Credential::ClientId)),
+            "Tab forward through the chrome reaches the first credential"
+        );
+        tab_n(&mut g, 1);
+        assert_eq!(
+            g.focus,
+            Some(FocusTarget::Credential(Credential::ClientSecret))
+        );
+        tab_n(&mut g, 1);
+        assert_eq!(
+            g.focus,
+            Some(FocusTarget::ToggleDaemon),
+            "and Tab on leaves the credentials for the toggle, as for every row"
+        );
+    }
+
+    /// Focus on a credential row hands typing to that row's text input, and
+    /// Tab off it hands typing back — iced's focus is what makes typing work at
+    /// all, and it is not the same thing as the ring. Left holding the input,
+    /// a Tab away from a credential would keep sending every later keystroke
+    /// into it, silently rewriting a secret the user is no longer looking at.
+    /// Read off the returned `Task`: the number of operations it runs is the
+    /// only thing a unit test can see, and a credential must run two (focus
+    /// the input, measure the reveal) where a keyed row ran one.
+    #[test]
+    fn focus_hands_typing_to_a_credential_row_and_takes_it_back_on_tab_away() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Credential(Credential::ClientId));
+        let onto = update(&mut g, Message::KeyPressed(no_key(tab_key())));
+        assert_eq!(
+            onto.units(),
+            2,
+            "landing on a credential runs the focus hand-off and the reveal"
+        );
+
+        // And off it again, to a target that is not a credential.
+        let off = update(&mut g, Message::KeyPressed(no_key(tab_key())));
+        assert_eq!(
+            off.units(),
+            1,
+            "Tab off a credential runs the hand-back and nothing else: no row, \
+             so no reveal"
+        );
+    }
+
+    /// Enter on a focused credential does nothing: the keystrokes that built
+    /// the draft were already the input's, and committing the pair is the
+    /// "apply connection" button's job. Pinned because a credential that grew
+    /// an Enter arm would commit a half-typed secret with no confirmation.
+    #[test]
+    fn enter_on_a_credential_row_is_a_noop() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Credential(Credential::ClientId));
+        let _ = update(&mut g, Message::KeyPressed(no_key(enter_key())));
+        assert_eq!(
+            g.auth_client_id, "",
+            "no apply, and no daemon restart: that is the button's job"
         );
     }
 
@@ -995,5 +1161,34 @@ mod focus_tests {
             keyboard::Key::Named(keyboard::key::Named::Tab),
             keyboard::Modifiers::SHIFT,
         )
+    }
+
+    fn tab_key() -> keyboard::Key {
+        keyboard::Key::Named(keyboard::key::Named::Tab)
+    }
+
+    fn enter_key() -> keyboard::Key {
+        keyboard::Key::Named(keyboard::key::Named::Enter)
+    }
+
+    /// The number of keyed rows on the one-pager, which is what the tab
+    /// arithmetic counts through: the credential rows come after all of them,
+    /// so a test that wants a credential counts these.
+    fn keyed_rows() -> usize {
+        fields::rendered_targets("")
+            .filter(|t| matches!(t, FocusTarget::Field(_)))
+            .count()
+    }
+
+    fn tab_n(gui: &mut Gui, times: usize) {
+        for _ in 0..times {
+            let _ = update(gui, Message::KeyPressed(no_key(tab_key())));
+        }
+    }
+
+    fn shift_tab_n(gui: &mut Gui, times: usize) {
+        for _ in 0..times {
+            let _ = update(gui, Message::KeyPressed(shift_tab()));
+        }
     }
 }

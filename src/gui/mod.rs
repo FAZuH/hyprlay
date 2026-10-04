@@ -147,6 +147,9 @@ enum Message {
 /// rather than on widget identity means the field renderers need no new
 /// per-widget registration, and tab order derives from the field registry
 /// rather than being hand-maintained.
+///
+/// `Credential` is the one thing `Field(Key)` cannot hold, and it is a variant
+/// rather than a widened `Field` for that reason — see [`Credential`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusTarget {
     ClearChanges,
@@ -157,6 +160,25 @@ pub enum FocusTarget {
     ToggleDaemon,
     /// One config key: a slider, a toggle, or an integer input.
     Field(Key),
+    /// One credential row: a text input that edits auth.json, not a config key.
+    Credential(Credential),
+}
+
+/// The two Connection rows: the client id and the client secret.
+///
+/// They are keyboard-reachable because they are ordinary text inputs that any
+/// keyboard user has to be able to fill in, and they are *not* `FocusTarget::Field`
+/// because they edit no config key — the pair lives in auth.json, outside the
+/// ctl protocol. Giving them a `Key` would be the smaller diff and the wrong
+/// one: every reset path builds its commands from `Key` (`revert_commands`
+/// walks `Key::ALL`, and section/global reset speak `Command::Reset*`), so a
+/// credential key would put a secret on a wire that exists to carry settings.
+/// Their own enum keeps `Field(Key)` meaning exactly what it means today and
+/// keeps them out of every reset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Credential {
+    ClientId,
+    ClientSecret,
 }
 
 pub struct Gui {

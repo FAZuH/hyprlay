@@ -69,6 +69,18 @@ done
 rm -rf "$SHOTS"
 mkdir -p "$SHOTS" "$ROOT/home" "$ROOT/run"
 
+# A credential pair, preloaded into the sandboxed config dir so the two
+# Connection rows render text and are worth photographing. The two halves hold
+# the SAME string on purpose: it makes "the secret is masked" a falsifiable
+# pixel claim, because a revealed secret would render identically to the client
+# id directly above it, and an identical pair is exactly what that check
+# detects. Nothing is written back — Apply is the only path to auth.json, and
+# it is never pressed here.
+PROBE_ID='mmhke01hyprlayprobe'
+mkdir -p "$ROOT/home/.config/hyprlay"
+printf '{"client_id":"%s","client_secret":"%s"}' "$PROBE_ID" "$PROBE_ID" >"$ROOT/home/.config/hyprlay/auth.json"
+chmod 600 "$ROOT/home/.config/hyprlay/auth.json"
+
 # Kill only what this script started (pidfile). Never `pkill Xvfb`: this box
 # may host another session's display.
 cleanup() {
@@ -100,8 +112,12 @@ sleep 1
 # redirected to gui.log so a dlopen panic is a log line to grep, not noise.
 launch() {
 	{
-		env DISPLAY="$DISP" HOME="$ROOT/home" XDG_RUNTIME_DIR="$ROOT/run" \
-			LD_LIBRARY_PATH="$LIBPATH" "$BIN" gui >"$ROOT/gui.log" 2>&1 &
+		# XDG_CONFIG_HOME is pointed into $ROOT as well as HOME: `dirs::config_dir`
+		# honours it first, so a stray value in the caller's environment would
+		# otherwise read the real config and ignore the preloaded auth.json.
+		env DISPLAY="$DISP" HOME="$ROOT/home" XDG_CONFIG_HOME="$ROOT/home/.config" \
+			XDG_RUNTIME_DIR="$ROOT/run" LD_LIBRARY_PATH="$LIBPATH" \
+			"$BIN" gui >"$ROOT/gui.log" 2>&1 &
 		echo $! >>"$ROOT/pids"
 		for _ in $(seq 40); do
 			W=$(xdotool search --class hyprlay 2>/dev/null | head -1)
@@ -168,6 +184,17 @@ assert_pixels() {
 	fi
 }
 
+# crop SHOT NAME GEOMETRY -- write one rectangle of a shot as its own image,
+# so two regions of the SAME window can be compared against each other.
+# `assert_region_pixels` applies one geometry to both of its shots, which can
+# only say "this rectangle changed between two states"; a claim like "these two
+# rectangles of one state differ from each other" needs both on disk first.
+crop() {
+	convert "$SHOTS/$1.png" -crop "$3" +repage "$SHOTS/crop-$2.png" 2>>"$ROOT/import.log" ||
+		die "crop '$2' ($3 of $1) failed: $(tail -2 "$ROOT/import.log")"
+	printf '  crop  %-22s %s\n' "$2" "$3"
+}
+
 # assert_region_pixels LABEL BEFORE AFTER GEOMETRY same|differs
 # The same check over one rectangle of both shots (ImageMagick geometry), for
 # the claims a whole-window diff cannot make: the window differs either way
@@ -203,6 +230,10 @@ FIELD_BG='#292b33'
 DISABLED_BG='#1c1d21'
 ACCENT='#5865f2'
 ACCENT_LIT='#5966e6'
+# The content background a row with no fill of its own shows through: the theme
+# background 0.118/0.121/0.133 -> #1e1f22. Needed by the credential probes,
+# which assert on a row that is *not* focused.
+PANEL_BG='#1e1f22'
 # The old focus ring (`theme::FOCUS_RING`, since deleted). No pixel of the
 # window may still be this colour, which is what says the ring is gone rather
 # than merely covered over.
@@ -261,6 +292,13 @@ assert_label_lift() {
 		fail "$1: label peak $before -> $after, expected dim then lifted"
 	fi
 }
+
+# The window's position on the root, read once: a screenshot is
+# window-relative, and a click is not, so every coordinate below has to have
+# the window's own offset added or the click lands somewhere else entirely.
+eval "$(xdotool getwindowgeometry --shell "$W")"
+WIN_X=${X:-0}
+WIN_Y=${Y:-0}
 
 key() { printf '  key   %-12s sleep %s\n' "$1" "$2"; xdotool key "$1"; sleep "$2"; }
 typ() { printf '  type  %-12s sleep %s\n' "$1" "$2"; xdotool type --delay 60 "$1"; sleep "$2"; }
@@ -393,6 +431,191 @@ shot slider_row_next
 assert_pixels "Tab walks focus to the next slider row" slider_row slider_row_next differs
 assert_region_pixels "focus moves the indicator, not the page" \
 	slider_row slider_row_next 1216x300+176+520 same
+
+# ------------------------------------------------------- the credential rows ---
+# The Connection section is last on the page, so reaching it by Tab means
+# walking every row above it. The count comes from the tab order itself rather
+# than from counting on screen: three header actions, five sidebar items, then
+# one press per row in `FIELDS` order. `offset y` — where focus sits now, one
+# press past the "Tab 12" above — is the 7th row of 30, so 23 keyed rows remain
+# before the credentials:
+#   Tab 24 -> client id, Tab 25 -> client secret, Tab 26 -> the daemon toggle.
+# `tab` presses one at a time so each row's reveal settles before the next
+# keystroke; a burst would race the reveals and Tab into nothing.
+tab 24
+shot cred_id
+tab 1
+shot cred_secret
+
+# The indicator lands ON the credential row, and it is the same one every other
+# row takes. The probe sits in the row body's right-hand margin at x=1300,
+# clear of the input's own frame and of every glyph, where an unfocused row
+# shows the panel background through. Re-derive after any layout change with:
+#   convert cred_id.png -crop 1396x120+0+690 -depth 8 txt: | grep -o '#.......'
+# The two rows are at y 696..715 (client id) and y 749..768 (client secret);
+# their text bands are y 721..736 and y 774..789.
+assert_pixel "the focused client id takes the focus fill" cred_id 1300 705 "$FOCUS_FILL"
+assert_pixel "the unfocused client secret below it does not" cred_id 1300 758 "$PANEL_BG"
+assert_pixel "the focused client secret takes the focus fill" cred_secret 1300 758 "$FOCUS_FILL"
+assert_pixel "the unfocused client id above it does not" cred_secret 1300 705 "$PANEL_BG"
+
+# Focus moved between the two credentials and moved nothing else: the strip
+# below them, which no reveal can shift from here (Connection is the last
+# section and the page is already at its end), is byte-identical.
+assert_region_pixels "Tab moves between the two credential rows" \
+	cred_id cred_secret 1216x120+176+690 differs
+assert_region_pixels "Tab moved the indicator, not the page" \
+	cred_id cred_secret 1216x90+176+790 same
+
+# Focus does not reveal the secret. Both halves of the pair were preloaded with
+# the SAME string (see the top of this script), so an unmasked secret would
+# render the client's own glyphs at the client's own position. Cropping each
+# row's own text band and comparing the two is therefore a falsifiable claim
+# about the mask: drop `.secure(true)` and the two crops match.
+crop cred_id client_id_text 400x16+182+721
+crop cred_secret client_secret_text 400x16+182+774
+assert_pixels "the secret is masked, not rendered in the clear" \
+	crop-client_id_text crop-client_secret_text differs
+
+# And it stays masked once focused and once edited, which is the part a focus
+# change could plausibly break. The bullet run is a fixed 35 non-background
+# pixels while the id's 19 characters are 187; a revealed secret would land on
+# the id's number, since the two hold the same string.
+masked_glyphs() {
+	convert "$SHOTS/$1" -crop "$2" +repage -format "%c" histogram:info:- |
+		grep -Evi "#1E1F22|#54596B" | grep -c '#'
+}
+ID_GLYPHS=$(masked_glyphs cred_id.png 400x16+182+721)
+SECRET_GLYPHS=$(masked_glyphs cred_secret.png 400x16+182+774)
+if [ "$SECRET_GLYPHS" -lt "$ID_GLYPHS" ]; then
+	pass "the secret stays masked while focused: $SECRET_GLYPHS glyph px vs the id's $ID_GLYPHS"
+else
+	fail "the secret is drawn in the clear while focused: $SECRET_GLYPHS glyph px vs the id's $ID_GLYPHS"
+fi
+
+# Shift+Tab walks back out of the pair onto the same row state Tab reached, so
+# the credentials are reachable in BOTH directions. A credential Tab reaches
+# and Shift+Tab does not strands a keyboard-only user on the row.
+key shift+Tab 1
+shot cred_shift_back
+assert_pixels "Shift+Tab leaves the credential rows" cred_secret cred_shift_back differs
+assert_region_pixels "Shift+Tab lands on the same state Tab reached" \
+	cred_id cred_shift_back 1216x120+176+690 same
+
+# Wrapping. The credentials are the last two rows of the order, so Tab forward
+# off them lands on the daemon toggle (both rows unfocused behind it), and
+# Shift+Tab from that toggle wraps back onto the last credential. Focus is on
+# the client id here, so the way off the pair is two presses.
+tab 2
+shot cred_toggle
+assert_pixel "Tab leaves the credentials for the daemon toggle" cred_toggle 1300 758 "$PANEL_BG"
+assert_pixel "and the id row is unfocused behind it" cred_toggle 1300 705 "$PANEL_BG"
+key shift+Tab 1
+shot cred_wrapped
+assert_pixel "Shift+Tab off the last target wraps onto the secret" cred_wrapped 1300 758 "$FOCUS_FILL"
+
+# Typing into a focused credential, and Tab taking typing away again. Both
+# fields are preloaded, so typing appends a character and the focused row's
+# text band must gain glyphs; Tab out then typing must add none. That second
+# half is the one that matters: a credential still holding iced's focus after
+# the ring moved off would keep swallowing every later keystroke into a row
+# the user is no longer looking at.
+#
+# Each comparison is within one row's own text band, so the focus fill moving
+# between shots cannot satisfy any of them:
+#   y 718..733 is the client id's band, y 771..786 the secret's.
+key shift+Tab 1
+shot cred_typing_on
+typ z 1
+shot cred_typing_typed
+assert_region_pixels "typing into a focused credential edits the row" \
+	cred_typing_on cred_typing_typed 400x16+182+718 differs
+
+# Tab out of the pair entirely — two presses, since the secret is between the
+# id and the toggle — and typing again must add nothing to either field.
+key Tab 1
+key Tab 1
+shot cred_typing_off
+typ z 1
+shot cred_typing_off_typed
+assert_region_pixels "typing after Tab adds nothing to the client id" \
+	cred_typing_off cred_typing_off_typed 400x16+182+718 same
+assert_region_pixels "typing after Tab adds nothing to the secret" \
+	cred_typing_off cred_typing_off_typed 400x16+182+771 same
+
+# The caret is the direct evidence that focus really left the input rather
+# than the ring merely moving: a focused text input draws one, an unfocused one
+# never does, whatever the blink phase. So the id band must lose the caret it
+# had while focused — a 1x2 stroke at the end of the text, not another glyph.
+assert_region_pixels "Tab took the caret off the client id" \
+	cred_typing_typed cred_typing_off 400x16+182+718 differs
+
+# The mouse still reaches the secret field, and clicking it does not unmask it.
+# A click inside the input focuses it the same way Tab does, so the same
+# glyph-count claim applies afterwards. (700, 778) in window coordinates lands
+# in the middle of the secret input's text band.
+printf '  click %-12s sleep 1\n' "secret field"
+xdotool mousemove $((700 + WIN_X)) $((778 + WIN_Y)) click 1
+sleep 1
+shot cred_mouse
+typ q 1
+shot cred_mouse_typed
+assert_region_pixels "the mouse still edits the secret field" \
+	cred_mouse cred_mouse_typed 400x16+182+771 differs
+MOUSE_SECRET_GLYPHS=$(masked_glyphs cred_mouse_typed.png 400x16+182+771)
+if [ "$MOUSE_SECRET_GLYPHS" -lt "$ID_GLYPHS" ]; then
+	pass "clicking the secret does not reveal it: $MOUSE_SECRET_GLYPHS glyph px vs the id's $ID_GLYPHS"
+else
+	fail "clicking the secret revealed it: $MOUSE_SECRET_GLYPHS glyph px vs the id's $ID_GLYPHS"
+fi
+
+# Tab must bring a credential row back into view even when nothing else on the
+# page has. Tabbing to a row always passes a keyed row first, which reveals on
+# its own account, so the credential reveal has nothing to do on that path —
+# until the page moves under the ring. The page is at its end here (Connection
+# is the last section), so scrolling UP walks the credential rows off the top
+# with focus left where it is. Then Shift+Tab back onto the client id: only
+# the reveal can pull it back, and an indicator parked off-screen with the user
+# told nothing is the failure this catches.
+key shift+Tab 1
+shot cred_before_scroll
+xdotool mousemove $((700 + WIN_X)) $((400 + WIN_Y))
+for _ in 1 2 3 4 5 6 7 8 9 10; do xdotool click 4; done
+sleep 1
+shot cred_scrolled_away
+assert_pixels "the wheel scrolls the credential rows off screen" \
+	cred_before_scroll cred_scrolled_away differs
+key shift+Tab 1
+shot cred_revealed
+assert_pixel "Shift+Tab brings the client id back into view" cred_revealed 1300 705 "$FOCUS_FILL"
+assert_pixel "and the secret below it is unfocused" cred_revealed 1300 758 "$PANEL_BG"
+# The reveal parks the page where the reveal asks for, not merely somewhere on
+# screen. Compared against `cred_before_scroll` — the same page before the
+# wheel moved it — everything BELOW the two credential rows is byte-identical,
+# so the rows came back to the same offset on the page. (The rows themselves
+# differ between the two shots: focus was on the secret before the scroll and
+# is on the client id after, which is the fill moving, which is the point.)
+assert_region_pixels "the reveal lands the rows where they were" \
+	cred_before_scroll cred_revealed 1216x30+176+792 same
+
+# Credentials are not config keys, so no reset reaches them: Ctrl+Shift+R is the
+# one reset that could touch Connection at all, and both rows must come through
+# it byte-identical. The daemon is down in this harness, so this proves the GUI
+# had nothing to send that would rewrite them; the wire-level half — that no
+# reset command can carry a credential at all — is pinned by
+# `no_reset_command_carries_a_credential` in src/gui/commands.rs.
+key ctrl+shift+r 2
+shot cred_after_reset
+assert_pixel "reset all leaves the client id focused and intact" \
+	cred_after_reset 1300 705 "$FOCUS_FILL"
+# The secret's bullet run is the content that must survive: a reset that
+# reached a credential would clear the field, and an empty field is a shorter
+# run of bullets. The client id is not compared on the same grounds because the
+# caret sitting in it blinks, which is a pixel or two, not text.
+assert_region_pixels "reset all leaves the secret's value alone" \
+	cred_revealed cred_after_reset 400x16+182+771 same
+assert_region_pixels "and the page where it stood" \
+	cred_revealed cred_after_reset 1216x30+176+792 same
 
 # ------------------------------------------------------------------- summary ---
 cat <<SUMMARY

@@ -30,6 +30,7 @@ use iced::widget::text_input;
 use iced::widget::toggler;
 use iced::widget::tooltip;
 
+use super::Credential;
 use super::FocusTarget;
 use super::Gui;
 use super::Message;
@@ -119,13 +120,38 @@ impl Section {
     }
 }
 
+impl Credential {
+    /// Widget id of the row container. The reveal operation reads a focused
+    /// row's geometry off exactly this, keyed rows and credential rows alike.
+    fn row_id(self) -> &'static str {
+        match self {
+            Self::ClientId => "row-client-id",
+            Self::ClientSecret => "row-client-secret",
+        }
+    }
+
+    /// Widget id of the row's text input: what `operation::focus` hands typing
+    /// to, and what a mouse click lands on. Separate from `row_id` because two
+    /// widgets in one tree cannot share an id.
+    pub(super) fn input_id(self) -> &'static str {
+        match self {
+            Self::ClientId => "input-client-id",
+            Self::ClientSecret => "input-client-secret",
+        }
+    }
+}
+
 pub(super) struct Field {
     pub(super) section: Section,
     pub(super) label: &'static str,
     pub(super) tip: &'static str,
-    /// The config key this row edits, or `None` for a row that edits none
-    /// (the palettes row, the two credential inputs) — the keyboard cannot
-    /// land on those, and the tab order leaves them out.
+    /// The config key this row edits, or `None` for a row that edits none.
+    ///
+    /// `None` splits two ways, and `credential_of` tells them apart: the
+    /// palettes row is mouse-only, while the two credential rows are
+    /// keyboard-reachable under a [`Credential`] of their own — they edit
+    /// auth.json, which is no config key. A `Some` key must always name a
+    /// `Key` a reset could replay, so no credential may ever carry one.
     pub(super) key: Option<Key>,
     pub(super) render: fn(&Gui) -> Element<'_, Message>,
 }
@@ -583,6 +609,9 @@ pub(super) fn f_box_color(gui: &Gui) -> Element<'_, Message> {
 
 pub(super) fn f_auth_client_id(gui: &Gui) -> Element<'_, Message> {
     text_input("", &gui.auth_client_id)
+        // The id `FocusTarget::Credential` hands typing to; without it iced
+        // cannot focus a text input on request (see `move_focus`).
+        .id(Credential::ClientId.input_id())
         .on_input(Message::AuthClientId)
         .size(12)
         .padding([3, 6])
@@ -592,8 +621,11 @@ pub(super) fn f_auth_client_id(gui: &Gui) -> Element<'_, Message> {
 
 pub(super) fn f_auth_client_secret(gui: &Gui) -> Element<'_, Message> {
     text_input("", &gui.auth_client_secret)
+        .id(Credential::ClientSecret.input_id())
         .on_input(Message::AuthClientSecret)
-        // Masked so a screen share or shoulder-surf never exposes it.
+        // Masked so a screen share or shoulder-surf never exposes it. Focus
+        // changes nothing here: the masking is the widget's, not a state the
+        // focus target owns, so landing on the row cannot reveal it.
         .secure(true)
         .size(12)
         .padding([3, 6])
@@ -662,31 +694,70 @@ pub(super) fn search_page(gui: &Gui) -> Element<'_, Message> {
         .into()
 }
 
-/// The keyed rows the current page renders, in render order: every keyed row
-/// when the one-pager is up, only the search hits on the search page. The tab
-/// order walks exactly these, so Tab cannot land on a row that is not in the
-/// tree — and because it is `FIELDS` order, the order *is* the visual order.
+/// The credential rows, in render order, keyed by the label that names them in
+/// [`FIELDS`]. The label is this registry's own row identity — `label_tip_lookup`
+/// already keys on it — so a row is a credential exactly when its label says
+/// so, and the two lists cannot drift without a test failing.
+const CREDENTIAL_ROWS: [(Credential, &str); 2] = [
+    (Credential::ClientId, "client id"),
+    (Credential::ClientSecret, "client secret"),
+];
+
+/// The credential this row is, or `None` for every other row (including the
+/// palettes row, which is keyless *and* mouse-only).
+fn credential_of(field: &Field) -> Option<Credential> {
+    CREDENTIAL_ROWS
+        .iter()
+        .find(|(_, label)| *label == field.label)
+        .map(|(credential, _)| *credential)
+}
+
+/// What keyboard focus holds for this row, or `None` for a row only the mouse
+/// reaches. A keyed row is named by its config `Key` — the identity the rest of
+/// the app reasons in — and a credential row names itself, because it has no key
+/// and must never be given one.
+fn focus_target_of(field: &Field) -> Option<FocusTarget> {
+    match field.key {
+        Some(key) => Some(FocusTarget::Field(key)),
+        None => credential_of(field).map(FocusTarget::Credential),
+    }
+}
+
+/// The widget id a focused row is tagged with, so the reveal operation can
+/// measure it. `None` for chrome: those are not rows and never need a reveal.
+pub(super) fn row_id(target: FocusTarget) -> Option<iced::widget::Id> {
+    match target {
+        FocusTarget::Field(key) => Some(iced::widget::Id::new(key.name())),
+        FocusTarget::Credential(credential) => Some(iced::widget::Id::new(credential.row_id())),
+        _ => None,
+    }
+}
+
+/// The focused rows the current page renders, in render order: every row the
+/// keyboard can land on when the one-pager is up, only the search hits on the
+/// search page. The tab order walks exactly these, so Tab cannot land on a row
+/// that is not in the tree — and because it is `FIELDS` order, the order *is*
+/// the visual order.
 ///
 /// The query is trimmed here because `view` picks the page on
 /// `gui.search.trim()` and `search_page` filters with the trimmed query: a
 /// trailing space must narrow neither the page nor the tab order, or Tab skips
 /// every field row.
-pub(super) fn rendered_keys(query: &str) -> impl Iterator<Item = Key> + '_ {
+pub(super) fn rendered_targets(query: &str) -> impl Iterator<Item = FocusTarget> + '_ {
     let query = query.trim();
     FIELDS
         .iter()
         .filter(move |f| query.is_empty() || search_matches(f, query))
-        .filter_map(|f| f.key)
+        .filter_map(focus_target_of)
 }
 
-/// The section a keyed row is declared under — the sidebar entry that owns
+/// The section a focused row is declared under — the sidebar entry that owns
 /// it, and so the section a keyboard user is in once focus lands on it.
-/// `None` only for a key no field declares, which
-/// `every_config_field_declares_its_key_exactly_once` rules out.
-pub(super) fn section_of(key: Key) -> Option<Section> {
+/// `None` for chrome, and for a target no row declares.
+pub(super) fn section_of(target: FocusTarget) -> Option<Section> {
     FIELDS
         .iter()
-        .find(|f| f.key == Some(key))
+        .find(|f| focus_target_of(f) == Some(target))
         .map(|f| f.section)
 }
 
@@ -761,16 +832,16 @@ fn section_anchor(section: Section) -> Element<'static, Message> {
 
 fn field_row<'a>(gui: &'a Gui, field: &Field) -> Element<'a, Message> {
     // The row is the focus target: a fill behind label + control, because only
-    // this one place renders every field row.
-    let focused = field
-        .key
-        .is_some_and(|key| gui.focus == Some(FocusTarget::Field(key)));
+    // this one place renders every field row. Keyed and credential rows go
+    // through the same two lines, so one indicator covers both and neither can
+    // drift from the other.
+    let focused = focus_target_of(field).is_some_and(|t| gui.focus == Some(t));
     let mut row =
         container(column![tip_label(field.label, focused), (field.render)(gui)].spacing(4))
             .width(Length::Fill)
             .style(focus_fill(focused));
-    if let Some(key) = field.key {
-        row = row.id(iced::widget::Id::new(key.name()));
+    if let Some(id) = focus_target_of(field).and_then(row_id) {
+        row = row.id(id);
     }
     row.into()
 }
@@ -943,12 +1014,12 @@ fn preset_button<'a>(cfg: &'a Config, h: H, v: V, label: &'a str) -> Element<'a,
 mod tests {
     use super::*;
 
-    /// The focus ring is drawn by comparing `Gui::focus` against
-    /// `FocusTarget::Field(key)` for the key a row declares, and the tab
-    /// order walks `rendered_keys`, so the keyed rows must be exactly the
-    /// config keys: one row per key, no key claimed twice, no key missing.
-    /// Compared as sets on purpose — the *order* is what the visual order
-    /// means, and it is the next test's job to pin.
+    /// The focus ring is drawn by comparing `Gui::focus` against the target
+    /// `focus_target_of` gives a row, and the tab order walks
+    /// `rendered_targets`, so the rows that claim a config `Key` must be
+    /// exactly the config keys: one row per key, no key claimed twice, no key
+    /// missing. Compared as sets on purpose — the *order* is what the visual
+    /// order means, and it is the next test's job to pin.
     #[test]
     fn every_config_field_declares_its_key_exactly_once() {
         let mut claimed: Vec<&str> = FIELDS.iter().filter_map(|f| f.key).map(Key::name).collect();
@@ -961,14 +1032,41 @@ mod tests {
         );
     }
 
-    /// `rendered_keys` is the tab order, and the tab order has to be the visual
-    /// order: a keyless row drops out of it and the keyed rows keep the
+    /// The two credential rows are the ones that must *not* claim a key, and
+    /// the pinned set above is what makes that true: `Key::ALL` has no member
+    /// for a client id, so a credential row given one would either duplicate a
+    /// real key or fail that test outright. Asserted from the row side so a
+    /// change to `Credential` alone cannot quietly introduce one.
+    #[test]
+    fn the_credential_rows_claim_no_config_key() {
+        let credentials: Vec<&Field> = FIELDS
+            .iter()
+            .filter(|f| credential_of(f).is_some())
+            .collect();
+        assert_eq!(
+            credentials.len(),
+            CREDENTIAL_ROWS.len(),
+            "every credential must name exactly one row, and no other row may claim one"
+        );
+        for field in credentials {
+            assert_eq!(field.key, None, "{} claims a config key", field.label);
+            assert_eq!(field.section, Section::Connection);
+        }
+    }
+
+    /// `rendered_targets` is the tab order, and the tab order has to be the
+    /// visual order: a mouse-only row drops out of it and the rest keep the
     /// sequence the page renders them in, which is `Section::ALL` order, not
     /// `FIELDS` order. One Layout row declared between two Position rows would
     /// tab fourth and paint ninth, so the grouping is the assertion.
     #[test]
     fn the_tab_order_follows_the_visual_order() {
-        let order: Vec<&str> = rendered_keys("").map(Key::name).collect();
+        let order: Vec<&str> = rendered_targets("")
+            .filter_map(|t| match t {
+                FocusTarget::Field(key) => Some(key.name()),
+                _ => None,
+            })
+            .collect();
         let rows: Vec<&str> = Section::ALL
             .iter()
             .flat_map(|section| FIELDS.iter().filter(move |f| f.section == *section))
@@ -992,22 +1090,112 @@ mod tests {
         );
     }
 
+    /// Adding the credential rows must not renumber the thirty keyed rows:
+    /// they are rendered *after* every keyed row (Connection is the last
+    /// section), so each keyed row keeps the Tab number it had when the
+    /// credentials were mouse-only. Pinned as an exact sequence rather than a
+    /// count, because a count would still pass if the rows swapped places.
+    #[test]
+    fn the_credential_rows_land_after_every_keyed_row() {
+        let order: Vec<FocusTarget> = rendered_targets("").collect();
+        let keyed: Vec<FocusTarget> = order
+            .iter()
+            .copied()
+            .filter(|t| matches!(t, FocusTarget::Field(_)))
+            .collect();
+        assert_eq!(
+            keyed.len(),
+            Key::ALL.len(),
+            "the keyed rows are still every config key, in visual order"
+        );
+        let first_credential = order
+            .iter()
+            .position(|t| matches!(t, FocusTarget::Credential(_)))
+            .expect("the credential rows are in the tab order");
+        assert_eq!(
+            first_credential,
+            keyed.len(),
+            "a credential before the last keyed row would shift every Tab after it"
+        );
+        assert_eq!(
+            order[first_credential..],
+            [
+                FocusTarget::Credential(Credential::ClientId),
+                FocusTarget::Credential(Credential::ClientSecret),
+            ],
+            "the credentials tab in the order the page renders them"
+        );
+    }
+
     /// `view` picks the page on `gui.search.trim()` and `search_page` filters
-    /// with the trimmed query, so `rendered_keys` has to trim too. It does not:
-    /// a trailing space matches nothing at all and a lone space matches
-    /// nothing, so either one leaves Tab with no field target at all.
+    /// with the trimmed query, so `rendered_targets` has to trim too. It does
+    /// not: a trailing space matches nothing at all and a lone space matches
+    /// nothing, so either one leaves Tab with no row target at all.
     #[test]
     fn the_tab_order_reads_the_trimmed_query_the_page_does() {
         assert_eq!(
-            rendered_keys("colors ").collect::<Vec<_>>(),
-            [Key::SpeakingColor, Key::TextColor, Key::BoxColor],
+            rendered_targets("colors ").collect::<Vec<_>>(),
+            [
+                FocusTarget::Field(Key::SpeakingColor),
+                FocusTarget::Field(Key::TextColor),
+                FocusTarget::Field(Key::BoxColor),
+            ],
             "a trailing space narrows nothing, so it must not narrow the tab order"
         );
         assert_eq!(
-            rendered_keys(" ").count(),
-            FIELDS.iter().filter(|f| f.key.is_some()).count(),
+            rendered_targets(" ").count(),
+            FIELDS.iter().filter_map(focus_target_of).count(),
             "a whitespace-only query is an empty one, and the page then renders \
              the one-pager"
+        );
+    }
+
+    /// A search that names a credential row must reach it: the search page
+    /// renders the same rows through the same `field_row`, so its focus target
+    /// and its reveal id are the same two values.
+    #[test]
+    fn a_search_naming_a_credential_reaches_that_row() {
+        let hits: Vec<FocusTarget> = rendered_targets("client secret").collect();
+        assert!(
+            hits.contains(&FocusTarget::Credential(Credential::ClientSecret)),
+            "the secret row is a rendered hit, so Tab must be able to land on it"
+        );
+    }
+
+    /// Every focusable row needs a reveal id, and a mouse-only row needs none:
+    /// the id is what `scroll.rs` measures, so a missing one means Tab rings a
+    /// row the page never scrolls into view.
+    #[test]
+    fn every_focusable_row_has_a_reveal_id_and_mouse_only_rows_have_none() {
+        for field in FIELDS {
+            let id = focus_target_of(field).and_then(row_id);
+            if focus_target_of(field).is_some() {
+                assert!(
+                    id.is_some(),
+                    "{} is focusable but carries no id",
+                    field.label
+                );
+            } else {
+                assert_eq!(
+                    id, None,
+                    "{} is mouse-only yet carries a reveal id",
+                    field.label
+                );
+            }
+        }
+        // The two ids a credential needs are different, or the row container
+        // and its input would collide in the widget tree.
+        assert_ne!(
+            Credential::ClientId.row_id(),
+            Credential::ClientId.input_id()
+        );
+        assert_ne!(
+            Credential::ClientId.row_id(),
+            Credential::ClientSecret.row_id()
+        );
+        assert_ne!(
+            Credential::ClientId.input_id(),
+            Credential::ClientSecret.input_id()
         );
     }
 

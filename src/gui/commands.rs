@@ -98,6 +98,9 @@ pub(super) fn command_for(message: Message) -> Command {
 
 #[cfg(test)]
 mod tests {
+    use hyprlay_core::config::HorizontalAnchor as H;
+    use hyprlay_core::config::VerticalAnchor as V;
+
     use super::*;
 
     #[test]
@@ -190,6 +193,67 @@ mod tests {
         }
     }
 
+    /// No reset command may ever name a credential. The credential rows are
+    /// keyboard-reachable now, so a credential can be focused, edited and
+    /// looked at — but every reset path builds its commands out of `Key`
+    /// (`revert_commands` walks `Key::ALL`, and section/global reset speak
+    /// `Command::Reset*`), and a credential has no `Key` to be named by. That
+    /// is the property, and it is checked here against the wire forms rather
+    /// than against the registry: putting a secret in a reset command is the
+    /// failure, and the wire is where it would leave the process.
+    ///
+    /// Both halves matter. The values check is the one that would catch a leak
+    /// today; the names check is the one that keeps the door shut, since a
+    /// future `Key::ClientSecret` would be the first step toward a reset that
+    /// could name one.
+    #[test]
+    fn no_reset_command_carries_a_credential() {
+        // Stand-in values, not the real pair: this checks that the *plumbing*
+        // has no path from a credential draft to a command, and that path
+        // would carry whatever value is loaded.
+        let (probe_id, probe_secret) = ("credential-probe-id", "credential-probe-secret");
+
+        // Every command a reset can produce: the per-key revert diff with the
+        // two configs differing in several sections, plus both reset verbs.
+        let saved = Config {
+            horizontal: H::Right,
+            vertical: V::Bottom,
+            rtl: true,
+            offset_x: 40,
+            offset_y: -12,
+            opacity: 70,
+            width: 500,
+            scale: 120,
+            speaking_color: "#00ff00".parse().unwrap(),
+            ..Config::default()
+        };
+        let mut wire: Vec<String> = revert_commands(&Config::default(), &saved)
+            .iter()
+            .map(Command::to_string)
+            .collect();
+        wire.push(Command::ResetAll.to_string());
+        for group in hyprlay_core::domain::Group::ALL {
+            wire.push(Command::ResetGroup(group).to_string());
+        }
+        assert!(wire.len() > 5, "the check proved nothing over a short list");
+
+        for line in &wire {
+            assert!(
+                !line.contains(probe_id) && !line.contains(probe_secret),
+                "a reset command carries a credential: {line}"
+            );
+        }
+        // And the vocabulary that builds them: no config key is named after a
+        // credential, so none of these lines ever could have carried one.
+        for key in Key::ALL {
+            let name = key.name();
+            assert!(
+                !name.contains("client") && !name.contains("secret"),
+                "config key {name} is named after a credential"
+            );
+        }
+    }
+
     #[test]
     fn revert_commands_do_nothing_when_configs_match() {
         let cfg = Config::default();
@@ -198,8 +262,6 @@ mod tests {
 
     #[test]
     fn revert_commands_cover_every_differing_key_once() {
-        use hyprlay_core::config::HorizontalAnchor as H;
-        use hyprlay_core::config::VerticalAnchor as V;
         // show_own_user defaults to true, so flipping it off is a real diff.
         let saved = Config {
             horizontal: H::Right,
