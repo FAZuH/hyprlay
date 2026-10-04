@@ -1,11 +1,13 @@
 //! Linux/Wayland surface host: the existing `iced_layershell` shell. Carved
-//! out of `daemon/mod.rs` into its own arm; behaviour is byte-identical —
-//! same anchor vocabulary, layer, `StartMode`, keyboard-interactivity and
-//! transparent-events settings. This module only runs on Linux, where
-//! iced_layershell (and iced's `wayland` feature) are available.
+//! out of `daemon/mod.rs` into its own arm, and unchanged apart from the
+//! surface height: same anchor vocabulary, layer, `StartMode`,
+//! keyboard-interactivity and transparent-events settings. This module only
+//! runs on Linux, where iced_layershell (and iced's `wayland` feature) are
+//! available.
 
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use hyprlay_core::config::Config;
 use iced::Color;
@@ -31,6 +33,8 @@ use crate::daemon::overlay::state;
 use crate::daemon::overlay::state::Overlay;
 use crate::daemon::overlay::view;
 use crate::daemon::resolve_command;
+use crate::daemon::surface_host::boot_size;
+use crate::daemon::surface_host::take_boot;
 
 #[to_layer_message]
 #[derive(Debug)]
@@ -76,7 +80,12 @@ pub(crate) fn run(cfg: Config, auth: Option<OwnAppAuth>) -> ExitCode {
     // No text input in the overlay; skip the always-on clipboard worker.
     iced_layershell::disable_clipboard();
 
-    let size = (cfg.width, 64);
+    // One overlay for both the surface size and the boot closure, so the
+    // height the surface is created at and the height the model reports are
+    // never two different reads of the roster cache.
+    let overlay = Overlay::boot(cfg.clone());
+    let size = boot_size(&overlay);
+    let boot_overlay = Mutex::new(Some(overlay));
     let offset = geometry::offset(&cfg);
     // The one conversion from geometry's own anchor vocabulary to the
     // renderer's type. This is the sanctioned composition point for platform
@@ -95,11 +104,7 @@ pub(crate) fn run(cfg: Config, auth: Option<OwnAppAuth>) -> ExitCode {
     let rpc_auth = DiscordRpc(auth.map(Arc::new));
 
     let result = application(
-        move || {
-            let mut overlay = Overlay::new(cfg.clone());
-            overlay.hydrate_roster();
-            (overlay, Task::none())
-        },
+        move || (take_boot(&boot_overlay, &cfg), Task::none()),
         "hyprlay",
         update,
         view::view::<Message>,

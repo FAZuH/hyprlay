@@ -91,8 +91,10 @@ fn last_signature() -> &'static Mutex<String> {
     LAST.get_or_init(|| Mutex::new(String::new()))
 }
 
-pub fn load_roster() -> Option<Roster> {
-    let text = match std::fs::read_to_string(cache_dir().join("roster.json")) {
+/// The last-known roster from the cache root injected by the caller — the
+/// read side of [`Roster::write_to`] on an injected root.
+pub fn load_roster_from(base: &std::path::Path) -> Option<Roster> {
+    let text = match std::fs::read_to_string(base.join("roster.json")) {
         Ok(t) => t,
         // First run after install has no cache yet — that is normal.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
