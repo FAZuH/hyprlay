@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Overlay
+
+- Fixed roster rows clipping after a daemon restart
+
 ### Platforms
 
 - Reduced release download size by about half
