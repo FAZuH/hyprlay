@@ -311,6 +311,22 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
         // wording in the status bar, and the hand-back is made explicit rather
         // than left to iced having done it to produce this message.
         Message::EscapeCaptured => {
+            let number_row =
+                matches!(gui.focus, Some(FocusTarget::Field(key)) if holds_typed_text(gui, key));
+            // The search box is the app's only other capturing input, so an
+            // Escape the shortcut dispatcher never saw, on a row that holds no
+            // typed text, is the search box dropping its own focus. Escape means
+            // the same thing there as on the unfocused path: clear the search and
+            // put the one-pager back where it was. Without this arm, Ctrl+F
+            // followed by Escape left the page filtered with the caret gone and
+            // the key apparently doing nothing.
+            if !number_row && !gui.search.trim().is_empty() {
+                gui.search.clear();
+                if gui.focus.is_some_and(|t| !tab_order(gui).contains(&t)) {
+                    gui.focus = None;
+                }
+                return restore_scroll(gui);
+            }
             let commit = match gui.focus {
                 Some(FocusTarget::Field(key)) if holds_typed_text(gui, key) => {
                     commit_num(gui, key).unwrap_or_else(Task::none)
@@ -1530,6 +1546,41 @@ mod focus_tests {
             },
         );
         assert_eq!(g.section, Section::Opacity);
+    }
+
+    /// Escape the search box swallowed clears the search, which is what Escape
+    /// already means when the box does not hold the keyboard. The box is the app's
+    /// only other capturing input, so a captured Escape on a row holding no typed
+    /// text is the search — no extra state needed to tell the two apart.
+    #[test]
+    fn escape_from_the_search_box_clears_the_search_too() {
+        let mut g = gui();
+        g.search = "avatar".to_string();
+        // Focus on a chrome control, not a number row with a draft.
+        g.focus = Some(FocusTarget::ClearChanges);
+
+        let _ = update(&mut g, Message::EscapeCaptured);
+        assert!(
+            g.search.is_empty(),
+            "Escape clears the search whether or not the box held the keyboard"
+        );
+    }
+
+    /// The two capturing inputs stay distinguishable: a number row holding a draft
+    /// keeps it, and the same key does not clear a search on its behalf.
+    #[test]
+    fn a_number_draft_is_not_mistaken_for_the_search_box() {
+        let mut g = gui();
+        g.search = "avatar".to_string();
+        g.focus = Some(FocusTarget::Field(Key::Spacing));
+        let _ = update(&mut g, Message::NumText(Key::Spacing, "99".into()));
+
+        let _ = update(&mut g, Message::EscapeCaptured);
+        assert_eq!(g.search, "avatar", "the search is not what Escape cleared");
+        assert!(
+            g.num_drafts.contains_key(&Key::Spacing),
+            "the draft is what Escape kept"
+        );
     }
 
     /// Section header offsets of a one-pager tall enough to scroll, in

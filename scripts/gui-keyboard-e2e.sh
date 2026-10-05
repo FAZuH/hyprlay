@@ -234,6 +234,12 @@ ACCENT_LIT='#5966e6'
 # background 0.118/0.121/0.133 -> #1e1f22. Needed by the credential probes,
 # which assert on a row that is *not* focused.
 PANEL_BG='#1e1f22'
+# Windows the two search assertions below compare. `SEARCH_BOX` is the header
+# field, where the typed text sat. `PAGE_BODY` is a patch of the content pane
+# below the rows the search filtered away, so a cleared search puts real rows
+# back there. Re-derive if the header or the one-pager's first rows move.
+SEARCH_BOX='180x20+180+13'
+PAGE_BODY='400x120+190+150'
 # The old focus ring (`theme::FOCUS_RING`, since deleted). No pixel of the
 # window may still be this colour, which is what says the ring is gone rather
 # than merely covered over.
@@ -427,9 +433,20 @@ typ anchor 1
 shot typed
 assert_pixels "typing filters the page" ctrl_f typed differs
 
+# Escape with the search box holding the keyboard. This used to assert only that
+# "something differs", which the caret disappearing satisfied on its own — so it
+# passed while the search stayed applied. It now names what has to be true: the
+# page is back to every field, which is the row the search filtered away, and the
+# search box itself is empty again.
 key Escape 1
 shot escape
-assert_pixels "Escape leaves the search view" typed escape differs
+assert_region_pixels "Escape put back the rows the search had filtered away" \
+	typed escape "$PAGE_BODY" differs
+assert_pixels "Escape leaves the one-pager" typed escape differs
+assert_region_pixels "and the search box is empty again, not just unringed" \
+	ctrl_f escape "$SEARCH_BOX" same
+assert_region_pixels "Escape restored the page exactly as it was before searching" \
+	plain_f escape "$PAGE_BODY" same
 
 key ctrl+2 2
 shot ctrl_2
