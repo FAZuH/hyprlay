@@ -785,6 +785,10 @@ assert_pixel "with auto still selected" opt_anchor_first 180 185 "$ACCENT"
 SLIDER='1089x16+176+395'
 INPUT_BOX='74x22+1273+395'
 INPUT_DIGITS='13x9+1280+401'
+# Wider than INPUT_DIGITS, so an appended or cleared digit is inside the crop.
+# It includes the caret, so only compare two shots that both have one — use
+# INPUT_DIGITS for "unchanged" claims, which must not notice the caret blinking.
+INPUT_FIELD='44x14+1276+398'
 LEFT_END='30x16+176+395'
 RIGHT_END='30x16+1236+395'
 YARDSTICK='30x20+1244+610'
@@ -932,15 +936,57 @@ assert_region_pixels "and applied nothing on top of what the row had" \
 	num_nine num_refused "$SLIDER" same
 assert_pixel "with the input still holding the keyboard" num_refused 1274 400 "$INPUT_FOCUSED"
 
-# Escape hands the keyboard back to the row and drops what was typed: the input
-# shows the row's own value again — byte for byte the rendering it had when that
-# value was the one on the row — and nothing was applied.
+# Escape hands the keyboard back to the row and *keeps* what was typed, the same
+# as Tab and Enter: nothing in a number row discards typed text. The draft here
+# is `99`, which `spacing` (0..=24) refuses, so it cannot become the row's value
+# and the slider must not move — but it is still the user's half-typed number,
+# and it stays in the box for them to finish.
 key Escape 1
 shot num_escape
 assert_pixel "Escape took the keyboard off the input" num_escape 1274 400 "$INPUT_IDLE"
-assert_region_pixels "Escape dropped the refused text for the row's own value" \
-	num_nine num_escape "$INPUT_DIGITS" same
-assert_region_pixels "and applied nothing" num_nine num_escape "$SLIDER" same
+assert_region_pixels "Escape kept the refused draft rather than discarding it" \
+	num_refused_text num_escape "$INPUT_DIGITS" same
+assert_region_pixels "and a value the bounds refuse still cannot land" \
+	num_nine num_escape "$SLIDER" same
+
+# Escape kept a draft the bounds refuse, so the row is now holding unapplicable
+# text: Tab means "commit", and committing this refuses, so Tab stays put and says
+# why. That is the escape hatch working — Escape got you out of the input, and the
+# row asks to be fixed rather than silently losing what you typed.
+key Tab 1
+shot num_tab_refused
+assert_pixel "Tab stays on the row while its text is still not a value" \
+	num_tab_refused 900 390 "$FOCUS_FILL"
+
+# Fixing the text needs the keyboard back in the input first: Escape parked the
+# draft but handed typing to the row, and the box still renders the draft, so Enter
+# resumes exactly where the user left off rather than starting over.
+key Enter 1
+shot num_resumed
+assert_pixel "Enter took the keyboard back into the input" \
+	num_resumed 1274 400 "$INPUT_FOCUSED"
+assert_region_pixels "with the parked draft still in the box" \
+	num_escape num_resumed "$INPUT_DIGITS" same
+
+# Typing appends, so typing `8` over `99` gives `998` — still out of bounds, and
+# still refused. That is the input behaving like an input, so fixing a mistyped
+# number means clearing it first, exactly as it would with the mouse.
+typ 8 1
+shot num_appended
+assert_region_pixels "an appended digit makes the text worse, not better" \
+	num_resumed num_appended "$INPUT_FIELD" differs
+assert_region_pixels "so the refused value still cannot land" \
+	num_nine num_appended "$SLIDER" same
+
+# Four backspaces clears `998` and one more does nothing, which is cheaper than
+# counting the digits: an over-long backspace run is not an error in a text field.
+for _ in 1 2 3 4; do key BackSpace 0.4; done
+typ 8 1
+shot num_fixed
+assert_region_pixels "clearing and retyping applies the number" \
+	num_appended num_fixed "$INPUT_FIELD" differs
+assert_region_pixels "and the handle moves to match" \
+	num_nine num_fixed "$SLIDER" differs
 
 # Tab out of a row whose text has all been committed is an ordinary move: the
 # ring leaves this row for the next one, and the keyboard goes with it.

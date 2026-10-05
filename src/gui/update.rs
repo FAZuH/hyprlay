@@ -302,14 +302,22 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
         // text `NumText` refused, so this is where that refusal is either stood
         // down or answered with the daemon's own wording.
         Message::NumSubmit(key) => commit_num(gui, key).unwrap_or_else(Task::none),
-        // Escape that the input swallowed: it dropped its own focus, and the
-        // row's half-typed value goes with it — the row shows its real value
-        // again and nothing is applied.
+        // Escape that the input swallowed: it dropped its own focus, and typing
+        // goes back to the row. The draft *keeps*, the same as Tab and Enter —
+        // discarding typed text would lose a half-typed number for no gain, and a
+        // value the bounds refuse cannot land anyway, since `apply_num` writes
+        // through `apply_config`, which rejects it. So: a legal value applies as
+        // it commits, a refused one leaves the draft and the domain's own
+        // wording in the status bar, and the hand-back is made explicit rather
+        // than left to iced having done it to produce this message.
         Message::EscapeCaptured => {
-            if let Some(FocusTarget::Field(key)) = gui.focus {
-                gui.num_drafts.remove(&key);
-            }
-            release_typing()
+            let commit = match gui.focus {
+                Some(FocusTarget::Field(key)) if holds_typed_text(gui, key) => {
+                    commit_num(gui, key).unwrap_or_else(Task::none)
+                }
+                _ => Task::none(),
+            };
+            commit.chain(release_typing())
         }
         Message::NumDrag(key, v) => {
             let (min, max) = key.num_bounds().expect("slider keys are numeric");
@@ -1174,29 +1182,81 @@ mod focus_tests {
         );
     }
 
-    /// Escape that the input swallowed drops the row's half-typed value and
-    /// hands typing back, applying nothing — the row shows the value it
-    /// had before the typing began. Iced's own Escape arm does the unfocusing
-    /// and tells nobody, which is why the app is told separately.
+    /// Escape that the input swallowed hands typing back to the row and keeps
+    /// what was typed, the same as Tab and Enter: discarding it would lose a
+    /// half-typed number for no gain, since a value the bounds refuse cannot
+    /// land anyway. Iced's own Escape arm does the unfocusing and tells nobody,
+    /// which is why the app is told separately.
     #[test]
-    fn escape_drops_the_typed_value_without_applying_it() {
+    fn escape_keeps_the_typed_value_and_hands_typing_back() {
         let mut g = gui();
         g.focus = Some(FocusTarget::Field(Key::Spacing));
         let _ = update(&mut g, Message::NumText(Key::Spacing, "99".into()));
         assert_eq!(g.config.spacing, 4);
 
+        // 99 is out of bounds for `spacing` (0..=24), so the commit is refused:
+        // the domain's own wording becomes the reply and the row keeps its value.
         let task = update(&mut g, Message::EscapeCaptured);
-        assert_eq!(g.config.spacing, 4, "nothing was applied");
+        assert_eq!(g.config.spacing, 4, "a refused value cannot land");
         assert_eq!(g.focus, Some(FocusTarget::Field(Key::Spacing)));
         assert!(
-            g.num_drafts.is_empty(),
-            "the row goes back to showing its own value"
+            g.num_drafts.contains_key(&Key::Spacing),
+            "the draft stays for the user to finish, rather than vanishing"
         );
         assert_eq!(task.units(), 1, "and typing is handed back to the row");
 
-        // Which is what lets the next Tab move on rather than commit again.
+        // Tab is the other way out and it does not move: the draft is still
+        // unapplicable, so Tab commits again and refuses again, which is how the
+        // row asks to be fixed. Escape is what leaves.
         let _ = update(&mut g, Message::KeyPressed(no_key(tab_key())));
-        assert_eq!(field(&g), Key::MaxName, "the row is an ordinary stop again");
+        assert_eq!(
+            field(&g),
+            Key::Spacing,
+            "Tab stays while the text is still not a value"
+        );
+    }
+
+    /// Escape keeps a draft, so the row is left holding one. Coming back to it
+    /// must not refuse forever: fixing the text applies it, and the next Tab is a
+    /// plain move. The draft is escapable, not a dead end.
+    #[test]
+    fn a_kept_draft_is_fixable_rather_than_a_dead_end() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Spacing));
+        let _ = update(&mut g, Message::NumText(Key::Spacing, "99".into()));
+        let _ = update(&mut g, Message::EscapeCaptured);
+        assert!(g.num_drafts.contains_key(&Key::Spacing));
+
+        // The row is still refused while the text is still wrong, and still says
+        // why, so the user knows what to do about it.
+        let refused = update(&mut g, Message::KeyPressed(no_key(tab_key())));
+        assert_eq!(field(&g), Key::Spacing);
+        assert_eq!(refused.units(), 0);
+        assert_eq!(g.last_reply.text(), "error: spacing <0-24>");
+
+        // Fix it, and the row is an ordinary stop again.
+        let _ = update(&mut g, Message::NumText(Key::Spacing, "8".into()));
+        assert_eq!(g.config.spacing, 8);
+        let _ = update(&mut g, Message::KeyPressed(no_key(tab_key())));
+        assert_eq!(field(&g), Key::MaxName, "Tab moved to the next row");
+        assert!(g.num_drafts.is_empty(), "and the draft is gone with it");
+    }
+
+    /// The same exit with a value the bounds *do* allow applies it, so Escape
+    /// is not a way to strand a good number either.
+    #[test]
+    fn escape_applies_a_typed_value_the_bounds_allow() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Spacing));
+        let _ = update(&mut g, Message::NumText(Key::Spacing, "9".into()));
+        assert_eq!(g.config.spacing, 9, "a legal value applies as it is typed");
+
+        let _ = update(&mut g, Message::EscapeCaptured);
+        assert_eq!(g.config.spacing, 9);
+        assert!(
+            g.num_drafts.is_empty(),
+            "the draft committed, so none is left"
+        );
     }
 
     /// Tab far enough down to the page's last *keyed* row, then run the reveal
