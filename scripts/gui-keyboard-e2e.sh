@@ -280,6 +280,16 @@ label_peak() {
 		-format "%[fx:int(255*maxima)]" info: 2>>"$ROOT/import.log"
 }
 
+# ink SHOT GEOMETRY -- the bright pixels in a rectangle, as a count. Where
+# assert_pixel names one colour at one point, this counts what was drawn inside
+# a shape: the glyphs of a number, the caret next to them, the border of a
+# focused input. Two states of the same control compared with it say whether
+# something appeared there, which a window-wide diff cannot.
+ink() {
+	convert "$SHOTS/$1.png" -crop "$2" +repage -colorspace Gray \
+		-threshold 55% -format "%[fx:round(mean*w*h)]" info: 2>>"$ROOT/import.log"
+}
+
 # assert_label_lift LABEL FOCUSED_SHOT UNFOCUSED_SHOT GEOMETRY
 # (three arguments after the label: the geometry is $4, not $5)
 assert_label_lift() {
@@ -739,6 +749,206 @@ assert_pixels "and Left on it again stops at the boundary" \
 	opt_anchor_back opt_anchor_first same
 assert_pixel "with auto still selected" opt_anchor_first 180 185 "$ACCENT"
 
+# ----------------------------------------------------------- the number rows ---
+# The rows that hold a number instead of a fixed set of choices. The arrow keys
+# step the value, the input shows it, and Enter moves the keyboard into that
+# input so a value can be typed instead.
+#
+# One row carries all of it: `spacing`, which is 0..=24 with 4 on a clean
+# config. It is reached from the anchor row above, and the keyed rows render in
+# `FIELDS` order (see `tab_order`), so `spacing` is the 20th keyed row and
+# `anchor` the 2nd: 18 Tabs. Re-derive everything below after any layout
+# change, with the focused row parked by the reveal:
+#   magick num_4.png -crop 1210x1+176+397 -depth 8 txt:-   # one row's runs
+#   magick num_4.png -crop 80x24+1270+394 -filter point -resize 400% png:-
+# In that state the row's band is y 375..416: the slider's track runs x 176..1265
+# with its handle on it, the input box is x 1273..1345 (border at x 1274) and the
+# reset button x 1354..1379. One step of `spacing` is 1/24 of the track, about
+# 45 px, so the handle is unmistakable at either end of a press: it sits at
+# x 362 for the value 4, 407 for 5, 317 for 3, 182 for 0, 1258 for 24 and 1079
+# for a typed 20. The probe line is y 397, one pixel ABOVE the 5 px track, which
+# is why the handle is the only accent there — everywhere else on that line is
+# the row's own focus fill (#54596b).
+#
+# Two rectangles carry the claims, and each comparison below is over one of them
+# rather than over the window: the track alone (`SLIDER`) for where the handle
+# is, and the digits alone (`INPUT_DIGITS`) for what the input says. Both are
+# cropped tight on purpose. The row band that holds them both also holds the
+# input's border, and that border changes for two reasons that have nothing to
+# do with the number: its rounded antialiasing wobbles by one in a channel
+# whenever the row re-renders, and a focused input paints a different border
+# colour than an idle one. An "these are identical" claim over the box would
+# then be a claim about the focus state wearing a number's clothes, so no such
+# comparison is made over it. The strip below the row — the `overall` row's
+# handle at (1258, 619) — is the yardstick for "the value moved, the page did
+# not".
+SLIDER='1089x16+176+395'
+INPUT_BOX='74x22+1273+395'
+INPUT_DIGITS='13x9+1280+401'
+LEFT_END='30x16+176+395'
+RIGHT_END='30x16+1236+395'
+YARDSTICK='30x20+1244+610'
+# The two colours this section reads beyond the shared palette: the handle on
+# the focused row, and the border a text input wears while it holds typing.
+HANDLE='#6b75ff'
+INPUT_FOCUSED='#6770f2'
+INPUT_IDLE='#40424a'
+
+tab 18
+shot num_4
+
+# The handle is where the value 4 of 24 puts it. The number beside it is not
+# probed here — it is what the steps below are read off, one press at a time.
+assert_pixel "the row's slider handle sits where the value 4 of 24 puts it" \
+	num_4 362 397 "$HANDLE"
+
+# Right steps up by one. The handle leaves the spot it was on and arrives one
+# step along, the input's own box changes (the number), and the row below does
+# not move at all — a whole-window diff cannot say which of the three happened.
+key Right 1
+shot num_5
+assert_pixel "Right moved the handle one step along the track" num_5 407 397 "$HANDLE"
+assert_pixel "and off the spot it was at" num_5 362 397 "$FOCUS_FILL"
+assert_region_pixels "the number in the row's input changed" num_4 num_5 "$INPUT_BOX" differs
+assert_region_pixels "the row below did not move" num_4 num_5 "$YARDSTICK" same
+
+# Left walks it back, and the row comes back to exactly where it stood: the
+# handle and the digits are both byte-identical to the state before the step,
+# which is what says it returned to the value 4 and not to some other one.
+key Left 1
+shot num_4_back
+assert_region_pixels "Left put the handle back where it was" num_4 num_4_back "$SLIDER" same
+assert_region_pixels "and the number with it" num_4 num_4_back "$INPUT_DIGITS" same
+
+# Up and Down are the same step: Down is the direction Left went, and Up the one
+# Right went, so both return the row to its own pixels.
+key Down 1
+shot num_3
+assert_pixel "Down moved the handle the other way" num_3 317 397 "$HANDLE"
+assert_pixel "and left the spot Right had reached" num_3 407 397 "$FOCUS_FILL"
+key Up 1
+shot num_up_back
+assert_region_pixels "Up put the handle back where Right did" num_4 num_up_back "$SLIDER" same
+assert_region_pixels "and the number with it" num_4 num_up_back "$INPUT_DIGITS" same
+
+# The bounds. `spacing` is 0..=24, so four steps reach the minimum and the handle
+# has to reach the left end of the track with them. The step that would leave the
+# range sends nothing at all: the window is byte-identical, so no pixel of it —
+# handle, number or anything else — moved.
+walk Left 4
+shot num_0
+assert_pixel "four steps down put the handle at the left end of the track" \
+	num_0 182 397 "$HANDLE"
+assert_region_pixels "and the number with it" num_4 num_0 "$INPUT_BOX" differs
+key Left 1
+shot num_0_stop
+assert_pixels "a step off the minimum changes nothing at all" num_0 num_0_stop same
+
+# The other end: the steps up reach the maximum, where the handle is at the right
+# end of the track, and a further step stops the same way.
+walk Right 30
+shot num_24
+assert_pixel "the steps up put the handle at the right end of the track" \
+	num_24 1258 397 "$HANDLE"
+assert_region_pixels "and the number with it" num_0 num_24 "$INPUT_BOX" differs
+key Right 1
+shot num_24_stop
+assert_pixels "a step off the maximum changes nothing at all" num_24 num_24_stop same
+
+# Enter hands the keyboard to the row's own input, which is the one widget here
+# that can take real focus — the input paints a different border while it holds
+# typing, and that border is the evidence. Its pixels come from an effect, so the
+# key needs its usual settle before anything is typed into it.
+key Enter 1
+shot num_enter
+assert_pixel "Enter gave the row's input the keyboard" num_enter 1274 400 "$INPUT_FOCUSED"
+assert_pixel "and an unfocused input does not wear that border" num_4 1274 400 "$INPUT_IDLE"
+# The caret is drawn inside a focused input and never inside an unfocused one, so
+# the bright pixels of the box grow by the caret alone: the border pixels are
+# counted in both states and the digits have not moved.
+CARET_BEFORE=$(ink num_4 "$INPUT_BOX")
+CARET_AFTER=$(ink num_enter "$INPUT_BOX")
+if [ "$CARET_AFTER" -gt "$CARET_BEFORE" ]; then
+	pass "Enter draws a caret in the input: $CARET_BEFORE -> $CARET_AFTER bright px"
+else
+	fail "Enter left the input without a caret: $CARET_BEFORE -> $CARET_AFTER bright px"
+fi
+
+# What is typed applies, and the row shows it: select the value away and type
+# another one in its place. "20" is inside 0..=24, so the handle has to leave the
+# right end of the track and arrive where 20 of 24 puts it, and the input has to
+# show two digits where it showed one.
+key ctrl+a 1
+typ 20 1
+shot num_typed
+assert_pixel "the typed value put the handle at 20 of 24" num_typed 1079 397 "$HANDLE"
+assert_region_pixels "and it left the end of the track the 24 was on" \
+	num_24 num_typed "$RIGHT_END" differs
+assert_region_pixels "and the input now shows the typed number" \
+	num_24 num_typed "$INPUT_BOX" differs
+
+# The commit itself: the value was applied as it was typed, so what Enter has
+# left to do is hand the keyboard back to the row — which is what lets the next
+# Enter go into the input again.
+key Enter 1
+shot num_committed
+assert_pixel "Enter handed the keyboard back to the row" num_committed 1274 400 "$INPUT_IDLE"
+assert_region_pixels "and left the committed number on the row" \
+	num_typed num_committed "$INPUT_DIGITS" same
+assert_region_pixels "with the handle where it was applied" \
+	num_typed num_committed "$SLIDER" same
+
+# A value the bounds refuse is kept as typed and applied to nothing. The row
+# applies every value the bounds allow the moment it is typed, so the 99 below
+# is typed over a committed 9 and stops being a value on its second digit — and
+# the 9 is committed first, so the rendering the row has to put back after Escape
+# exists on disk as an idle input rather than as an assumption.
+key Enter 1
+key ctrl+a 1
+typ 9 1
+key Enter 1
+shot num_nine
+assert_pixel "the 9 committed and the keyboard went back to the row" num_nine 1274 400 "$INPUT_IDLE"
+assert_region_pixels "and the row shows the 9 it committed" num_typed num_nine "$INPUT_DIGITS" differs
+
+key Enter 1
+key ctrl+a 1
+typ 99 1
+shot num_refused_text
+assert_pixel "the refused text sits in the input, which still holds the keyboard" \
+	num_refused_text 1274 400 "$INPUT_FOCUSED"
+assert_region_pixels "and it is a digit wider than the value it was typed over" \
+	num_nine num_refused_text "$INPUT_DIGITS" differs
+assert_region_pixels "while the value it refused moved nothing" \
+	num_nine num_refused_text "$SLIDER" same
+
+# Enter on that refuses it: the text stays, the caret stays, and the value is
+# exactly what it was before the refusal.
+key Enter 1
+shot num_refused
+assert_region_pixels "Enter refused it and kept the text" \
+	num_refused_text num_refused "$INPUT_DIGITS" same
+assert_region_pixels "and applied nothing on top of what the row had" \
+	num_nine num_refused "$SLIDER" same
+assert_pixel "with the input still holding the keyboard" num_refused 1274 400 "$INPUT_FOCUSED"
+
+# Escape hands the keyboard back to the row and drops what was typed: the input
+# shows the row's own value again — byte for byte the rendering it had when that
+# value was the one on the row — and nothing was applied.
+key Escape 1
+shot num_escape
+assert_pixel "Escape took the keyboard off the input" num_escape 1274 400 "$INPUT_IDLE"
+assert_region_pixels "Escape dropped the refused text for the row's own value" \
+	num_nine num_escape "$INPUT_DIGITS" same
+assert_region_pixels "and applied nothing" num_nine num_escape "$SLIDER" same
+
+# Tab out of a row whose text has all been committed is an ordinary move: the
+# ring leaves this row for the next one, and the keyboard goes with it.
+key Tab 1
+shot num_tab
+assert_pixel "Tab took the ring off the number row" num_tab 900 390 "$PANEL_BG"
+assert_pixel "and put it on the next row" num_tab 900 443 "$FOCUS_FILL"
+
 # ------------------------------------------------------------------- summary ---
 cat <<SUMMARY
 
@@ -747,19 +957,35 @@ cat <<SUMMARY
   Not exercised by this harness:
     - No daemon runs, so only the GUI's own rendering is compared. That a
       keystroke reached the daemon (Save, Reset, Ctrl+R) is unproven here —
-      and that includes the option step's own command: what the arrow keys
-      send is asserted at the Command seam instead, by
-      an_option_step_sends_the_neighbouring_choice and
-      an_option_step_at_either_end_sends_nothing in src/gui/commands.rs.
+      and that includes every step's own command: what the arrow keys send is
+      asserted at the Command seam instead, by
+      an_option_step_sends_the_neighbouring_choice,
+      an_option_step_at_either_end_sends_nothing,
+      a_number_step_sends_the_neighbouring_value,
+      a_number_step_stays_inside_the_shared_bounds and
+      a_held_number_step_comes_to_rest_and_stops_there in src/gui/commands.rs.
+    - The status-bar refusal. A refused value answers with the daemon's own
+      wording ("error: spacing <0-24>"), but the 2 s status probe overwrites the
+      status line with its own answer before a screenshot can be certain of
+      catching it, so the refusal's text is asserted by
+      a_refused_commit_answers_the_error_and_keeps_the_caret in
+      src/gui/update.rs and not here. What the harness does check is the rest of
+      it: the value stands and the caret stays.
     - The overlay daemon is layer-shell only (ADR-004), so it cannot run on
       X11 at all and this harness never sees a surface.
     - Modifier delivery on a Wayland seat: the gap this harness exists for.
-    - Space. Enter presses the same step the arrows do (see activate_focus in
-      src/gui/update.rs), so nothing here presses Space itself.
+    - Space. Enter steps the option selects the same step the arrows do (see
+      activate_focus in src/gui/update.rs), and on a number row it is the way
+      into the input, so nothing here presses Space itself.
     - The roster-order and monitor chip rows. They are the same code path as
       the two rows above; the roster-order row is 14 Tabs further down the
       page and the monitor row has only one chip here, because this seat
       reports no outputs.
+    - Every number row but the spacing row. It stands for all of them: they share
+      one row renderer, one step and one bounds table, so what it shows is what
+      the offsets, the widths and the sizes do. The two rows named "offset
+      slider minimum" and "offset slider maximum" render no slider at all, so
+      there is no handle on those two rows to watch.
     - A pixel diff says "something changed", never "the right thing changed":
       an assertion that reads the drawn colour (assert_pixel, assert_label_lift)
       is the only kind that can.

@@ -298,6 +298,19 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
                 Task::none()
             }
         },
+        // Enter inside the input: commit what is typed. A draft only ever holds
+        // text `NumText` refused, so this is where that refusal is either stood
+        // down or answered with the daemon's own wording.
+        Message::NumSubmit(key) => commit_num(gui, key).unwrap_or_else(Task::none),
+        // Escape that the input swallowed: it dropped its own focus, and the
+        // row's half-typed value goes with it — the row shows its real value
+        // again and nothing is applied.
+        Message::EscapeCaptured => {
+            if let Some(FocusTarget::Field(key)) = gui.focus {
+                gui.num_drafts.remove(&key);
+            }
+            release_typing()
+        }
         Message::NumDrag(key, v) => {
             let (min, max) = key.num_bounds().expect("slider keys are numeric");
             apply_num(gui, key, (v as i64).clamp(min, max))
@@ -403,7 +416,7 @@ fn shortcut(gui: &mut Gui, event: keyboard::Event) -> Task<Message> {
     // keyboard-only user has; see FocusTarget for why the focus concept lives
     // in this app rather than in the framework.
     if matches!(key, keyboard::Key::Named(key::Named::Tab)) {
-        return move_focus(gui, modifiers.shift());
+        return tab_out(gui, modifiers.shift());
     }
     if matches!(
         key,
@@ -419,14 +432,20 @@ fn shortcut(gui: &mut Gui, event: keyboard::Event) -> Task<Message> {
             // its pre-search offset.
             return restore_scroll(gui);
         }
-        // Left and Right step a focused option select, and they are free to:
-        // iced spends an arrow on the text input that holds real focus, so
-        // reaching here means no input owns typing and the focused row is
-        // the only thing an arrow could mean. A row that is not an option
-        // select has no step, and the keystroke does nothing.
+        // An arrow steps the focused row, and arrows are free to: iced spends one on
+        // the text input that holds real focus, so reaching here means no input
+        // owns typing and the focused row is the only thing an arrow could
+        // mean. (Iced's slider takes Up and Down of its own, but only while the
+        // cursor is over it — a mouse user, not a keyboard one.) Right and Up
+        // step forward, Left and Down back, and which step that is belongs to
+        // the row: see `step_row`.
         return match &key {
-            keyboard::Key::Named(key::Named::ArrowLeft) => step_option(gui, false),
-            keyboard::Key::Named(key::Named::ArrowRight) => step_option(gui, true),
+            keyboard::Key::Named(key::Named::ArrowRight | key::Named::ArrowUp) => {
+                step_row(gui, true)
+            }
+            keyboard::Key::Named(key::Named::ArrowLeft | key::Named::ArrowDown) => {
+                step_row(gui, false)
+            }
             _ => Task::none(),
         };
     }
@@ -670,42 +689,108 @@ fn activate_focus(gui: &mut Gui) -> Task<Message> {
             {
                 return update(gui, Message::SetFlag(key, !current));
             }
+            // A number row moves the keyboard into its input: the row's value
+            // has arrows, and Enter is how a value gets typed instead. This is
+            // the same hand-off `move_focus` makes for a credential row and the
+            // same operation Ctrl+F uses for the search box, because it is the
+            // one thing that makes typing go to a chosen widget at all.
+            if key.num_bounds().is_some() {
+                return operation::focus(fields::num_input_id(key));
+            }
             // Any other row that offers a fixed set of choices is an option
             // select, and Enter activates it by stepping forward — the same
-            // step Left and Right take. What is left rings but stays inert:
-            // in iced 0.14.2 `slider.rs` takes arrows only while the cursor is
-            // over it and nothing walks a focus chain, so the number rows and
-            // the colour editors have no keyboard path yet. Handing focus to
-            // iced's widgets is the fix for those, not this pass.
-            step_option(gui, true)
+            // step the arrows take. What is left rings but stays inert: the
+            // colour editors edit no number and offer no choices, and nothing
+            // walks a focus chain for iced's widgets to be handed. Enter into
+            // them is the next pass.
+            step_row(gui, true)
         }
     }
 }
 
-/// One step along the focused option select: to the next choice (`forward`)
-/// or the previous one, and the command for it goes to the daemon exactly as
-/// a click on that chip's button would.
+/// One arrow press on the focused row. The row's own kind decides what an arrow
+/// means on it, and the two kinds cannot overlap: a row that holds a number
+/// offers no choices, and a row that offers choices holds no number (see
+/// `commands::step_command`, which is where each row's step is derived). So
+/// one key has exactly one owner per row, and neither path has to know the
+/// other exists.
 ///
-/// Focus does not move. The row keeps the ring the whole way, because the
-/// ring is on the row, not on a chip within it.
-///
-/// Stops at both ends: the selection does not wrap, so a step past either end
-/// sends nothing and leaves the value where it is.
-fn step_option(gui: &mut Gui, forward: bool) -> Task<Message> {
+/// Focus does not move: the row keeps the ring the whole way, because the ring
+/// is on the row and not on the control inside it.
+fn step_row(gui: &mut Gui, forward: bool) -> Task<Message> {
     let Some(FocusTarget::Field(key)) = gui.focus else {
         return Task::none();
     };
     let Some(Command::Set(_, value)) = step_command(gui, key, forward) else {
         return Task::none();
     };
-    // `set monitor` is answered by the daemon shell rather than by config
-    // application, and it is the one option row whose local mirror its own
-    // message has to write. Every other row rides the generic apply path its
-    // chip click takes.
-    if key == Key::Monitor {
-        return update(gui, Message::SwitchMonitor(fields::monitor_name(&value)));
+    match value {
+        // `set monitor` is answered by the daemon shell rather than by config
+        // application, and it is the one option row whose local mirror its own
+        // message has to write.
+        Value::Target(_) => update(gui, Message::SwitchMonitor(fields::monitor_name(&value))),
+        // A number applies through the shared numeric path, which also drops
+        // the row's draft: an arrow over a row whose input still holds refused
+        // text leaves the input showing the value the arrow just set.
+        Value::Num(next) => apply_num(gui, key, next),
+        // Every other choice row rides the generic apply path its chip click
+        // takes.
+        _ => update(gui, Message::SetOption(key, value)),
     }
-    update(gui, Message::SetOption(key, value))
+}
+
+/// Tab / Shift+Tab: move the ring along the tab order — except out of a number
+/// row that holds typed text, which swallows the Tab and commits that text
+/// instead, because committing is what Tab means in the middle of a typed
+/// value. A commit the bounds refuse keeps the caret in the input, so it keeps
+/// the ring too; a row with nothing pending moves as every other target does.
+fn tab_out(gui: &mut Gui, backwards: bool) -> Task<Message> {
+    match gui.focus {
+        Some(FocusTarget::Field(key)) if holds_typed_text(gui, key) => {
+            commit_num(gui, key).unwrap_or_else(Task::none)
+        }
+        _ => move_focus(gui, backwards),
+    }
+}
+
+/// Whether a number row holds text the input refused. `Message::NumText`
+/// applies every value the bounds allow the moment it is typed, so a draft can
+/// only ever be text that was *not* applied — which makes this the same thing
+/// as "the keyboard is typing into this row", the one question Tab has to ask
+/// before it can mean "commit".
+fn holds_typed_text(gui: &Gui, key: Key) -> bool {
+    key.num_bounds().is_some() && gui.num_drafts.contains_key(&key)
+}
+
+/// Commit what is typed in a number row: apply it when it is a value the bounds
+/// allow, and hand typing back to the row either way, because the ring never
+/// left it.
+///
+/// `None` is a refusal: the daemon's own parse error becomes the reply, the
+/// row keeps the value it had, and the caret stays in the input for the user to
+/// fix. No draft means nothing is pending — this is Enter on an untouched row —
+/// so the only work left is the hand-back.
+fn commit_num(gui: &mut Gui, key: Key) -> Option<Task<Message>> {
+    let Some(raw) = gui.num_drafts.get(&key).cloned() else {
+        return Some(release_typing());
+    };
+    match raw
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .filter(|v| num_in_bounds(key, *v))
+    {
+        Some(value) => Some(apply_num(gui, key, value)),
+        None => {
+            // The domain's own wording for this refusal, read off the same
+            // parser the daemon uses, rather than a second message invented here.
+            gui.last_reply = Reply::Error(
+                key.parse_value(None)
+                    .expect_err("a numeric key needs a value"),
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -792,22 +877,39 @@ mod focus_tests {
         assert_eq!(g.config.rtl, !before);
     }
 
-    /// Enter on a key with no cycle-able form does nothing, and nothing else
-    /// picks it up either: in iced 0.14.2 `slider` needs the cursor over it and
-    /// no widget walks a focus chain, so a ringed number row or colour editor
-    /// is inert. The option selects are the other kind of row and they do
-    /// activate; the ring does not promise more than that here.
+    /// Enter on a number row hands typing to that row's input instead of moving
+    /// the value: a `text_input` is the one widget with real keyboard focus, so
+    /// this is the operation that puts a caret there, and the value moves only
+    /// once something is typed or an arrow says so. Read off the returned
+    /// `Task`, which is the only thing a unit test can see of a widget
+    /// operation, and compared against a colour row — the other kind of
+    /// row with no cycle-able form, which has no input to enter at all.
     #[test]
-    fn enter_on_a_non_cycle_able_field_is_a_noop() {
+    fn enter_on_a_number_row_hands_typing_to_its_input() {
         let mut g = gui();
         g.focus = Some(FocusTarget::Field(Key::Opacity));
         let before = g.config.opacity;
         let task = update(
             &mut g,
-            Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Enter))),
+            Message::KeyPressed(no_key(keyboard::Key::Named(key::Named::Enter))),
         );
-        assert_eq!(g.config.opacity, before);
-        assert_eq!(task.units(), 0, "a number row has no choice to step to");
+        assert_eq!(
+            g.config.opacity, before,
+            "Enter on its own changes no value"
+        );
+        assert_eq!(
+            task.units(),
+            1,
+            "Enter on a number row runs the focus hand-off and nothing else"
+        );
+
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::SpeakingColor));
+        let task = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Named(key::Named::Enter))),
+        );
+        assert_eq!(task.units(), 0, "a colour editor has no input to enter");
     }
 
     /// The option selects: Enter and Right move to the next choice and Left to
@@ -895,24 +997,206 @@ mod focus_tests {
         );
     }
 
-    /// The arrows are inert anywhere they cannot mean a choice: a chrome
-    /// button, a credential row (where iced's own focus owns them, to move the
-    /// caret), and a number row with nothing to step between.
+    /// The arrows are inert anywhere they cannot mean a step: a chrome button,
+    /// a credential row (where iced's own focus owns them, to move the caret)
+    /// and a colour editor, which edits no number and offers no choices.
     #[test]
-    fn the_arrows_do_nothing_off_an_option_select() {
+    fn the_arrows_do_nothing_where_there_is_no_step() {
         for target in [
             FocusTarget::Save,
             FocusTarget::Nav(0),
             FocusTarget::Credential(Credential::ClientId),
-            FocusTarget::Field(Key::Width),
+            FocusTarget::Field(Key::SpeakingColor),
         ] {
             let mut g = gui();
             g.focus = Some(target);
-            for key in [arrow_left(), arrow_right()] {
+            for key in [arrow_left(), arrow_right(), arrow_up(), arrow_down()] {
                 let task = update(&mut g, Message::KeyPressed(key));
                 assert_eq!(task.units(), 0, "{target:?} must ignore the arrows");
             }
         }
+    }
+
+    /// A number row steps with all four arrows, up and right forward, down and
+    /// left back, by the row's own step — and the ring stays on the row, since
+    /// it is the row that is focused and not the slider inside it.
+    #[test]
+    fn the_arrows_step_a_number_row() {
+        let forward = [arrow_right(), arrow_up()];
+        let back = [arrow_left(), arrow_down()];
+        for key in forward {
+            let mut g = gui();
+            g.focus = Some(FocusTarget::Field(Key::Spacing));
+            let task = update(&mut g, Message::KeyPressed(key.clone()));
+            assert_eq!(g.config.spacing, 5, "{key:?} raises the value by one");
+            assert_eq!(
+                g.focus,
+                Some(FocusTarget::Field(Key::Spacing)),
+                "{key:?} moves the value, not the focus"
+            );
+            assert_eq!(task.units(), 1, "{key:?} sends exactly one command");
+        }
+        for key in back {
+            let mut g = gui();
+            g.focus = Some(FocusTarget::Field(Key::Spacing));
+            let task = update(&mut g, Message::KeyPressed(key.clone()));
+            assert_eq!(g.config.spacing, 3, "{key:?} lowers the value by one");
+            assert_eq!(task.units(), 1, "{key:?} sends exactly one command");
+        }
+        // A negative value steps the same way and keeps its sign.
+        let mut g = gui();
+        g.config.offset_x = -12;
+        g.focus = Some(FocusTarget::Field(Key::OffsetX));
+        let _ = update(&mut g, Message::KeyPressed(arrow_right()));
+        assert_eq!(
+            g.config.offset_x, -11,
+            "offsets cross zero the ordinary way"
+        );
+    }
+
+    /// At a bound the value stops and nothing is sent: no write, no wire text.
+    /// Held arrows run the same step, so leaning on one at the end of the range
+    /// holds the value there instead of running past it. `opacity` is 100 on a
+    /// clean config, which is its upper bound, so the very first press is the
+    /// boundary.
+    #[test]
+    fn a_number_row_stops_at_its_bounds() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Opacity));
+        assert_eq!(g.config.opacity, 100, "opacity's default is its maximum");
+        for _ in 0..3 {
+            let task = update(&mut g, Message::KeyPressed(arrow_right()));
+            assert_eq!(g.config.opacity, 100, "a held Right stops at the bound");
+            assert_eq!(task.units(), 0, "and puts no command on the socket");
+        }
+        // And the other end, reached by stepping down to it.
+        for _ in 0..101 {
+            let _ = update(&mut g, Message::KeyPressed(arrow_down()));
+        }
+        assert_eq!(g.config.opacity, 0, "a hundred steps reach the minimum");
+        let task = update(&mut g, Message::KeyPressed(arrow_down()));
+        assert_eq!(g.config.opacity, 0, "and one more stays there");
+        assert_eq!(task.units(), 0, "with nothing sent");
+    }
+
+    /// Enter commits what is typed and hands typing back to the row. The typed
+    /// value is applied by `Message::NumText` the moment it is valid —
+    /// that is the row's existing behaviour and it is why a draft can only ever
+    /// hold refused text — so what the commit has left to do is refuse it
+    /// properly or hand the input back.
+    #[test]
+    fn enter_inside_a_number_row_commits_and_hands_typing_back() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Spacing));
+        let _ = update(&mut g, Message::NumText(Key::Spacing, "9".into()));
+        assert_eq!(g.config.spacing, 9, "a valid value applies as it is typed");
+
+        let task = update(&mut g, Message::NumSubmit(Key::Spacing));
+        assert_eq!(g.config.spacing, 9, "nothing is left to apply");
+        assert_eq!(g.focus, Some(FocusTarget::Field(Key::Spacing)));
+        assert_eq!(
+            task.units(),
+            1,
+            "the commit hands typing back, which is the one operation it runs"
+        );
+        assert!(
+            g.num_drafts.is_empty(),
+            "and leaves no half-typed text behind"
+        );
+    }
+
+    /// A refused commit answers with the daemon's own error text, changes no
+    /// value, and stays in the input: `None` is what tells the caller the caret
+    /// is still wanted there. The wording is the parser's, not a second one.
+    #[test]
+    fn a_refused_commit_answers_the_error_and_keeps_the_caret() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Spacing));
+        let _ = update(&mut g, Message::NumText(Key::Spacing, "99".into()));
+        assert_eq!(
+            g.config.spacing, 4,
+            "99 is out of range, so it stays a draft"
+        );
+
+        assert!(
+            commit_num(&mut g, Key::Spacing).is_none(),
+            "a value outside the bounds is refused"
+        );
+        assert_eq!(g.config.spacing, 4, "and the row keeps the value it had");
+        assert_eq!(g.focus, Some(FocusTarget::Field(Key::Spacing)));
+        assert_eq!(
+            g.last_reply.text(),
+            "error: spacing <0-24>",
+            "the refusal is the daemon's own wording for this key"
+        );
+        assert_eq!(
+            g.num_drafts.get(&Key::Spacing).map(String::as_str),
+            Some("99"),
+            "and the refused text stays for the user to fix"
+        );
+    }
+
+    /// Tab out of a number row commits what is typed there instead of moving
+    /// on, and a commit the bounds refuse keeps the caret in the input — so it
+    /// keeps the ring too. Nothing pending means an ordinary Tab stop: the
+    /// only text a row can hold is text `NumText` refused, because a value the
+    /// bounds allow is applied the moment it is typed.
+    #[test]
+    fn tab_out_of_a_number_row_commits_instead_of_moving_on() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Spacing));
+        let _ = update(&mut g, Message::NumText(Key::Spacing, "99".into()));
+
+        let refused = update(&mut g, Message::KeyPressed(no_key(tab_key())));
+        assert_eq!(g.focus, Some(FocusTarget::Field(Key::Spacing)));
+        assert_eq!(
+            refused.units(),
+            0,
+            "a refused commit runs nothing at all, so nothing can move"
+        );
+        assert_eq!(
+            g.last_reply.text(),
+            "error: spacing <0-24>",
+            "and says why, the way the commit does"
+        );
+
+        // Fixing the text applies it, which clears what Tab was about to
+        // commit, so the next Tab is a plain move — and it takes typing with it.
+        let _ = update(&mut g, Message::NumText(Key::Spacing, "8".into()));
+        assert_eq!(g.config.spacing, 8);
+        let moved = update(&mut g, Message::KeyPressed(no_key(tab_key())));
+        assert_eq!(field(&g), Key::MaxName, "Tab moved to the next row");
+        assert_eq!(
+            moved.units(),
+            2,
+            "the reveal of the row it landed on, plus the hand-back that stops \
+             the input it left holding the keyboard"
+        );
+    }
+
+    /// Escape that the input swallowed drops the row's half-typed value and
+    /// hands typing back, applying nothing — the row shows the value it
+    /// had before the typing began. Iced's own Escape arm does the unfocusing
+    /// and tells nobody, which is why the app is told separately.
+    #[test]
+    fn escape_drops_the_typed_value_without_applying_it() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Spacing));
+        let _ = update(&mut g, Message::NumText(Key::Spacing, "99".into()));
+        assert_eq!(g.config.spacing, 4);
+
+        let task = update(&mut g, Message::EscapeCaptured);
+        assert_eq!(g.config.spacing, 4, "nothing was applied");
+        assert_eq!(g.focus, Some(FocusTarget::Field(Key::Spacing)));
+        assert!(
+            g.num_drafts.is_empty(),
+            "the row goes back to showing its own value"
+        );
+        assert_eq!(task.units(), 1, "and typing is handed back to the row");
+
+        // Which is what lets the next Tab move on rather than commit again.
+        let _ = update(&mut g, Message::KeyPressed(no_key(tab_key())));
+        assert_eq!(field(&g), Key::MaxName, "the row is an ordinary stop again");
     }
 
     /// Tab far enough down to the page's last *keyed* row, then run the reveal
@@ -1252,6 +1536,14 @@ mod focus_tests {
 
     fn arrow_right() -> keyboard::Event {
         no_key(keyboard::Key::Named(key::Named::ArrowRight))
+    }
+
+    fn arrow_up() -> keyboard::Event {
+        no_key(keyboard::Key::Named(key::Named::ArrowUp))
+    }
+
+    fn arrow_down() -> keyboard::Event {
+        no_key(keyboard::Key::Named(key::Named::ArrowDown))
     }
 
     /// The same key as [`arrow_right`], arriving the way a held one does: X11

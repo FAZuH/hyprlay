@@ -39,16 +39,33 @@ pub(super) fn num_in_bounds(key: Key, v: i64) -> bool {
         .is_some_and(|(min, max)| v >= min && v <= max)
 }
 
-/// The command one keyboard step along an option-select row sends: the next
-/// choice forward (Enter, Space, Right) or the previous one back (Left), read
-/// in the order the row renders them.
+/// The command one keyboard step along the focused row sends: the next choice
+/// forward (Enter, Space, Right, Up) or the previous one back (Left, Down), read
+/// in the order the row renders them — or, for a number row, the value one
+/// [`fields::NUM_STEP`] away.
 ///
-/// `None` at either end. The selection stops at the boundary and does not
-/// wrap, so there is nothing to send — the daemon must not be asked to move
-/// somewhere the user cannot see. Also `None` for a row that offers no fixed
-/// set of choices at all (a number row, a colour editor), which is what keeps
-/// a step on one of those inert.
+/// `None` when there is nothing to send, and there are three ways that happens:
+/// a row that neither holds a number nor offers a fixed set of choices (a
+/// colour editor, a flag), a choice row at either end, and a number already at
+/// its bound. The step stops at the boundary rather than wrapping, so a step
+/// past either end would tell the daemon to move somewhere the user cannot see.
+///
+/// A number step is clamped to the bounds the GUI and the daemon share, so the
+/// value can reach a bound and stop there but can never leave the range,
+/// whichever way the arrows are pushed.
 pub(super) fn step_command(gui: &Gui, key: Key, forward: bool) -> Option<Command> {
+    if let Some((min, max)) = key.num_bounds() {
+        let Value::Num(current) = key.value_of(&gui.config) else {
+            unreachable!("a key with numeric bounds holds a number");
+        };
+        let moved = if forward {
+            fields::NUM_STEP
+        } else {
+            -fields::NUM_STEP
+        };
+        let next = (current + moved).clamp(min, max);
+        return (next != current).then_some(Command::Set(key, Value::Num(next)));
+    }
     let options = fields::options(gui, key);
     let current = key.value_of(&gui.config);
     let index = options.iter().position(|value| *value == current)?;
@@ -86,6 +103,8 @@ pub(super) fn command_for(message: Message) -> Command {
         Message::SetFlag(..) => unreachable!("flags are handled directly in update"),
         // Handled directly in `update`; unreachable here.
         Message::NumText(..)
+        | Message::NumSubmit(..)
+        | Message::EscapeCaptured
         | Message::NumDrag(..)
         | Message::NumReset(_)
         | Message::ColorPart(..)
@@ -226,19 +245,160 @@ mod tests {
         );
     }
 
-    /// A row with no fixed set of choices has no step at all, so an arrow on a
-    /// number row or a colour editor cannot move anything — those rows have no
-    /// choices to move between yet, and guessing would send a wrong command.
+    /// A row with neither a number nor a fixed set of choices has no step at
+    /// all, so an arrow on a colour editor or a flag cannot move anything —
+    /// those rows have nothing to move, and guessing would send a wrong
+    /// command.
     #[test]
-    fn a_row_with_no_options_has_no_step() {
+    fn a_row_with_neither_numbers_nor_options_has_no_step() {
         let g = gui();
-        for key in [Key::Opacity, Key::Width, Key::Rtl, Key::SpeakingColor] {
+        for key in [Key::Rtl, Key::SpeakingColor, Key::TextColor, Key::BoxColor] {
             assert_eq!(
                 step_command(&g, key, true),
                 None,
-                "{} offers no options, so it must produce no command",
+                "{} offers neither a number nor a choice, so it must produce no command",
                 key.name()
             );
+        }
+    }
+
+    /// Every arrow on a number row sends the neighbouring value, and it is the
+    /// wire text the daemon parses. This is the whole of "the step reaches the
+    /// daemon" that no screenshot can show: the daemon is not running in the
+    /// GUI harness, so the command is asserted here instead.
+    #[test]
+    fn a_number_step_sends_the_neighbouring_value() {
+        let g = gui();
+        assert_eq!(
+            step_command(&g, Key::Spacing, true),
+            Some(Command::Set(Key::Spacing, Value::Num(5))),
+            "spacing is 4 on a clean config, so Up is 5"
+        );
+        assert_eq!(
+            step_command(&g, Key::Spacing, false),
+            Some(Command::Set(Key::Spacing, Value::Num(3))),
+            "and Down is 3"
+        );
+        assert_eq!(
+            Command::Set(Key::Spacing, Value::Num(5)).to_string(),
+            "set spacing 5",
+            "the step sends the canonical wire form"
+        );
+        // A negative offset moves the same way, and the sign survives the wire.
+        let mut g = g;
+        g.config.offset_x = -12;
+        assert_eq!(
+            step_command(&g, Key::OffsetX, true),
+            Some(Command::Set(Key::OffsetX, Value::Num(-11))),
+            "offset x is -12, so Up is -11"
+        );
+        assert_eq!(
+            Command::Set(Key::OffsetX, Value::Num(-11)).to_string(),
+            "set offset-x -11"
+        );
+    }
+
+    /// The clamping proof, over every numeric key and every value that sits on
+    /// or beside a bound: a step from there sends a value the shared table
+    /// accepts, whichever way it is pushed. Asserted on the command, because
+    /// that is what the daemon would be told — and because `apply_config`
+    /// *refuses* a number outside its bounds rather than clamping it, so an
+    /// unclamped step would come back as an error reply and change nothing.
+    #[test]
+    fn a_number_step_stays_inside_the_shared_bounds() {
+        for key in Key::ALL {
+            let Some((min, max)) = key.num_bounds() else {
+                continue;
+            };
+            // The four values that can be one step from leaving the range, plus
+            // the middle of the narrowest range (text size is 8..=32) where a
+            // single step in either direction is still well inside it.
+            let probes = [min, min + 1, max - 1, max, (min + max) / 2];
+            for start in probes {
+                for forward in [true, false] {
+                    let mut g = gui();
+                    Command::Set(key, Value::Num(start)).apply_config(&mut g.config);
+                    let Some(Command::Set(_, Value::Num(next))) = step_command(&g, key, forward)
+                    else {
+                        continue;
+                    };
+                    assert!(
+                        (min..=max).contains(&next),
+                        "{} at {start} stepped to {next} (forward={forward}), outside {min}..={max}",
+                        key.name()
+                    );
+                }
+            }
+        }
+    }
+
+    /// A held arrow on every numeric key and both directions: the row walks to
+    /// the end of its range, comes to rest there, and one more press cannot
+    /// move it. Asserted on the config mirror rather than on the command,
+    /// because one key's range has a second edge — `offset-min` must also stay
+    /// below `offset-max`, and `apply_config` is where that edge lives, so the
+    /// window there can stop a press short of the declared bound.
+    #[test]
+    fn a_held_number_step_comes_to_rest_and_stops_there() {
+        for key in Key::ALL {
+            let Some((min, max)) = key.num_bounds() else {
+                continue;
+            };
+            for forward in [true, false] {
+                let mut g = gui();
+                let mut at_rest = key.value_of(&g.config);
+                // Far more presses than the whole range is wide, so the walk ends
+                // at rest rather than running out of iterations.
+                for _ in 0..(max - min + 2) {
+                    let Some(Command::Set(_, value)) = step_command(&g, key, forward) else {
+                        break;
+                    };
+                    Command::Set(key, value).apply_config(&mut g.config);
+                    if key.value_of(&g.config) == at_rest {
+                        // The applier refused it: the row is at the end of its
+                        // range already, and no press will move it.
+                        break;
+                    }
+                    at_rest = key.value_of(&g.config);
+                }
+                if let Some(Command::Set(_, value)) = step_command(&g, key, forward) {
+                    Command::Set(key, value).apply_config(&mut g.config);
+                }
+                assert_eq!(
+                    key.value_of(&g.config),
+                    at_rest,
+                    "{} held one way must come to rest, not creep",
+                    key.name()
+                );
+                let Value::Num(rest) = at_rest else {
+                    unreachable!("a numeric key holds a number");
+                };
+                assert!(
+                    (min..=max).contains(&rest),
+                    "{} rested at {rest}, outside the shared {min}..={max}",
+                    key.name()
+                );
+            }
+        }
+    }
+
+    /// The other half of the boundary: standing on a bound, the step that would
+    /// leave the range produces no command at all — no write, no wire text —
+    /// exactly as a choice row stops at its last option.
+    #[test]
+    fn a_number_step_off_the_bound_sends_nothing() {
+        let mut g = gui();
+        for key in [Key::Opacity, Key::Spacing, Key::TextSize, Key::OffsetX] {
+            let (min, max) = key.num_bounds().expect("numeric key");
+            for (end, forward) in [(min, false), (max, true)] {
+                Command::Set(key, Value::Num(end)).apply_config(&mut g.config);
+                assert_eq!(
+                    step_command(&g, key, forward),
+                    None,
+                    "{} at {end} cannot step further out",
+                    key.name()
+                );
+            }
         }
     }
 

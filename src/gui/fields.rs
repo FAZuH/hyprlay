@@ -902,9 +902,22 @@ fn toggle(is_on: bool, on_toggle: impl Fn(bool) -> Message + 'static) -> Element
     row![toggler(is_on).on_toggle(on_toggle)].into()
 }
 
+/// How far one arrow press moves a number row. The row's slider steps by this
+/// too (see [`number_row`]), so the keyboard and the mouse walk the row the
+/// same distance and there is one step per row rather than two.
+pub(super) const NUM_STEP: i64 = 1;
+
+/// Widget id of a number row's integer input: what `operation::focus` hands
+/// typing to when Enter moves the keyboard into the row. Separate from the row
+/// container's id because two widgets in one tree cannot share an id.
+pub(super) fn num_input_id(key: Key) -> iced::widget::Id {
+    iced::widget::Id::from(format!("num-input-{}", key.name()))
+}
+
 /// One numeric knob: slider (when the field has an envelope) + integer text
-/// input + reset-to-default. Typing goes through [`Message::NumText`]; the
-/// draft keeps half-typed or out-of-range text from snapping back.
+/// input + reset-to-default. Typing goes through [`Message::NumText`] and
+/// commits on [`Message::NumSubmit`]; the draft keeps half-typed or
+/// out-of-range text from snapping back.
 fn number_row(gui: &Gui, key: Key) -> Element<'static, Message> {
     let value = key.value_of(&gui.config);
     let Value::Num(value) = value else {
@@ -917,14 +930,22 @@ fn number_row(gui: &Gui, key: Key) -> Element<'static, Message> {
         .unwrap_or_else(|| value.to_string());
     let input = |w: f32| {
         text_input("", &shown)
+            // The id the keyboard hands typing to when Enter moves into this
+            // row; without it iced cannot focus a text input on request.
+            .id(num_input_id(key))
             .on_input(move |s| Message::NumText(key, s))
+            .on_submit(Message::NumSubmit(key))
             .size(12)
             .width(Length::Fixed(w))
             .padding([3, 6])
     };
     match key.slider_bounds(&gui.config) {
         Some((min, max)) => row![
-            slider(min..=max, value as f32, move |v| Message::NumDrag(key, v)).width(Length::Fill),
+            slider(min..=max, value as f32, move |v| Message::NumDrag(key, v))
+                // The slider's own step, written down: the arrow keys step the
+                // row by [`NUM_STEP`], so the two agree by construction.
+                .step(NUM_STEP as f32)
+                .width(Length::Fill),
             input(72.0),
             reset_button(Message::NumReset(key)),
         ]

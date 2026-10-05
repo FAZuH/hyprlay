@@ -81,6 +81,13 @@ enum Message {
     /// Integer text edited for a numeric knob; invalid or out-of-range
     /// input is kept as a draft instead of snapping back.
     NumText(Key, String),
+    /// Enter inside a numeric knob's input: commit what is typed. Refused by
+    /// the bounds, which keeps the caret in the input.
+    NumSubmit(Key),
+    /// Escape that a focused text input swallowed. Iced's own Escape arm drops
+    /// the input's focus and tells nobody, so the app hears about it here —
+    /// otherwise a number row's half-typed value would outlive the input.
+    EscapeCaptured,
     /// Numeric slider moved; the value arrives inside the slider envelope.
     NumDrag(Key, f32),
     /// Restore one numeric knob to its default.
@@ -344,6 +351,18 @@ fn subscribe(_gui: &Gui) -> Subscription<Message> {
         // Only "ignored" events reach us, so typing in a text field never
         // triggers shortcuts.
         keyboard::listen().map(Message::KeyPressed),
+        // Escape again, this time including the events a widget captured: a
+        // focused `text_input` swallows Escape to drop its own focus, so the
+        // row behind it never learns that the typing stopped.
+        iced::event::listen_with(|event, status, _| match event {
+            iced::event::Event::Keyboard(keyboard::Event::KeyPressed { key, .. })
+                if status == iced::event::Status::Captured
+                    && matches!(key, keyboard::Key::Named(keyboard::key::Named::Escape)) =>
+            {
+                Some(Message::EscapeCaptured)
+            }
+            _ => None,
+        }),
     ])
 }
 
