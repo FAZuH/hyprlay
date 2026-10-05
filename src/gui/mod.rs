@@ -90,8 +90,11 @@ enum Message {
     EscapeCaptured,
     /// Numeric slider moved; the value arrives inside the slider envelope.
     NumDrag(Key, f32),
-    /// Restore one numeric knob to its default.
-    NumReset(Key),
+    /// Restore one setting to its default: the R key, a number row's reset
+    /// button and a colour editor's all send this, so every row has one
+    /// reset path. The default comes from the daemon, not from this window
+    /// reading `Config::default()` for it.
+    ResetFocused(Key),
     ColorPart(ColorTarget, u8, f32),
     ColorHex(ColorTarget, String),
     /// Expand / collapse one color editor's HSV picker.

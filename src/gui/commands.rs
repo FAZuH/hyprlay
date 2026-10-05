@@ -18,16 +18,33 @@ use super::send;
 /// already made sure the value is inside the key's bounds.
 pub(super) fn apply_num(gui: &mut Gui, key: Key, value: i64) -> Task<Message> {
     gui.num_drafts.remove(&key);
-    let command = Command::Set(key, Value::Num(value));
-    mark_dirty(gui, &command);
-    command.clone().apply_config(&mut gui.config);
+    apply_change(gui, Command::Set(key, Value::Num(value)))
+}
+
+/// Mirror the command onto the config, tell the daemon, and set the unsaved
+/// marker — the whole of what every change arm does, in one place because the
+/// marker is only correct when the apply and the decision happen together.
+///
+/// Both halves of the daemon's rule are kept: `should_persist` is asked with
+/// the *pre-application* autosave value, the same one the daemon uses, so
+/// flipping auto-save itself never leaves a phantom badge; and the marker
+/// comes from the *outcome* rather than the intent, so a command the daemon
+/// refuses — a per-key reset of the monitor, an `offset-min` past the current
+/// `offset-max` — leaves no badge at all. Deciding from the intent instead
+/// would claim an unsaved change for a command that changed nothing.
+pub(super) fn apply_change(gui: &mut Gui, command: Command) -> Task<Message> {
+    let persists = hyprlay_core::domain::should_persist(&command, gui.config.auto_save);
+    let result = command.clone().apply_config(&mut gui.config);
+    if result.reply.is_ok() && !persists {
+        gui.dirty = true;
+    }
     Task::perform(send(command.to_string()), Message::Applied)
 }
 
-/// Mirror of the daemon's persistence rule: a change is "unsaved" exactly
-/// when the daemon would not have persisted it. Decided with the
-/// pre-application autosave value — the same one the daemon uses — so
-/// flipping auto-save itself never leaves a phantom badge.
+/// The unsaved marker for a command the GUI does not apply itself: the group
+/// and global resets wait for the daemon's `dump` to bring the config back,
+/// and `switch monitor` writes its own field. Decided with the pre-application
+/// autosave value, so flipping auto-save itself leaves no phantom badge.
 pub(super) fn mark_dirty(gui: &mut Gui, command: &Command) {
     if !hyprlay_core::domain::should_persist(command, gui.config.auto_save) {
         gui.dirty = true;
@@ -77,6 +94,18 @@ pub(super) fn step_command(gui: &Gui, key: Key, forward: bool) -> Option<Command
     Some(Command::Set(key, next.clone()))
 }
 
+/// The command every reset of one field sends, whether it came from the R key,
+/// a number row's reset button or a colour editor's: restore one setting to
+/// its default.
+///
+/// A real reset command, not `set` with a value computed here. The daemon owns
+/// the default table (`Config::default()` lives in core and is what
+/// `reset <group>` walks), so the GUI never keeps a second copy of it — the
+/// same rule the daemon's own `reset` follows.
+pub(super) fn reset_command(key: Key) -> Command {
+    Command::ResetKey(key)
+}
+
 /// Commands that bring `live` back to `saved`, one per differing key.
 /// Used by "clear changes"; empty when there is nothing to revert. Walking
 /// the shared [`Key`] table means a newly added setting can never be
@@ -106,7 +135,7 @@ pub(super) fn command_for(message: Message) -> Command {
         | Message::NumSubmit(..)
         | Message::EscapeCaptured
         | Message::NumDrag(..)
-        | Message::NumReset(_)
+        | Message::ResetFocused(_)
         | Message::ColorPart(..)
         | Message::ColorHex(..)
         | Message::PickerToggle(..)
@@ -145,6 +174,7 @@ mod tests {
     use hyprlay_core::config::RosterOrder;
     use hyprlay_core::config::VerticalAnchor as V;
     use hyprlay_core::domain::Corner;
+    use hyprlay_core::domain::Group;
     use hyprlay_core::domain::MonitorTarget;
 
     use super::*;
@@ -492,6 +522,39 @@ mod tests {
         }
     }
 
+    /// The command every one-field reset sends. The wire form is two words
+    /// because two key names are spelled like group names — see
+    /// [`Command::ResetKey`] — and it is asserted here because the group is
+    /// read off the key rather than chosen by the caller, so no caller can
+    /// pair the wrong two.
+    #[test]
+    fn a_per_key_reset_names_the_key_own_group() {
+        assert_eq!(reset_command(Key::Width).to_string(), "reset layout width");
+        // The ambiguous pair, both spellings: the group arm still wins the
+        // one-word form, and the per-key form still says which it means.
+        assert_eq!(
+            "reset opacity".parse::<Command>().unwrap(),
+            Command::ResetGroup(Group::Opacity)
+        );
+        assert_eq!(
+            reset_command(Key::Opacity).to_string(),
+            "reset opacity opacity"
+        );
+        assert_eq!(
+            reset_command(Key::Position).to_string(),
+            "reset position position"
+        );
+        // Every key's reset is a line the daemon's own parser accepts.
+        for key in Key::ALL {
+            let wire = reset_command(key).to_string();
+            assert_eq!(
+                wire.parse::<Command>().unwrap(),
+                reset_command(key),
+                "{wire}"
+            );
+        }
+    }
+
     /// No reset command may ever name a credential. The credential rows are
     /// keyboard-reachable now, so a credential can be focused, edited and
     /// looked at — but every reset path builds its commands out of `Key`
@@ -534,7 +597,14 @@ mod tests {
         for group in hyprlay_core::domain::Group::ALL {
             wire.push(Command::ResetGroup(group).to_string());
         }
-        assert!(wire.len() > 5, "the check proved nothing over a short list");
+        // And every per-key reset, which is the path a focused row's R takes.
+        for key in Key::ALL {
+            wire.push(reset_command(key).to_string());
+        }
+        assert!(
+            wire.len() > 30,
+            "the check proved nothing over a short list"
+        );
 
         for line in &wire {
             assert!(

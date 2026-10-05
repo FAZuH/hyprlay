@@ -1012,6 +1012,176 @@ shot num_tab
 assert_pixel "Tab took the ring off the number row" num_tab 900 390 "$PANEL_BG"
 assert_pixel "and put it on the next row" num_tab 900 443 "$FOCUS_FILL"
 
+# ------------------------------------------------------ R restores the field ---
+# Plain R restores the setting the ring is on to its default and nothing else.
+# Every check here is a claim about the VALUE, not about movement: each one
+# compares the row against the state it stood in before the row was edited,
+# so "the value came back to its default" and "the value moved" cannot both be
+# satisfied by the same pixels. The four row kinds are checked separately
+# because a flag, an option select, a number and a colour are four renderers,
+# and one probe would stand for none of the other three.
+#
+# No daemon runs, so nothing here proves the daemon was told: the command and
+# its wire text are pinned at the Command seam instead, by
+# r_sends_the_reset_command_for_the_focused_key and
+# a_per_key_reset_names_the_key_own_group in src/gui/.
+#
+# The rows are reached by Tab from `num_tab`, where the ring is on `max name
+# length`. Keyed rows run in FIELDS order — corner preset, anchor, right-to-left,
+# the four offset rows, monitor, visible, auto-save, show-over-fullscreen,
+# dim-on-hover, talking-only, show-own-user, roster-order, width, scale,
+# avatar-size, text-size, spacing, max-name-length, max-rows, the five opacities,
+# then the three colours — so `spacing` is one Shift+Tab back, `talking-only`
+# seven after that, the `anchor` chips eleven more, and `username background
+# color` twenty-eight Tab forward from the anchor row.
+#
+# One rectangle per row carries the value claim, cropped on that row's own
+# control and clear of the row's fill and its border (the same reason the number
+# section crops two separate rectangles). Re-derive after any layout change,
+# with the ring parked on the row:
+#   magick <shot>.png -crop 1216x1+176+<row y> -depth 8 txt:-   # every run
+# A toggler's knob rests at x 178..189 with its flat interior at x 181..188; the
+# crop is that interior and nothing else, because the knob's antialiased rim
+# wobbles by one in a channel whenever the row re-renders and an "identical"
+# claim over the rim would be a claim about the repaint. An anchor chip row
+# spans x 177..370, and a hex input's interior spans x 211..319.
+FLAG_VALUE='8x11+181+77'
+CHIP_VALUE='200x24+176+76'
+HEX_VALUE='109x20+211+598'
+# The client id's own text band, reused from the credential section above.
+CRED_ID_TEXT='400x16+182+718'
+
+# The number row first, and it reuses the geometry the section above derived.
+# Shift+Tab lands the ring back on `spacing`, whose value is 8 (typed above), so
+# the arrow below moves it further off its default and R brings it all the way
+# back. `num_4` is the state this row stood in at its default earlier in the
+# run — the same ring, the same page offset — so comparing against it is a
+# claim about the VALUE and not about "something moved".
+key shift+Tab 1
+shot r_num_before
+key Right 1
+shot r_num_moved
+assert_region_pixels "the arrow moved the number off its default" \
+	num_4 r_num_moved "$SLIDER" differs
+key r 1
+shot r_num_reset
+assert_pixel "R put the handle back where the default 4 puts it" \
+	r_num_reset 362 397 "$HANDLE"
+assert_pixel "and off the spot the arrow had reached" r_num_reset 407 397 "$FOCUS_FILL"
+assert_region_pixels "R put the number back to its default, not merely somewhere else" \
+	num_4 r_num_reset "$SLIDER" same
+assert_region_pixels "and the digits with it" num_4 r_num_reset "$INPUT_DIGITS" same
+assert_region_pixels "R changed the row and not the page" \
+	r_num_moved r_num_reset "$YARDSTICK" same
+
+# The flag: `talking-only` is off on a clean config, so the toggle starts at the
+# default and Space flips it. The knob slides across the track and the track
+# changes colour with it, which is what the rectangle above watches.
+walk shift+Tab 7
+shot r_flag_before
+key space 1
+shot r_flag_on
+assert_region_pixels "the toggle flipped away from its default" \
+	r_flag_before r_flag_on "$FLAG_VALUE" differs
+
+# The search box holds the keyboard here, and a query containing `r` must not
+# reset the row behind it. iced's keyboard listener delivers only "ignored"
+# events, so a key typed into a focused input never reaches the shortcut
+# dispatcher at all; this is that property end to end, on a row whose value is
+# demonstrably off its default, so a reset would show in the toggle.
+key ctrl+f 1
+typ rr 1
+shot r_flag_query
+assert_region_pixels "the query landed in the search box" \
+	r_flag_on r_flag_query "$SEARCH_BOX" differs
+key Escape 1
+shot r_flag_escaped
+assert_region_pixels "and the row behind the search box was never reset" \
+	r_flag_on r_flag_escaped "$FLAG_VALUE" same
+key r 1
+shot r_flag_reset
+assert_region_pixels "R put the flag back to its default" \
+	r_flag_before r_flag_reset "$FLAG_VALUE" same
+assert_region_pixels "and the flip is what changed, not the reset" \
+	r_flag_on r_flag_reset "$FLAG_VALUE" differs
+
+# The option select: `anchor` is `auto` on a clean config, Right steps it to
+# `top`, and R must bring the selection back to `auto` — the same walk the
+# arrows take, backwards onto the default. The probes sit inside the two chip
+# bodies and clear of their glyphs.
+walk shift+Tab 11
+shot r_chip_before
+key Right 1
+shot r_chip_moved
+assert_pixel "the arrow moved the selection off its default" r_chip_moved 240 82 "$ACCENT"
+key r 1
+shot r_chip_reset
+assert_pixel "R put the selection back on its default chip" r_chip_reset 180 82 "$ACCENT"
+assert_pixel "and off the chip the arrow had reached" r_chip_reset 240 82 "$FIELD_BG"
+assert_region_pixels "R put the whole chip row back to its default" \
+	r_chip_before r_chip_reset "$CHIP_VALUE" same
+assert_region_pixels "the step is what changed it, not the reset" \
+	r_chip_moved r_chip_reset "$CHIP_VALUE" differs
+
+# The colour row: `username background color` is #0d0d0f on a clean config.
+# A colour has no keyboard path to a new value yet (Enter on a colour row rings
+# it and stops — see `activate_focus`), so the mouse edits the hex input and
+# Escape hands typing back to the row, which is what leaves R reachable at all.
+# The hex field is the value: its text IS the hex the daemon would be told, so
+# the claim is read off the digits rather than off the swatch beside them.
+walk Tab 28
+shot r_hex_focused
+# The baseline is taken AFTER a click-and-Escape round trip into the hex input,
+# because that round trip repaints the glyphs: comparing a post-edit shot with
+# one taken before the first click would be a claim about the repaint rather
+# than about the value. So the default is photographed in exactly the state the
+# edit below leaves the input in, and R has to put the field back to *that*.
+click_hex() {
+	printf '  click %-12s sleep 1\n' 'hex input'
+	xdotool mousemove $((263 + WIN_X)) $((605 + WIN_Y)) click 1
+	sleep 1
+}
+click_hex
+key Escape 1
+shot r_hex_before
+click_hex
+key ctrl+a 1
+typ '#f00f0f' 1
+key Escape 1
+shot r_hex_typed
+assert_region_pixels "the hex field took the typed colour" \
+	r_hex_before r_hex_typed "$HEX_VALUE" differs
+key r 1
+shot r_hex_reset
+assert_region_pixels "R put the hex field back to its default" \
+	r_hex_before r_hex_reset "$HEX_VALUE" same
+assert_region_pixels "and the typed colour is what changed, not the reset" \
+	r_hex_typed r_hex_reset "$HEX_VALUE" differs
+
+# The credentials: a credential row edits no config key, so R resets nothing —
+# and the keystroke is the input's, which is the stronger claim. Preloading made
+# the client id a fixed string, so the glyphs in its text band are the witness
+# that the letter went into the field instead of reaching a reset.
+key Tab 1
+shot r_cred_before
+key r 1
+shot r_cred_after
+assert_region_pixels "R on a credential row types into the credential" \
+	r_cred_before r_cred_after "$CRED_ID_TEXT" differs
+assert_region_pixels "and the secret below it is untouched" \
+	r_cred_before r_cred_after '400x16+182+771' same
+
+# No field at all. A search that filters out the focused row drops the ring —
+# there is nothing left to ring — and clearing the search leaves it dropped, so
+# R now reaches a window with no focused field and must change nothing.
+key ctrl+f 1
+typ color 1
+key Escape 1
+shot r_none
+key r 1
+shot r_none_after
+assert_pixels "R with no field focused changes nothing at all" r_none r_none_after same
+
 # ------------------------------------------------------------------- summary ---
 cat <<SUMMARY
 
@@ -1027,6 +1197,15 @@ cat <<SUMMARY
       a_number_step_sends_the_neighbouring_value,
       a_number_step_stays_inside_the_shared_bounds and
       a_held_number_step_comes_to_rest_and_stops_there in src/gui/commands.rs.
+      What R sends is asserted the same way, by
+      r_sends_the_reset_command_for_the_focused_key in src/gui/update.rs and
+      a_per_key_reset_names_the_key_own_group in src/gui/commands.rs: the
+      socket half of a reset is UNPROVEN here, in this harness and in every
+      other test in it.
+    - Editing a colour from the keyboard. A colour row offers no way to type a
+      new value (Enter on one rings it and stops — see `activate_focus`), so
+      the hex field above is driven with the mouse and the reset is what is
+      under test. Every other row kind is driven with the keyboard alone.
     - The status-bar refusal. A refused value answers with the daemon's own
       wording ("error: spacing <0-24>"), but the 2 s status probe overwrites the
       status line with its own answer before a screenshot can be certain of

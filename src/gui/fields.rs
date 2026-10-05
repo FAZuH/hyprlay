@@ -947,11 +947,11 @@ fn number_row(gui: &Gui, key: Key) -> Element<'static, Message> {
                 .step(NUM_STEP as f32)
                 .width(Length::Fill),
             input(72.0),
-            reset_button(Message::NumReset(key)),
+            reset_button(Message::ResetFocused(key)),
         ]
         .spacing(8)
         .into(),
-        None => row![input(96.0), reset_button(Message::NumReset(key)),]
+        None => row![input(96.0), reset_button(Message::ResetFocused(key)),]
             .spacing(8)
             .into(),
     }

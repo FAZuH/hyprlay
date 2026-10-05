@@ -25,10 +25,12 @@ use iced_runtime::widget::operation;
 use super::FocusTarget;
 use super::Gui;
 use super::Message;
+use super::commands::apply_change;
 use super::commands::apply_num;
 use super::commands::command_for;
 use super::commands::mark_dirty;
 use super::commands::num_in_bounds;
+use super::commands::reset_command;
 use super::commands::revert_commands;
 use super::commands::step_command;
 use super::fields;
@@ -339,11 +341,19 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
             let (min, max) = key.num_bounds().expect("slider keys are numeric");
             apply_num(gui, key, (v as i64).clamp(min, max))
         }
-        Message::NumReset(key) => {
-            let Value::Num(default) = key.value_of(&Config::default()) else {
-                unreachable!("number_row only renders numeric keys");
-            };
-            apply_num(gui, key, default)
+        // Every reset of one field: the R key, a number row's reset button
+        // and a colour editor's all land here, so each row has one reset path
+        // rather than two that can disagree about what a reset is.
+        Message::ResetFocused(key) => {
+            // Refused text is stale the moment the value moves under it: the
+            // number input would show digits the row no longer holds, and the
+            // hex input a colour the daemon was never told. Both drafts are
+            // the focused key's alone, so only those go.
+            gui.num_drafts.remove(&key);
+            if let Some(target) = ColorTarget::of(key) {
+                gui.drafts.remove(&target);
+            }
+            apply_change(gui, reset_command(key))
         }
         Message::ColorPart(target, part, v) => {
             let current = ColorTarget::field(target, &gui.config).rgb();
@@ -391,14 +401,7 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
                 mark_dirty(gui, &command);
                 Task::perform(send(command.to_string()), Message::Applied)
             } else {
-                // The daemon decides persistence with its pre-apply autosave
-                // value; capture ours before the optimistic mirror flips too.
-                let persists = hyprlay_core::domain::should_persist(&command, gui.config.auto_save);
-                command.clone().apply_config(&mut gui.config);
-                if !persists {
-                    gui.dirty = true;
-                }
-                Task::perform(send(command.to_string()), Message::Applied)
+                apply_change(gui, command)
             }
         }
         Message::AuthClientId(id) => {
@@ -419,12 +422,7 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
             };
             Task::perform(apply_auth_credentials(creds), Message::Applied)
         }
-        command => {
-            let command = command_for(command);
-            mark_dirty(gui, &command);
-            command.clone().apply_config(&mut gui.config);
-            Task::perform(send(command.to_string()), Message::Applied)
-        }
+        command => apply_change(gui, command_for(command)),
     }
 }
 
@@ -455,6 +453,16 @@ fn shortcut(gui: &mut Gui, event: keyboard::Event) -> Task<Message> {
             // D4: Esc empties the search, so land the one-pager back on
             // its pre-search offset.
             return restore_scroll(gui);
+        }
+        // R restores the focused setting. Plain `r` is free: every other
+        // letter binding sits behind `modifiers.control()` below, and the
+        // dispatcher only ever sees keys no widget captured (iced hands it
+        // "ignored" events only), so a search box or a credential input that
+        // holds the keyboard keeps its own letters and R never reaches here.
+        if let keyboard::Key::Character(ch) = &key
+            && ch.eq_ignore_ascii_case("r")
+        {
+            return reset_focused(gui);
         }
         // An arrow steps the focused row, and arrows are free to: iced spends one on
         // the text input that holds real focus, so reaching here means no input
@@ -761,6 +769,21 @@ fn step_row(gui: &mut Gui, forward: bool) -> Task<Message> {
         // takes.
         _ => update(gui, Message::SetOption(key, value)),
     }
+}
+
+/// R: restore the focused row to its default.
+///
+/// Only a config-key row has one. The ring on a chrome control (clear
+/// changes, reset all, save, a sidebar item, the daemon toggle) or on a
+/// credential resets nothing — the first already have their own resets bound
+/// to Enter and to Ctrl+R / Ctrl+Shift+R, and a credential is not a config
+/// key at all (it has no `Key`, so there is nothing to name a reset with).
+/// Same rule as `step_row`: no row, no command.
+fn reset_focused(gui: &mut Gui) -> Task<Message> {
+    let Some(FocusTarget::Field(key)) = gui.focus else {
+        return Task::none();
+    };
+    update(gui, Message::ResetFocused(key))
 }
 
 /// Tab / Shift+Tab: move the ring along the tab order — except out of a number
@@ -1564,6 +1587,416 @@ mod focus_tests {
             g.search.is_empty(),
             "Escape clears the search whether or not the box held the keyboard"
         );
+    }
+
+    /// R restores the focused row to its default and leaves every other
+    /// setting alone. One representative of each row kind — a flag, an
+    /// option select, a number and a colour — because "R works" has to mean
+    /// all four: each is a different renderer, and the rows with no kind of
+    /// own are exactly the ones a single probe would miss.
+    #[test]
+    fn r_restores_the_focused_row_on_every_kind_of_row() {
+        // (key, the value it is moved away from its default with)
+        let cases = [
+            (Key::TalkingOnly, "set talking-only on"),
+            (Key::Anchor, "set anchor bottom"),
+            (Key::Opacity, "set opacity 42"),
+            (Key::SpeakingColor, "set speaking-color #ff00ff"),
+        ];
+        for (key, edit) in cases {
+            let mut g = gui();
+            let _ = update(&mut g, Message::KeyPressed(no_key(r_key())));
+            g.focus = Some(FocusTarget::Field(key));
+            apply_edit(&mut g, edit);
+            assert_ne!(
+                key.value_of(&g.config),
+                key.value_of(&Config::default()),
+                "{edit} must move {key:?} off its default first"
+            );
+
+            let task = update(&mut g, Message::KeyPressed(no_key(r_key())));
+            assert_eq!(
+                key.value_of(&g.config),
+                key.value_of(&Config::default()),
+                "R must restore {key:?} to its default"
+            );
+            assert_eq!(task.units(), 1, "R on {key:?} sends exactly one command");
+            assert_eq!(
+                g.focus,
+                Some(FocusTarget::Field(key)),
+                "R moves the value, not the focus"
+            );
+        }
+    }
+
+    /// The other half of "leaves everything else alone", on one row: the
+    /// neighbouring settings in the same group and in other groups keep their
+    /// values across the reset, and only the focused key comes back.
+    #[test]
+    fn r_restores_one_key_and_leaves_its_neighbours_where_they_were() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Width));
+        for line in [
+            "set width 500",
+            "set scale 150",
+            "set opacity 42",
+            "set speaking-color #ff00ff",
+            "set offset-x -30",
+        ] {
+            apply_edit(&mut g, line);
+        }
+        // The premise: every one of them is off its default before the reset,
+        // so "unchanged" cannot pass on a value that never moved.
+        assert_ne!(g.config.width, Config::default().width);
+        assert_ne!(g.config.scale, Config::default().scale);
+        assert_ne!(g.config.opacity, Config::default().opacity);
+        assert_ne!(g.config.offset_x, Config::default().offset_x);
+
+        let task = update(&mut g, Message::KeyPressed(no_key(r_key())));
+        assert_eq!(task.units(), 1);
+        assert_eq!(g.config.width, Config::default().width, "width came back");
+        assert_eq!(g.config.scale, 150, "a sibling in the same group stands");
+        assert_eq!(g.config.opacity, 42, "another group stands");
+        assert_eq!(g.config.offset_x, -30);
+        assert_eq!(g.config.speaking_color, "#ff00ff".parse().unwrap());
+    }
+
+    /// R does nothing where there is no field to restore: no focus at all,
+    /// a chrome control, and a credential. Asserted as nothing spawned and
+    /// nothing changed — the same shape the arrow tests use, because "it
+    /// changed nothing" must not be satisfied by a command that changed
+    /// nothing visible.
+    #[test]
+    fn r_does_nothing_where_there_is_no_field() {
+        for target in [
+            None,
+            Some(FocusTarget::ClearChanges),
+            Some(FocusTarget::ResetAll),
+            Some(FocusTarget::Save),
+            Some(FocusTarget::Nav(0)),
+            Some(FocusTarget::ToggleDaemon),
+            Some(FocusTarget::Credential(Credential::ClientId)),
+            Some(FocusTarget::Credential(Credential::ClientSecret)),
+        ] {
+            let mut g = gui();
+            g.focus = target;
+            let before = g.config.clone();
+            let task = update(&mut g, Message::KeyPressed(no_key(r_key())));
+            assert_eq!(task.units(), 0, "{target:?} must ignore R");
+            assert_eq!(g.config, before, "{target:?} must change nothing");
+            assert!(
+                g.auth_client_id.is_empty() && g.auth_client_secret.is_empty(),
+                "{target:?} must not touch a credential"
+            );
+        }
+    }
+
+    /// R on the monitor row moves nothing, and says so rather than pretending
+    /// it reset something. The monitor is the one key a reset never touches —
+    /// `reset` and `reset <group>` both keep it — so the GUI's own mirror
+    /// keeps it too, since it applies the same command the daemon runs.
+    ///
+    /// Both auto-save states, because the marker only has a decision to make in
+    /// one of them: a refused reset changed nothing, so it is not an unsaved
+    /// change in either. The auto-save-off case is where a marker decided from
+    /// the *intent* (`reset` would not persist) instead of the *outcome* (the
+    /// daemon refused) would put a badge on a no-op.
+    #[test]
+    fn r_on_the_monitor_row_changes_nothing() {
+        for auto_save in [true, false] {
+            let mut g = gui();
+            g.config.auto_save = auto_save;
+            g.monitors = ["DP-1".to_string(), "HDMI-A-1".to_string()].into();
+            g.config.monitor = Some("DP-1".into());
+            g.focus = Some(FocusTarget::Field(Key::Monitor));
+            let before = g.config.clone();
+
+            let task = update(&mut g, Message::KeyPressed(no_key(r_key())));
+            assert_eq!(
+                g.config, before,
+                "auto-save {auto_save}: the monitor stands"
+            );
+            assert_eq!(
+                task.units(),
+                1,
+                "auto-save {auto_save}: the daemon is still told, so it can answer with the refusal"
+            );
+            assert_eq!(g.focus, Some(FocusTarget::Field(Key::Monitor)));
+            assert!(
+                !g.dirty,
+                "auto-save {auto_save}: a refused reset changed nothing, so it is not unsaved"
+            );
+        }
+    }
+
+    /// Uppercase R is the same key: the binding is the letter, not the
+    /// case, and a keyboard user pressing Shift+R means the same thing.
+    #[test]
+    fn uppercase_r_restores_the_same_way() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Opacity));
+        apply_edit(&mut g, "set opacity 42");
+        let task = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Character("R".into()))),
+        );
+        assert_eq!(g.config.opacity, Config::default().opacity);
+        assert_eq!(task.units(), 1);
+    }
+
+    /// R is not a group reset in disguise. Ctrl+R still resets the section
+    /// and Ctrl+Shift+R still resets everything, and neither moved to a
+    /// bare R — the pair of them is the whole reason plain `r` was free.
+    #[test]
+    fn the_letter_bindings_stay_where_they_were() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Width));
+        // `move_focus` sets this from the ring; set by hand because the test
+        // parks the focus without walking to the row. Ctrl+R resets whatever
+        // the sidebar names, so it has to name this row's section.
+        g.section = Section::Layout;
+        apply_edit(&mut g, "set width 500");
+
+        // Ctrl+R is still the section reset, and it still cannot report back
+        // here (the reply arrives over the socket, and the mirror follows the
+        // dump it chains), which is exactly how it differs from the plain R
+        // added beside it.
+        let ctrl_r = update(&mut g, Message::KeyPressed(ctrl(r_key())));
+        assert_eq!(g.config.width, 500, "Ctrl+R waits for the daemon");
+        assert_eq!(
+            ctrl_r.units(),
+            2,
+            "Ctrl+R is the reset plus the dump that carries the new config back"
+        );
+        assert_eq!(g.focus, Some(FocusTarget::Field(Key::Width)));
+
+        let ctrl_shift_r = update(&mut g, Message::KeyPressed(ctrl_shift(r_key())));
+        assert_eq!(
+            ctrl_shift_r.units(),
+            2,
+            "Ctrl+Shift+R is the global reset plus its dump"
+        );
+        assert!(!g.dirty, "neither ctrl form left an unsaved marker here");
+
+        // And the plain letter is the one that resets the focused key in
+        // place, from the same starting point.
+        apply_edit(&mut g, "set width 500");
+        let plain = update(&mut g, Message::KeyPressed(no_key(r_key())));
+        assert_eq!(g.config.width, Config::default().width);
+        assert_eq!(plain.units(), 1, "plain R sends exactly its own command");
+    }
+
+    /// The unsaved marker: a reset is an edit like any other, so it is
+    /// "unsaved" exactly when the daemon would not have persisted it, and it
+    /// never claims a change while auto-save is on. `should_persist` decides,
+    /// and `mark_dirty` mirrors that decision — this pins the GUI half.
+    #[test]
+    fn a_reset_follows_the_unsaved_marker_rules() {
+        // A clean config has auto-save on, so a reset persists and leaves no
+        // marker.
+        let mut g = gui();
+        assert!(g.config.auto_save, "the test premise");
+        g.focus = Some(FocusTarget::Field(Key::Opacity));
+        apply_edit(&mut g, "set opacity 42");
+        let task = update(&mut g, Message::KeyPressed(no_key(r_key())));
+        assert_eq!(g.config.opacity, Config::default().opacity);
+        assert!(
+            !g.dirty,
+            "auto-save persists a reset, so nothing is unsaved"
+        );
+        assert_eq!(task.units(), 1);
+
+        // With auto-save off, the same reset is an unsaved change.
+        let mut g = gui();
+        g.config.auto_save = false;
+        g.focus = Some(FocusTarget::Field(Key::Opacity));
+        apply_edit(&mut g, "set opacity 42");
+        let _ = update(&mut g, Message::KeyPressed(no_key(r_key())));
+        assert_eq!(g.config.opacity, Config::default().opacity);
+        assert!(
+            g.dirty,
+            "without auto-save the daemon keeps nothing on disk, so the reset is unsaved"
+        );
+        // And Save clears it, exactly as it does for any other edit.
+        let _ = update(&mut g, Message::Save);
+        assert!(!g.dirty);
+    }
+
+    /// The marker follows the OUTCOME, not the intent, on every change path.
+    /// A refused command changed nothing, so it is never an unsaved change —
+    /// with auto-save off, where a marker decided from the command alone would
+    /// light up for a no-op. Two refusals, one per path that shares the
+    /// bookkeeping: the per-key reset of the monitor, and a number the GUI's
+    /// own bounds check passes but the domain refuses (`offset-min` may not
+    /// reach `offset-max`, a cross-check `num_in_bounds` does not know).
+    #[test]
+    fn a_refused_change_leaves_no_unsaved_marker() {
+        // The refused reset: `reset <group> monitor`.
+        let mut g = gui();
+        g.config.auto_save = false;
+        g.monitors = ["DP-1".to_string()].into();
+        g.config.monitor = Some("DP-1".into());
+        g.focus = Some(FocusTarget::Field(Key::Monitor));
+        let _ = update(&mut g, Message::KeyPressed(no_key(r_key())));
+        assert!(!g.dirty, "a refused reset is not an unsaved change");
+
+        // The refused set: 600 is inside OFFSETS, so the GUI hands it to the
+        // domain, and the domain refuses it against the window's own max.
+        let mut g = gui();
+        g.config.auto_save = false;
+        apply_edit(&mut g, "set offset-max 500");
+        g.focus = Some(FocusTarget::Field(Key::OffsetMin));
+        let before = g.config.offset_min;
+        let task = update(&mut g, Message::NumText(Key::OffsetMin, "600".into()));
+        assert_eq!(g.config.offset_min, before, "the domain refused it");
+        assert!(!g.dirty, "a refused set is not an unsaved change");
+        assert_eq!(task.units(), 1, "and the daemon still hears about it");
+    }
+
+    /// The command itself is pinned here rather than only in the core: the
+    /// harness runs no daemon, so this is the only place that says what the
+    /// GUI's R puts on the socket.
+    #[test]
+    fn r_sends_the_reset_command_for_the_focused_key() {
+        for (key, wire) in [
+            (Key::Width, "reset layout width"),
+            (Key::Opacity, "reset opacity opacity"),
+            (Key::Position, "reset position position"),
+            (Key::SpeakingColor, "reset colors speaking-color"),
+            (Key::TalkingOnly, "reset layout talking-only"),
+        ] {
+            let command = reset_command(key);
+            assert_eq!(command.to_string(), wire, "{key:?}");
+            assert_eq!(
+                wire.parse::<Command>().unwrap(),
+                command,
+                "the daemon parses exactly this back"
+            );
+        }
+    }
+
+    /// A refused draft on a number row is stale once the value moves under
+    /// it, so R drops it. Otherwise the input would keep showing text the
+    /// row no longer holds — the same rule `apply_num` follows on a step.
+    #[test]
+    fn r_drops_a_refused_draft_on_the_row_it_resets() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Spacing));
+        let _ = update(&mut g, Message::NumText(Key::Spacing, "99".into()));
+        assert!(g.num_drafts.contains_key(&Key::Spacing));
+
+        let _ = update(&mut g, Message::KeyPressed(no_key(r_key())));
+        assert_eq!(g.config.spacing, Config::default().spacing);
+        assert!(
+            g.num_drafts.is_empty(),
+            "the refused text must not outlive the value it was refused for"
+        );
+    }
+
+    /// The two capturing inputs, plain R included. iced's keyboard listener
+    /// delivers only "ignored" events, so a key typed into the search box or
+    /// a credential input never reaches `shortcut` — that is the property
+    /// this rests on, and it is why a search query containing `r` cannot
+    /// reset the setting behind it. Asserted here over the dispatcher itself:
+    /// `KeyPressed` is the path only uncaptured keys take, so reaching the
+    /// reset arm from a `Search` message is impossible, and the search box
+    /// owning the keyboard is what makes the keystroke uncaptured.
+    #[test]
+    fn typing_into_the_search_box_resets_nothing() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Opacity));
+        let _ = update(&mut g, Message::KeyPressed(no_key(r_key())));
+        apply_edit(&mut g, "set opacity 42");
+        // A search query containing `r`, as a widget input would deliver it.
+        let task = update(&mut g, Message::Search("avatar".into()));
+        assert_eq!(task.units(), 0);
+        assert_eq!(g.config.opacity, 42, "typing a search changes no setting");
+        assert_eq!(g.search, "avatar");
+    }
+
+    /// The same for a credential row: the keystrokes that build the draft
+    /// are the input's, never the dispatcher's, so a letter typed there edits
+    /// the credential and spawns nothing.
+    #[test]
+    fn a_credential_row_takes_its_own_letters() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Credential(Credential::ClientId));
+        apply_edit(&mut g, "set opacity 42");
+        let before = g.config.clone();
+        // What the input does with an `r` keystroke: appends it to the draft.
+        let task = update(&mut g, Message::AuthClientId("prober".into()));
+        assert_eq!(task.units(), 0, "a credential draft spawns nothing");
+        assert_eq!(g.config, before, "and changes no setting");
+        assert_eq!(g.auth_client_id, "prober");
+        assert!(g.auth_client_secret.is_empty());
+    }
+
+    /// A refused hex draft on a colour row is stale once R restores the colour,
+    /// exactly like a refused number on a number row. Without this the row
+    /// would display text the daemon never holds — the hex input keeps
+    /// whatever it refused, so a reset behind it would be invisible and look
+    /// like R did nothing.
+    #[test]
+    fn r_drops_a_refused_hex_draft_on_the_row_it_resets() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::BoxColor));
+        // No leading '#': `HexColor` refuses it, so it stays a draft and the
+        // value never moves — the state a half-typed colour leaves behind.
+        let _ = update(&mut g, Message::ColorHex(ColorTarget::Box, "f00f0f".into()));
+        assert!(
+            g.drafts.contains_key(&ColorTarget::Box),
+            "the premise: refused hex is kept as a draft"
+        );
+
+        let _ = update(&mut g, Message::KeyPressed(no_key(r_key())));
+        assert_eq!(g.config.box_color, Config::default().box_color);
+        assert!(
+            g.drafts.is_empty(),
+            "the refused hex must not outlive the value it was refused for"
+        );
+        // And the other editor's draft is none of this row's business.
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::BoxColor));
+        let _ = update(&mut g, Message::ColorHex(ColorTarget::Text, "abc".into()));
+        let _ = update(&mut g, Message::KeyPressed(no_key(r_key())));
+        assert!(
+            g.drafts.contains_key(&ColorTarget::Text),
+            "resetting one colour must not discard another row's typing"
+        );
+    }
+
+    /// `ColorTarget::of` is the reverse of `ColorTarget::key`, and the pair
+    /// is what lets a command naming a colour key find that editor's draft.
+    /// Pinned so one cannot grow a key the other does not know.
+    #[test]
+    fn a_colour_key_maps_back_to_its_editor() {
+        for key in [Key::SpeakingColor, Key::TextColor, Key::BoxColor] {
+            assert_eq!(ColorTarget::of(key).map(|t| t.key()), Some(key));
+        }
+        for key in [Key::Width, Key::Opacity, Key::Monitor] {
+            assert_eq!(ColorTarget::of(key), None, "{key:?} edits no colour");
+        }
+    }
+
+    /// Apply one `set <key> <value>` line through the real `Command` path,
+    /// standing in for the mouse-side edit that moves a row off its default
+    /// before R is pressed.
+    fn apply_edit(gui: &mut Gui, line: &str) {
+        line.parse::<Command>()
+            .expect("a set line")
+            .apply_config(&mut gui.config);
+    }
+
+    fn r_key() -> keyboard::Key {
+        keyboard::Key::Character("r".into())
+    }
+
+    fn ctrl(key: keyboard::Key) -> keyboard::Event {
+        key_event(key, keyboard::Modifiers::CTRL)
+    }
+
+    fn ctrl_shift(key: keyboard::Key) -> keyboard::Event {
+        key_event(key, keyboard::Modifiers::CTRL | keyboard::Modifiers::SHIFT)
     }
 
     /// The two capturing inputs stay distinguishable: a number row holding a draft

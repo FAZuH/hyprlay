@@ -982,6 +982,14 @@ pub enum Command {
     ResetAll,
     /// Reset one group's keys to their defaults (keeps the monitor).
     ResetGroup(Group),
+    /// Reset one key to its default. The wire form is two words because
+    /// `Key::Position` and `Key::Opacity` are spelled exactly like
+    /// `Group::Position` and `Group::Opacity`, and the group arm already
+    /// claims those words — so a bare `reset <key>` would be ambiguous for
+    /// two of the thirty keys. The group is not carried here: it is derived
+    /// from the key by [`Key::group`] and checked against the word the parse
+    /// read, so the two cannot be paired wrongly in process.
+    ResetKey(Key),
     /// Re-read config.toml from disk.
     Reload,
 
@@ -1023,11 +1031,27 @@ impl FromStr for Command {
             "restart" => Ok(Self::Restart),
             "quit" => Ok(Self::Quit),
             "reload" => Ok(Self::Reload),
-            "reset" => match arg {
-                None => Ok(Self::ResetAll),
-                Some(word) => Group::parse(word)
+            "reset" => match (arg, parts.next()) {
+                (None, _) => Ok(Self::ResetAll),
+                (Some(word), None) => Group::parse(word)
                     .map(Self::ResetGroup)
                     .ok_or_else(|| "error: reset <position|layout|opacity|colors>".to_string()),
+                // Two words is the per-key form (see `ResetKey`). The group
+                // must be the key's own group: `reset layout width` resets
+                // width, `reset opacity width` is not a thing anyone can mean.
+                (Some(group), Some(name)) => {
+                    let group = Group::parse(group).ok_or_else(|| {
+                        "error: reset <position|layout|opacity|colors> <key>".to_string()
+                    })?;
+                    // Named here rather than reusing `unknown_key`, which
+                    // closes over `arg` — the group word, not this one.
+                    let key = Key::parse(name)
+                        .ok_or_else(|| format!("error: unknown key {name:?} (try 'help')"))?;
+                    if key.group() != group {
+                        return Err(format!("error: {name} is not in the {group} group"));
+                    }
+                    Ok(Self::ResetKey(key))
+                }
             },
             "move" => match arg {
                 Some("left") => Ok(Self::MoveEdge(Edge::Left)),
@@ -1077,6 +1101,7 @@ impl fmt::Display for Command {
             Self::Reload => f.write_str("reload"),
             Self::ResetAll => f.write_str("reset"),
             Self::ResetGroup(group) => write!(f, "reset {group}"),
+            Self::ResetKey(key) => write!(f, "reset {} {}", key.group(), key.name()),
             Self::MoveEdge(edge) => {
                 let word = match edge {
                     Edge::Left => "left",
@@ -1135,6 +1160,38 @@ impl Command {
                     format!("reset {group}"),
                     vec![Effect::Reanchor, Effect::Resize],
                 )
+            }
+            // One key, restored. The whole-config blast of the two arms above
+            // is exactly what a single-key reset must not do: only the
+            // effects that key's own `apply` declares, so resetting a colour
+            // resizes nothing on screen that the colour did not already
+            // resize, and resetting `auto-save` (which owns no effect at all)
+            // asks the shell for none. Routing through `key.apply` rather than
+            // writing the field keeps one mutation rule per key.
+            Self::ResetKey(key) => {
+                let defaults = Config::default();
+                match key {
+                    // Same question `ResetGroup` answers: the monitor is the
+                    // one key a reset must never touch, because it names an
+                    // output rather than a value, and re-binding the surface
+                    // is restart work the user did not ask for. Refusing is
+                    // louder than reporting a reset that did not happen.
+                    Key::Monitor => CommandResult::err(
+                        "error: monitor is never reset (use 'set monitor <name>')",
+                    ),
+                    // Written directly, never routed: `apply` refuses the
+                    // shell-routed keys, and the daemon shell answers this
+                    // command itself when the layer has to re-bind (see
+                    // `reset_needs_restart`), exactly as it does for
+                    // `reset layout`.
+                    Key::ShowOnFullscreen => {
+                        config.show_on_fullscreen = defaults.show_on_fullscreen;
+                        // The canonical `key=value` text, so the reply is the
+                        // same string `get show-on-fullscreen` returns.
+                        CommandResult::ok(key.get(config), Vec::new())
+                    }
+                    key => key.apply(config, key.value_of(&defaults)),
+                }
             }
             Self::Reload => {
                 *config = config::load();
@@ -1298,6 +1355,7 @@ mod tests {
             Command::MoveEdge(Edge::Left),
             Command::ResetAll,
             Command::ResetGroup(Group::Opacity),
+            Command::ResetKey(Key::Opacity),
         ];
         for cmd in cases {
             assert!(
@@ -1314,6 +1372,7 @@ mod tests {
             Command::MoveEdge(Edge::Left),
             Command::ResetAll,
             Command::ResetGroup(Group::Opacity),
+            Command::ResetKey(Key::Opacity),
         ];
         for cmd in cases {
             assert!(
@@ -1506,6 +1565,250 @@ mod tests {
         apply("reset position", &mut cfg);
         assert_eq!(cfg.monitor.as_deref(), Some("DP-2"));
         assert_eq!(cfg.horizontal, Config::default().horizontal);
+    }
+
+    /// The per-key reset wire form and its reply, pinned byte for byte, and
+    /// proved total over the whole key table: `reset <group> <key>` is the
+    /// canonical text for every one of the thirty keys, and re-parses to the
+    /// same command. The GUI's R sends exactly these strings.
+    #[test]
+    fn reset_key_wire_form_is_group_then_key_for_every_key() {
+        for key in Key::ALL {
+            let group = key.group();
+            let wire = format!("reset {group} {}", key.name());
+            assert_eq!(
+                Command::ResetKey(key).to_string(),
+                wire,
+                "{} must render as `reset {group} <key>`",
+                key.name()
+            );
+            assert_eq!(
+                wire.parse::<Command>().unwrap(),
+                Command::ResetKey(key),
+                "{wire}"
+            );
+        }
+    }
+
+    /// The collision the two-word form exists to escape (see [`Command::ResetKey`]),
+    /// pinned so a pass that "simplified" the grammar back to `reset <key>`
+    /// cannot silently turn a per-key reset of `position` or `opacity` into a
+    /// whole-group reset.
+    #[test]
+    fn a_bare_reset_word_stays_a_group_even_when_it_is_also_a_key_name() {
+        for key in [Key::Position, Key::Opacity] {
+            assert_eq!(
+                Key::parse(key.name()),
+                Some(key),
+                "{} is spelled like a group",
+                key.name()
+            );
+            assert!(
+                Group::parse(key.name()).is_some(),
+                "{} is claimed by the one-word reset arm",
+                key.name()
+            );
+            assert_eq!(
+                format!("reset {}", key.name()).parse::<Command>().unwrap(),
+                Command::ResetGroup(key.group()),
+                "the one-word form must stay the group reset"
+            );
+            assert_eq!(
+                format!("reset {} {}", key.group(), key.name())
+                    .parse::<Command>()
+                    .unwrap(),
+                Command::ResetKey(key),
+                "and the per-key form must be reachable and distinct"
+            );
+        }
+    }
+
+    /// The group word is checked against the key, not ignored: `reset
+    /// opacity width` names a key that is not in that group, and a command
+    /// that resets something other than what it says is the failure this
+    /// guards.
+    #[test]
+    fn reset_key_refuses_a_group_the_key_is_not_in() {
+        assert_eq!(
+            parse_err("reset opacity width"),
+            "error: width is not in the opacity group"
+        );
+        assert_eq!(
+            parse_err("reset nonsense width"),
+            "error: reset <position|layout|opacity|colors> <key>"
+        );
+        // The unknown-key error names the KEY, not the group word that precedes it.
+        assert_eq!(
+            parse_err("reset layout nonsense"),
+            "error: unknown key \"nonsense\" (try 'help')"
+        );
+        // The one-word errors are unchanged: nothing about the existing
+        // grammar moved.
+        assert_eq!(
+            parse_err("reset everything"),
+            "error: reset <position|layout|opacity|colors>"
+        );
+    }
+
+    /// What a per-key reset does: restores that one key, leaves every other
+    /// value alone, and asks the shell only for the effects that key's own
+    /// change declares. `opacity` is the Resize case, `auto-save` declares no
+    /// effect at all, and both are asserted on the reply as well.
+    #[test]
+    fn reset_key_restores_one_key_and_nothing_else() {
+        let mut cfg = Config::default();
+        apply("set opacity 30", &mut cfg);
+        apply("set width 500", &mut cfg);
+        apply("set talking-only on", &mut cfg);
+
+        let r = apply("reset opacity opacity", &mut cfg);
+        assert_eq!(r.reply, "opacity=100", "the reply is the new value");
+        assert_eq!(r.effects, vec![Effect::Resize]);
+        assert_eq!(cfg.opacity, Config::default().opacity);
+        assert_eq!(cfg.width, 500, "another key in the same group is untouched");
+        assert!(cfg.show_only_talking_users, "and one in another group too");
+
+        // A flag: its own reply text, its own effect.
+        let r = apply("reset layout talking-only", &mut cfg);
+        assert_eq!(r.reply, "talking-only=off");
+        assert_eq!(r.effects, vec![Effect::Resize]);
+        assert_eq!(cfg.width, 500, "still untouched");
+
+        // A colour, and a key that declares no effect at all.
+        apply("set speaking-color #ff00ff", &mut cfg);
+        let r = apply("reset colors speaking-color", &mut cfg);
+        assert_eq!(r.reply, "speaking-color=#22c55e");
+        assert_eq!(cfg.speaking_color, Config::default().speaking_color);
+        let r = apply("reset layout auto-save", &mut cfg);
+        assert_eq!(r.reply, "auto-save=on");
+        assert!(
+            r.effects.is_empty(),
+            "auto-save owns no effect, so a reset of it asks for none"
+        );
+
+        // The one key whose reply names two keys: the corner preset owns
+        // `rtl`, so resetting `position` answers with both. Pinned here so a
+        // user typing that reply back into a terminal gets the same text.
+        apply("set position top-right", &mut cfg);
+        let r = apply("reset position position", &mut cfg);
+        assert_eq!(r.reply, "position=top-left rtl=off", "the two-key reply");
+        assert_eq!(r.effects, vec![Effect::Reanchor, Effect::Resize]);
+        assert!(!cfg.rtl, "the preset brought rtl back off with it");
+    }
+
+    /// The monitor decision, stated where it is made: a per-key reset of
+    /// `monitor` is refused, because `reset` and `reset <group>` both keep
+    /// the monitor choice and a single-key reset that quietly moved the
+    /// overlay to another output would be the one reset that does not.
+    #[test]
+    fn reset_key_never_moves_the_monitor() {
+        let mut cfg = Config {
+            monitor: Some("DP-2".into()),
+            ..Config::default()
+        };
+        let r = apply("reset position monitor", &mut cfg);
+        assert!(r.reply.text().starts_with("error:"));
+        assert!(r.effects.is_empty());
+        assert_eq!(cfg.monitor.as_deref(), Some("DP-2"), "the monitor stands");
+        // And nothing else was reset by the refusal.
+        assert_eq!(cfg.horizontal, Config::default().horizontal);
+
+        // `show-on-fullscreen` is the other shell-routed key, and it goes the
+        // other way: a group reset does restore it, so a single-key reset
+        // must too. Written directly, like `reset layout` writes it, because
+        // `apply` refuses the shell-routed keys.
+        let mut cfg = Config {
+            show_on_fullscreen: false,
+            ..Config::default()
+        };
+        let r = apply("reset layout show-on-fullscreen", &mut cfg);
+        assert_eq!(r.reply, "show-on-fullscreen=on");
+        assert!(cfg.show_on_fullscreen, "reset layout's behaviour, per key");
+        assert!(r.effects.is_empty(), "the shell restarts instead");
+    }
+
+    /// Every key is reachable by its own reset, and a key already at its
+    /// default is a no-op rather than an error. Driven over the whole table
+    /// so a key added without a reset path fails here.
+    #[test]
+    fn every_key_has_a_working_per_key_reset() {
+        for key in Key::ALL {
+            if key == Key::Monitor {
+                continue; // pinned separately: refused, above.
+            }
+            // Start from a config where every key is off its default, so the
+            // reset has something to restore.
+            let mut moved = Config::default();
+            for other in Key::ALL {
+                // The monitor is never set through `apply` (the shell owns
+                // it), so it stays at its default in both configs.
+                if other == key || other == Key::Monitor {
+                    continue;
+                }
+                Command::Set(other, moved_value(other)).apply_config(&mut moved);
+            }
+            let before = moved.clone();
+            let r = apply(&format!("reset {} {}", key.group(), key.name()), &mut moved);
+            assert!(r.reply.is_ok(), "{}: {}", key.name(), r.reply);
+            assert_eq!(
+                key.value_of(&moved),
+                key.value_of(&Config::default()),
+                "{} must come back to its default",
+                key.name()
+            );
+            // Everything else is untouched, with one exception asserted
+            // rather than skipped: the corner preset owns `rtl` (a right-side
+            // preset enables it), so resetting `position` brings `rtl` back
+            // to ITS default with it — the same coupling `set position` has.
+            for other in Key::ALL {
+                if other == key {
+                    continue;
+                }
+                let expected = if key == Key::Position && other == Key::Rtl {
+                    other.value_of(&Config::default())
+                } else {
+                    other.value_of(&before)
+                };
+                assert_eq!(
+                    other.value_of(&moved),
+                    expected,
+                    "resetting {} must leave {} {}",
+                    key.name(),
+                    other.name(),
+                    if key == Key::Position && other == Key::Rtl {
+                        "at its default (the corner preset owns rtl)"
+                    } else {
+                        "where it was"
+                    }
+                );
+            }
+            // And a second press is a no-op, not an error.
+            let again = apply(&format!("reset {} {}", key.group(), key.name()), &mut moved);
+            assert!(again.reply.is_ok(), "a repeat reset: {}", again.reply);
+        }
+    }
+
+    /// A value that differs from the key's default, for every key that can
+    /// hold one. Offsets stay in bounds and inside each other's window, so
+    /// the pairs the domain cross-checks stay legal.
+    fn moved_value(key: Key) -> Value {
+        match key.value_of(&Config::default()) {
+            Value::Num(v) => {
+                let (min, max) = key.num_bounds().expect("numeric key");
+                Value::Num(if v + 1 <= max { v + 1 } else { v - 1 })
+            }
+            Value::Flag(on) => Value::Flag(!on),
+            Value::Color(c) => Value::Color(HexColor::from_rgb8(
+                c.rgb()[0] ^ 0xff,
+                c.rgb()[1],
+                c.rgb()[2],
+            )),
+            Value::Corner(_) => Value::Corner(Corner::BottomRight),
+            Value::Anchor(_) => Value::Anchor(AnchorMode::Top),
+            Value::RosterOrder(_) => Value::RosterOrder(RosterOrder::Name),
+            // The monitor is never reset and never reached here.
+            other => panic!("{key:?} has no moved value: {other:?}"),
+        }
     }
 
     #[test]
