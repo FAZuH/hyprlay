@@ -230,6 +230,10 @@ FIELD_BG='#292b33'
 DISABLED_BG='#1c1d21'
 ACCENT='#5865f2'
 ACCENT_LIT='#5966e6'
+# The sidebar's own background, from `theme::SIDEBAR_BG` 0.103/0.106/0.118 ->
+# #1a1b1e. Repeated rather than imported: this is a shell script and the theme
+# lives in Rust. What the shortcut-list block measures the list's ink against.
+SIDEBAR_BG='#1a1b1e'
 # The content background a row with no fill of its own shows through: the theme
 # background 0.118/0.121/0.133 -> #1e1f22. Needed by the credential probes,
 # which assert on a row that is *not* focused.
@@ -1181,6 +1185,94 @@ shot r_none
 key r 1
 shot r_none_after
 assert_pixels "R with no field focused changes nothing at all" r_none r_none_after same
+
+# ---------------------------------------------------------- the shortcut list ---
+# The sidebar's cheat-sheet is the one part of the window whose correctness is
+# not a keystroke: it is static text, and every line of it has to be drawn whole
+# inside its own panel at the default window size. i3 tiles this window to the
+# 1400x900 screen, which is wider than the app's own 800x600 default, so the run
+# so far says nothing about whether the list fits — hence this block, which
+# takes the window off fullscreen, puts it back to the default size, and
+# photographs the corner.
+#
+# Re-derive the geometry after any layout change. The list sits between the nav
+# block and the status bar, so `LIST_CROP` is that gap at the sidebar's own
+# width, and `LIST_EMPTY` is a strip of the same gap known to hold nothing:
+#   magick default_size.png -crop 160x170+0+370 +repage -resize 300% zoom.png
+# In this state the list's ink runs y 373..538 and x 8..140, the sidebar ends at
+# x 159, and the status bar starts at y 564.
+LIST_CROP='160x170+0+370'
+LIST_EMPTY='160x20+0+340'
+SIDEBAR_EDGE=160
+# y 564 is where the status bar starts; the list's bottom must stay clear of it.
+STATUS_TOP=564
+
+i3-msg floating enable >/dev/null 2>&1
+xdotool windowsize "$W" 800 600
+sleep 2
+shot default_size
+xdotool getwindowgeometry "$W" | grep -q '800x600' &&
+	pass "the window is back at its default 800x600" ||
+	fail "the window did not take the default size"
+
+crop default_size shortcut_list "$LIST_CROP"
+
+# Every line is drawn. Measured as "pixels that are not the panel's own
+# background" rather than as bright pixels: the sheet is MUTED (#878a94), a
+# dim grey, and the bright-pixel probe used elsewhere in this script would count
+# almost none of it. The threshold is calibrated against a strip of the same gap
+# that holds nothing, so the two numbers are comparable — a full sheet runs near
+# 4000 non-background px against 0 on the empty strip, and the +500 margin sits
+# well under that so a list that lost most of its lines still fails.
+drawn() {
+	# `grep -i` already matches the lowercase palette constant, so the colour
+	# goes in as written.
+	convert "$SHOTS/$1.png" -crop "$2" +repage -fuzz 2% -format "%c" \
+		histogram:info:- 2>>"$ROOT/import.log" |
+		grep -Evi "$SIDEBAR_BG" | awk -F': *' '{n += $1} END {print n + 0}'
+}
+LIST_INK=$(drawn default_size "$LIST_CROP")
+EMPTY_INK=$(drawn default_size "$LIST_EMPTY")
+if [ "$LIST_INK" -gt $((EMPTY_INK + 500)) ]; then
+	pass "the shortcut list is drawn: $LIST_INK non-background px vs $EMPTY_INK on an empty strip"
+else
+	fail "the shortcut list drew almost nothing: $LIST_INK non-background px vs $EMPTY_INK on an empty strip"
+fi
+
+# …and it is not clipped. The list is anchored to the bottom of the sidebar and
+# grows upwards, so a list too tall for the panel pushes its top past the
+# sidebar's own top edge, and a list too wide spills past x=$SIDEBAR_EDGE onto
+# the content pane behind it. Both are measured off the ink's bounding box,
+# taken over the sidebar's own width so the content pane cannot contribute to it.
+# `-trim` prints nothing at all for an image that is one flat colour, and an
+# empty `read` would leave the variables empty — which the arithmetic below
+# would then read as zero, and a zero-width box passes the right-edge check.
+# So the box is required to be four numbers before anything is measured.
+BOX=$(magick "$SHOTS/default_size.png" -crop "$LIST_CROP" +repage -fuzz 2% \
+	-fill black +opaque "$SIDEBAR_BG" -trim -format '%X %Y %w %h' info: 2>>"$ROOT/import.log")
+read -r LIST_X LIST_Y LIST_W LIST_H <<<"$BOX"
+if [ -z "${LIST_W:-}" ] || [ "${LIST_W:-0}" -eq 0 ] 2>/dev/null; then
+	fail "the list's ink box could not be measured (got '$BOX'), so nothing below it is trustworthy"
+	printf '  skip  the right-edge and status-bar checks: no box to measure\n'
+else
+	LIST_RIGHT=$((LIST_X + LIST_W))
+	LIST_BOTTOM=$((370 + LIST_Y + LIST_H))
+	if [ "$LIST_RIGHT" -le "$SIDEBAR_EDGE" ]; then
+		pass "the list stays inside the sidebar: right edge at $LIST_RIGHT, panel ends at $SIDEBAR_EDGE"
+	else
+		fail "the list runs past its panel: right edge at $LIST_RIGHT, panel ends at $SIDEBAR_EDGE"
+	fi
+	if [ "$LIST_BOTTOM" -lt "$STATUS_TOP" ]; then
+		pass "the list is clear of the status bar: bottom at $LIST_BOTTOM, status bar starts at $STATUS_TOP"
+	else
+		fail "the list runs into the status bar: bottom at $LIST_BOTTOM, status bar starts at $STATUS_TOP"
+	fi
+fi
+
+# Put the window back so the rest of the run, and its summary, see the same
+# state they were written against.
+xdotool windowsize "$W" 1400 900
+sleep 1
 
 # ------------------------------------------------------------------- summary ---
 cat <<SUMMARY
