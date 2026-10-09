@@ -997,24 +997,24 @@ mod focus_tests {
         assert_eq!(task.units(), 1, "and it sends one command");
     }
 
-    /// Both ends stop, and "nothing happens" is asserted as nothing spawned: a
-    /// boundary step must not put a command on the socket. Held arrows run the
-    /// same step, so a key the user leans on at the last option stays there
-    /// rather than running past it.
+    /// The option selects wrap at both ends, which is asserted as commands
+    /// spawned: a boundary step puts the other end's command on the socket.
+    /// Held arrows run the same step, so a key the user leans on keeps
+    /// cycling the row instead of resting on the last option.
     #[test]
-    fn a_step_at_either_end_stops_where_the_row_is() {
+    fn a_step_at_either_end_wraps_to_the_other_end() {
         let mut g = gui();
         g.focus = Some(FocusTarget::Field(Key::Anchor));
 
         let first = update(&mut g, Message::KeyPressed(arrow_left()));
         assert_eq!(
             g.config.anchor,
-            AnchorMode::Auto,
-            "Left on auto does not wrap to bottom"
+            AnchorMode::Bottom,
+            "Left on auto wraps to bottom"
         );
-        assert_eq!(first.units(), 0, "and puts no command on the socket");
+        assert_eq!(first.units(), 1, "and puts its command on the socket");
 
-        // Three steps from auto reach bottom; four more, held, must not move.
+        // Three steps from bottom cycle all the way round to bottom again.
         for _ in 0..3 {
             let _ = update(&mut g, Message::KeyPressed(arrow_right()));
         }
@@ -1022,10 +1022,36 @@ mod focus_tests {
         let held = update(&mut g, Message::KeyPressed(held_right()));
         assert_eq!(
             g.config.anchor,
-            AnchorMode::Bottom,
-            "a held Right at the last option stops there"
+            AnchorMode::Auto,
+            "a held Right past the last option wraps to the first"
         );
-        assert_eq!(held.units(), 0, "and sends nothing while held");
+        assert_eq!(held.units(), 1, "and sends its command while held");
+    }
+
+    /// A step onto the row's own lone option sends nothing and marks nothing:
+    /// with zero outputs reported the monitor row holds only "active", so an
+    /// arrow there is a step that changes nothing — no command on the socket,
+    /// no unsaved marker, no config touched.
+    #[test]
+    fn a_step_onto_a_lone_option_sends_nothing_and_marks_nothing() {
+        let mut g = gui();
+        assert!(
+            g.monitors.is_empty(),
+            "this test needs the zero-output shape with its lone chip"
+        );
+        g.focus = Some(FocusTarget::Field(Key::Monitor));
+        for key in [arrow_left(), arrow_right()] {
+            let task = update(&mut g, Message::KeyPressed(key));
+            assert_eq!(
+                task.units(),
+                0,
+                "a lone option puts no command on the socket"
+            );
+            assert!(
+                !g.dirty,
+                "and a step that changes nothing marks nothing dirty"
+            );
+        }
     }
 
     /// A held key is a stream of further KeyPressed events, and one repeat is

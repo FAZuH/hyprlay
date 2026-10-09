@@ -63,9 +63,11 @@ pub(super) fn num_in_bounds(key: Key, v: i64) -> bool {
 ///
 /// `None` when there is nothing to send, and there are three ways that happens:
 /// a row that neither holds a number nor offers a fixed set of choices (a
-/// colour editor, a flag), a choice row at either end, and a number already at
-/// its bound. The step stops at the boundary rather than wrapping, so a step
-/// past either end would tell the daemon to move somewhere the user cannot see.
+/// colour editor, a flag), a number already at its bound, and a choice row
+/// with a single option. A choice row with somewhere to go wraps past either
+/// end onto the other end, so a held arrow keeps cycling the row instead of
+/// stopping on the last option — but wrapping a lone option onto itself would
+/// send a command that changes nothing and still marks the window dirty.
 ///
 /// A number step is clamped to the bounds the GUI and the daemon share, so the
 /// value can reach a bound and stop there but can never leave the range,
@@ -84,12 +86,17 @@ pub(super) fn step_command(gui: &Gui, key: Key, forward: bool) -> Option<Command
         return (next != current).then_some(Command::Set(key, Value::Num(next)));
     }
     let options = fields::options(gui, key);
+    if options.len() < 2 {
+        return None;
+    }
     let current = key.value_of(&gui.config);
     let index = options.iter().position(|value| *value == current)?;
     let next = if forward {
-        options.get(index + 1)
+        options.get(index + 1).or_else(|| options.first())
+    } else if index == 0 {
+        options.last()
     } else {
-        index.checked_sub(1).and_then(|i| options.get(i))
+        options.get(index - 1)
     }?;
     Some(Command::Set(key, next.clone()))
 }
@@ -237,42 +244,77 @@ mod tests {
         );
     }
 
-    /// Both ends stop. The owner ruled out wrapping, and the reason is in the
-    /// assertion: a wrap would send a command for a choice the keyboard has
-    /// visibly run past, so the daemon would be told to move while the row
-    /// says it has not.
+    /// Both ends wrap: Left on the first option returns to the last, and
+    /// Right on the last returns to the first, so a held arrow keeps cycling
+    /// the row instead of stopping.
     #[test]
-    fn an_option_step_at_either_end_sends_nothing() {
+    fn an_option_step_at_either_end_wraps_to_the_other_end() {
         let mut g = gui();
         assert_eq!(
             step_command(&g, Key::Anchor, false),
-            None,
-            "Left on the first option has no previous one"
+            Some(Command::Set(Key::Anchor, Value::Anchor(AnchorMode::Bottom))),
+            "Left on the first option wraps to the last"
         );
         assert_eq!(
             step_command(&g, Key::Position, false),
-            None,
-            "and neither has Left on the first preset"
+            Some(Command::Set(
+                Key::Position,
+                Value::Corner(Corner::BottomRight)
+            )),
+            "and so does Left on the first preset"
         );
         g.config.anchor = AnchorMode::Bottom;
         assert_eq!(
             step_command(&g, Key::Anchor, true),
-            None,
-            "Right on the last option has no next one"
+            Some(Command::Set(Key::Anchor, Value::Anchor(AnchorMode::Auto))),
+            "Right on the last option wraps to the first"
         );
         g.config.horizontal = H::Right;
         g.config.vertical = V::Bottom;
         assert_eq!(
             step_command(&g, Key::Position, true),
-            None,
-            "and neither has Right on the last preset"
+            Some(Command::Set(Key::Position, Value::Corner(Corner::TopLeft))),
+            "and so does Right on the last preset"
         );
         g.config.monitor = Some("HDMI-A-1".into());
         assert_eq!(
             step_command(&g, Key::Monitor, true),
-            None,
-            "or on the last reported output"
+            Some(Command::Set(
+                Key::Monitor,
+                Value::Target(MonitorTarget::Active)
+            )),
+            "and on the last reported output"
         );
+        g.config.monitor = None;
+        assert_eq!(
+            step_command(&g, Key::Monitor, false),
+            Some(Command::Set(
+                Key::Monitor,
+                Value::Target(MonitorTarget::Named("HDMI-A-1".into()))
+            )),
+            "while Left on the first output wraps to the last"
+        );
+    }
+
+    /// A choice row with a single option has nowhere to step: wrapping it onto
+    /// itself would send a command that changes nothing and still marks the
+    /// window dirty. The monitor row with zero outputs reported is the shape
+    /// this happens in — "active" is its only chip — so an arrow there sends
+    /// nothing either way.
+    #[test]
+    fn a_single_option_row_steps_to_nothing() {
+        let g = test_gui("");
+        assert!(
+            g.monitors.is_empty(),
+            "this test needs the zero-output shape with its lone chip"
+        );
+        for forward in [true, false] {
+            assert_eq!(
+                step_command(&g, Key::Monitor, forward),
+                None,
+                "a lone option wraps onto itself, so there is no command to send"
+            );
+        }
     }
 
     /// A row with neither a number nor a fixed set of choices has no step at
@@ -413,8 +455,8 @@ mod tests {
     }
 
     /// The other half of the boundary: standing on a bound, the step that would
-    /// leave the range produces no command at all — no write, no wire text —
-    /// exactly as a choice row stops at its last option.
+    /// leave the range produces no command at all — no write, no wire text.
+    /// Numbers stay clamped; only choice rows wrap.
     #[test]
     fn a_number_step_off_the_bound_sends_nothing() {
         let mut g = gui();

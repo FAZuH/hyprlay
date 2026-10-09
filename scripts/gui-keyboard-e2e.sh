@@ -663,8 +663,8 @@ assert_region_pixels "and the page where it stood" \
 # ------------------------------------------------------ the option selects ---
 # The rows that present a fixed set of choices: the corner presets, the anchor
 # chips, the roster-order chips and the monitor chips. Enter, Space and Right
-# pick the next option, Left the previous one, and the selection stops at either
-# end rather than wrapping. Every check below probes the colour of the chip
+# pick the next option, Left the previous one, wrapping past either end rather
+# than stopping. Every check below probes the colour of the chip
 # itself — accent for the selected one, the idle chip background for the rest —
 # so it cannot be satisfied by the window merely changing.
 #
@@ -689,67 +689,82 @@ assert_pixel "the first preset is selected on a clean config" opt_first 700 90 "
 assert_pixel "and the other three are not" opt_first 1000 90 "$FIELD_BG"
 assert_pixel "the focused row wears the fill behind its chips" opt_first 774 60 "$FOCUS_FILL"
 
-# Left on the first option: the boundary. Nothing wraps, and nothing moves —
-# not one pixel of the row, and not the window.
+# Left past the first option wraps onto the last one: the selection cycles
+# rather than stopping, so the row moves and the last preset takes the accent.
 key Left 1
-shot opt_first_boundary
-assert_pixels "Left on the first option changes nothing" opt_first opt_first_boundary same
-assert_region_pixels "and not one pixel of the row" \
-	opt_first opt_first_boundary 1220x100+176+50 same
-assert_pixel "the first preset is still the selected one" \
-	opt_first_boundary 700 90 "$ACCENT"
+shot opt_first_wrap
+assert_pixels "Left past the first option wraps to the last" opt_first opt_first_wrap differs
+assert_pixel "the last preset is now selected" opt_first_wrap 1000 130 "$ACCENT"
+assert_pixel "and the first one it left is not" opt_first_wrap 700 90 "$FIELD_BG"
 
-# Enter steps to the next option, and the row keeps the fill: the chip moved,
-# not the focus and not the page.
+# Enter steps forward off the last option, wrapping back onto the first: the
+# chip moved, not the focus and not the page.
 key Enter 1
 shot opt_enter
-assert_pixels "Enter selects the next option" opt_first_boundary opt_enter differs
-assert_pixel "the next preset is now selected" opt_enter 1000 90 "$ACCENT"
-assert_pixel "and the one Enter left is not" opt_enter 700 90 "$FIELD_BG"
-assert_pixel "the last preset is still not selected" opt_enter 1000 130 "$FIELD_BG"
+assert_pixels "Enter wraps past the last option onto the first" opt_first_wrap opt_enter differs
+assert_pixel "the first preset is selected again" opt_enter 700 90 "$ACCENT"
+assert_pixel "and the last one Enter left is not" opt_enter 1000 130 "$FIELD_BG"
+assert_pixel "the second preset is still not selected" opt_enter 1000 90 "$FIELD_BG"
 assert_pixel "focus stayed on the row" opt_enter 774 60 "$FOCUS_FILL"
 assert_region_pixels "Enter moved the choice, not the page" \
-	opt_first_boundary opt_enter 1220x200+176+300 same
+	opt_first_wrap opt_enter 1220x200+176+300 same
 
-# Right steps to the next option, which is the chip below-and-left here: the
+# Right steps to the next option, which is the chip to the right here: the
 # order the arrow walks is the order the 2x2 grid paints.
 key Right 1
 shot opt_right
-assert_pixel "Right selects the next option" opt_right 700 130 "$ACCENT"
-assert_pixel "and the one before it is unselected" opt_right 1000 90 "$FIELD_BG"
+assert_pixel "Right selects the next option" opt_right 1000 90 "$ACCENT"
+assert_pixel "and the one before it is unselected" opt_right 700 90 "$FIELD_BG"
 
 # Left walks the same row back.
 key Left 1
 shot opt_left
-assert_pixel "Left selects the previous option" opt_left 1000 90 "$ACCENT"
-assert_pixel "and the one it left is unselected" opt_left 700 130 "$FIELD_BG"
+assert_pixel "Left selects the previous option" opt_left 700 90 "$ACCENT"
+assert_pixel "and the one it left is unselected" opt_left 1000 90 "$FIELD_BG"
 
-# A held key repeats, and stops on the last option. Held from top-right for
-# three seconds: if the repeat were ignored the row would sit on bottom-left,
-# and if the last option wrapped it would be back on top-left — so the
-# bottom-right chip being the accent one says both.
+# Five single steps from the first option cycle through the wrap and land on
+# the second one: past the last chip, back onto the first, and one further.
+# Walked one at a time, so the landing is exact — a fixed-duration hold cannot
+# pin one, because which chip a hold leaves depends on the repeat count mod 4.
+# Under the old stop-at-the-end behaviour this lands on the last chip instead,
+# and with repeats ignored it never leaves the first, so the second chip being
+# the accent one says the selection cycles.
+walk Right 5
+shot opt_cycled
+assert_pixel "five steps cycled through the wrap onto the second option" opt_cycled 1000 90 "$ACCENT"
+assert_pixel "the first option is unselected" opt_cycled 700 90 "$FIELD_BG"
+assert_pixel "and the last one did not hold the selection" opt_cycled 1000 130 "$FIELD_BG"
+assert_region_pixels "cycling moved the choice, not the page" \
+	opt_left opt_cycled 1220x200+176+300 same
+
+# A held key repeats, and the repeat stays on the row: the page yardstick is
+# byte-identical, so sustained auto-repeat moves chips and nothing else. No
+# chip is named here on purpose — which one a hold leaves is the repeat count
+# mod 4, which no assertion can pin. That one repeat is one step is pinned
+# deterministically by `a_held_arrow_repeats_the_step` in src/gui/update.rs.
 hold Right 3
 shot opt_held
-assert_pixel "a held Right repeats the step" opt_held 1000 130 "$ACCENT"
-assert_pixel "the option before the last one is not selected" opt_held 700 130 "$FIELD_BG"
-assert_pixel "and the selection did not wrap to the first one" opt_held 700 90 "$FIELD_BG"
 assert_region_pixels "a held key moved the choice, not the page" \
-	opt_left opt_held 1220x200+176+300 same
+	opt_cycled opt_held 1220x200+176+300 same
 
-# Held at that last option it stops there: the boundary holds under repeat too.
-hold Right 3
-shot opt_held_stop
-assert_pixels "a held Right on the last option changes nothing" opt_held opt_held_stop same
-assert_region_pixels "and not one pixel of the row" \
-	opt_held opt_held_stop 1220x100+176+50 same
-assert_pixel "the last preset is still the selected one" opt_held_stop 1000 130 "$ACCENT"
+# The hold leaves an unknown chip selected, and the anchor checks below probe
+# the presets row behind the anchor one — so walk back onto a known chip
+# first. Four Lefts visit every chip of the four, and the loop stops the
+# moment the first preset takes the accent again.
+for _ in 1 2 3 4; do
+	key Left 1
+	shot opt_reknown
+	got=$(convert "$SHOTS/opt_reknown.png" -format "%[hex:p{700,90}]" info: 2>>"$ROOT/import.log")
+	[ "#${got,,}" = "$ACCENT" ] && break
+done
+assert_pixel "the presets row is back on its first chip" opt_reknown 700 90 "$ACCENT"
 
 # A second row of the same shape, three chips in a line: Tab reaches it, the
 # presets row unfocuses behind it, and Right moves one chip along.
 key Tab 1
 shot opt_anchor
 assert_pixel "Tab reaches the anchor row" opt_anchor 180 185 "$ACCENT"
-assert_pixel "and the presets row is unfocused behind it" opt_anchor 700 90 "$FIELD_BG"
+assert_pixel "and an unselected preset behind it stays idle" opt_anchor 1000 90 "$FIELD_BG"
 key Right 1
 shot opt_anchor_step
 assert_pixel "Right moves the anchor one chip along" opt_anchor_step 240 185 "$ACCENT"
@@ -758,17 +773,23 @@ assert_pixel "and so is the one it did not reach" opt_anchor_step 295 185 "$FIEL
 assert_region_pixels "the presets row above did not move" \
 	opt_anchor opt_anchor_step 1220x100+176+50 same
 
-# Left on the first anchor chip is that row's boundary too, and it stops the
-# same way: the second press above left auto behind, so one Left returns to it
-# and a second changes nothing.
+# Left past the first anchor chip wraps onto the last one the same way: the
+# second press above left auto behind, so one Left returns to it and a second
+# wraps to bottom.
 key Left 1
 shot opt_anchor_back
 key Left 1
 shot opt_anchor_first
 assert_pixel "Left walks the anchor back to auto" opt_anchor_back 180 185 "$ACCENT"
-assert_pixels "and Left on it again stops at the boundary" \
-	opt_anchor_back opt_anchor_first same
-assert_pixel "with auto still selected" opt_anchor_first 180 185 "$ACCENT"
+assert_pixel "and Left past it wraps to bottom" opt_anchor_first 295 185 "$ACCENT"
+assert_pixel "with auto unselected" opt_anchor_first 180 185 "$FIELD_BG"
+
+# Right past the last chip wraps back onto auto, which leaves the row on the
+# clean default the R checks below start from.
+key Right 1
+shot opt_anchor_renorm
+assert_pixel "Right past the last chip wraps back onto auto" opt_anchor_renorm 180 185 "$ACCENT"
+assert_pixel "with bottom unselected" opt_anchor_renorm 295 185 "$FIELD_BG"
 
 # ----------------------------------------------------------- the number rows ---
 # The rows that hold a number instead of a fixed set of choices. The arrow keys
@@ -1285,7 +1306,7 @@ cat <<SUMMARY
       and that includes every step's own command: what the arrow keys send is
       asserted at the Command seam instead, by
       an_option_step_sends_the_neighbouring_choice,
-      an_option_step_at_either_end_sends_nothing,
+      an_option_step_at_either_end_wraps_to_the_other_end,
       a_number_step_sends_the_neighbouring_value,
       a_number_step_stays_inside_the_shared_bounds and
       a_held_number_step_comes_to_rest_and_stops_there in src/gui/commands.rs.
