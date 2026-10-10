@@ -393,6 +393,30 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
                 lifecycle: Some(Lifecycle::Restart),
             };
         }
+        // A single-key reset of the one key whose change re-binds the layer
+        // surface: the same restart `reset layout` owes, asked for by one key
+        // instead of a whole group. Written here rather than by `apply_config`
+        // so the daemon decides to restart instead of writing a value the
+        // running overlay would not honour.
+        Command::ResetKey(Key::ShowOnFullscreen) if reset_needs_restart(state, &cmd) => {
+            if !can_reexec() {
+                return reexec_unavailable(
+                    "reset layout show-on-fullscreen",
+                    "error: could not reset show-on-fullscreen: daemon binary is missing",
+                );
+            }
+            let requested = hyprlay_core::config::Config::default().show_on_fullscreen;
+            state.config_mut().show_on_fullscreen = requested;
+            state.config_mut().save();
+            return CommandOutcome {
+                reply: Reply::Ok(format!(
+                    "restarting (reset show-on-fullscreen={})",
+                    if requested { "on" } else { "off" }
+                )),
+                effects: Vec::new(),
+                lifecycle: Some(Lifecycle::Restart),
+            };
+        }
         Command::ResetGroup(group)
             if group == Group::Layout && reset_needs_restart(state, &cmd) =>
         {
@@ -477,6 +501,10 @@ pub(crate) fn reset_needs_restart(state: &Overlay, cmd: &Command) -> bool {
                 hyprlay_core::config::Config::default().show_on_fullscreen,
             )
         }
+        Command::ResetKey(Key::ShowOnFullscreen) => show_on_fullscreen_change_restarts(
+            state.config().show_on_fullscreen,
+            hyprlay_core::config::Config::default().show_on_fullscreen,
+        ),
         _ => false,
     }
 }
@@ -721,6 +749,33 @@ mod tests {
             &o2,
             &Command::ResetGroup(Group::Layout)
         ));
+    }
+
+    /// The same rule for the per-key reset of the one key that re-binds the
+    /// layer surface: flipping `show-on-fullscreen` needs the restart
+    /// `reset layout` owes, and every other key needs none — a single-key
+    /// reset of a colour must not restart the daemon to repaint a colour.
+    #[test]
+    fn a_per_key_reset_restarts_only_for_show_on_fullscreen() {
+        let flipped = Overlay::new(hyprlay_core::config::Config {
+            show_on_fullscreen: false,
+            ..hyprlay_core::config::Config::default()
+        });
+        assert!(reset_needs_restart(
+            &flipped,
+            &Command::ResetKey(Key::ShowOnFullscreen)
+        ));
+        let clean = Overlay::new(hyprlay_core::config::Config::default());
+        assert!(!reset_needs_restart(
+            &clean,
+            &Command::ResetKey(Key::ShowOnFullscreen)
+        ));
+        for key in [Key::SpeakingColor, Key::Width, Key::Opacity, Key::OffsetX] {
+            assert!(
+                !reset_needs_restart(&flipped, &Command::ResetKey(key)),
+                "resetting {key:?} must not restart the daemon"
+            );
+        }
     }
 
     #[test]

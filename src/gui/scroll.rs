@@ -3,7 +3,8 @@
 //! viewport top. Also owns the two widget ids shared across the GUI: the
 //! header's search input and the one-page content scrollable.
 
-use hyprlay_core::domain::Key;
+use std::collections::HashMap;
+
 use iced::Rectangle;
 use iced::Task;
 use iced::Vector;
@@ -84,9 +85,11 @@ fn reveal_scroll(scroll_y: f32, viewport_h: f32, offset: f32, height: f32) -> Op
 }
 
 /// What the next measure pass should scroll for.
+#[derive(Debug, Clone)]
 pub(super) enum Jump {
     Section(Section),
-    Field(Key),
+    /// A row, by the widget id it is tagged with (`fields::row_id`).
+    Row(Id),
 }
 
 /// Measure the one-page content and report back as [`Message::Measured`].
@@ -99,7 +102,7 @@ pub(super) fn measure_sections(jump: Option<Jump>) -> Task<Message> {
         content: None,
         offsets: [0.0; Section::ALL.len()],
         anchored: false,
-        rows: [None; Key::ALL.len()],
+        rows: HashMap::new(),
     })
 }
 
@@ -175,8 +178,10 @@ struct MeasureSections {
     /// Whether a section header's anchor was visited, i.e. whether `offsets`
     /// means anything.
     anchored: bool,
-    /// Field-row geometry, indexed like [`Key::ALL`].
-    rows: [Option<(f32, f32)>; Key::ALL.len()],
+    /// Geometry of every id-carrying container, keyed by that id. A row's id
+    /// comes from `fields::row_id`, so a keyed row and a keyless one are
+    /// measured the same way and `Jump::Row` needs no per-variant branch.
+    rows: HashMap<Id, (f32, f32)>,
 }
 
 impl Operation<Message> for MeasureSections {
@@ -228,30 +233,25 @@ impl Operation<Message> for MeasureSections {
                 self.offsets[index] = offset_within_content(bounds, content.content);
             }
         }
-        for (index, key) in Key::ALL.into_iter().enumerate() {
-            if id == &Id::new(key.name()) {
-                self.rows[index] = Some((
-                    offset_within_content(bounds, content.content),
-                    bounds.height,
-                ));
-            }
-        }
+        self.rows.insert(
+            id.clone(),
+            (
+                offset_within_content(bounds, content.content),
+                bounds.height,
+            ),
+        );
     }
 
     fn finish(&self) -> Outcome<Message> {
         let Some(content) = self.content else {
             return Outcome::None;
         };
-        // A field jump answers on its own instead of through Measured: the row
+        // A row jump answers on its own instead of through Measured: the row
         // may already be on screen, and then nothing at all should move.
-        if let Some(Jump::Field(key)) = self.jump {
-            let target = Key::ALL
-                .iter()
-                .position(|k| *k == key)
-                .and_then(|index| self.rows[index])
-                .and_then(|(offset, height)| {
-                    reveal_scroll(content.scroll_y, content.viewport.height, offset, height)
-                });
+        if let Some(Jump::Row(row)) = &self.jump {
+            let target = self.rows.get(row).and_then(|(offset, height)| {
+                reveal_scroll(content.scroll_y, content.viewport.height, *offset, *height)
+            });
             return match target {
                 Some(y) => Outcome::Some(Message::ScrollContentTo(y)),
                 None => Outcome::None,
@@ -299,17 +299,21 @@ mod tests {
         }
     }
 
-    /// A measure pass over a page scrolled 700 px down, with one field row
-    /// recorded at content offset 300 (so it sits 400 px *above* the viewport
-    /// top) and one at 3000 (below the fold). `reveal_scroll` turns those
-    /// into the offsets the page must jump to.
-    fn measure_at_700() -> (MeasureSections, usize) {
+    /// The widget id the fixture row is tagged with. Any `&'static str` would
+    /// do — the reveal looks a row up by the id `fields::row_id` gave it, so
+    /// using a real key name here also keeps that path honest.
+    const FIXTURE_ROW: &str = "max-rows";
+
+    /// A measure pass over a page scrolled 700 px down, aimed at one row the
+    /// caller then places with [`record_row`]. `reveal_scroll` turns that
+    /// geometry into the offset the page must jump to.
+    fn measure_at_700() -> MeasureSections {
         let mut op = MeasureSections {
-            jump: Some(Jump::Field(Key::MaxRows)),
+            jump: Some(Jump::Row(Id::new(FIXTURE_ROW))),
             content: None,
             offsets: [0.0; Section::ALL.len()],
             anchored: true,
-            rows: [None; Key::ALL.len()],
+            rows: HashMap::new(),
         };
         op.scrollable(
             Some(&Id::new(CONTENT_SCROLL_ID)),
@@ -318,20 +322,27 @@ mod tests {
             Vector::new(0.0, 700.0),
             &mut Unused,
         );
-        (
-            op,
-            Key::ALL.iter().position(|k| *k == Key::MaxRows).unwrap(),
-        )
+        op
+    }
+
+    /// Place the fixture row at `offset` px below the content's top, `height`
+    /// tall — through the traversal hook rather than the map, so the recording
+    /// is the code the app runs.
+    fn record_row(op: &mut MeasureSections, offset: f32, height: f32) {
+        op.container(
+            Some(&Id::new(FIXTURE_ROW)),
+            Rectangle::new(Point::new(0.0, offset), Size::new(600.0, height)),
+        );
     }
 
     /// The reveal offset `op` decided on, or `None` when it decided to leave
-    /// the page alone. `Outcome` is not `PartialEq`, and only the field jump
+    /// the page alone. `Outcome` is not `PartialEq`, and only a row jump
     /// answers with a scroll.
     fn reveal(op: &MeasureSections) -> Option<f32> {
         match op.finish() {
             Outcome::Some(Message::ScrollContentTo(y)) => Some(y),
             Outcome::None => None,
-            other => panic!("a field jump answers with a scroll or nothing, got {other:?}"),
+            other => panic!("a row jump answers with a scroll or nothing, got {other:?}"),
         }
     }
 
@@ -341,7 +352,7 @@ mod tests {
     /// 0.0 forever. That constant is what left Shift+Tab revealing nothing.
     #[test]
     fn the_scroll_offset_is_the_translation_not_the_two_rects() {
-        let (op, _) = measure_at_700();
+        let op = measure_at_700();
         assert_eq!(op.content.expect("content measured").scroll_y, 700.0);
     }
 
@@ -351,16 +362,16 @@ mod tests {
     /// view" and the ring walks off-screen with the page staying put.
     #[test]
     fn a_row_above_a_scrolled_page_is_revealed() {
-        let (mut op, index) = measure_at_700();
-        op.rows[index] = Some((300.0, 60.0));
+        let mut op = measure_at_700();
+        record_row(&mut op, 300.0, 60.0);
         assert_eq!(reveal(&op), Some(292.0));
     }
 
     /// And the mirror: a row the page has not reached yet still scrolls down.
     #[test]
     fn a_row_below_a_scrolled_page_is_revealed_too() {
-        let (mut op, index) = measure_at_700();
-        op.rows[index] = Some((3000.0, 60.0));
+        let mut op = measure_at_700();
+        record_row(&mut op, 3000.0, 60.0);
         assert_eq!(reveal(&op), Some(2992.0));
     }
 
@@ -368,8 +379,8 @@ mod tests {
     /// through one section walks the ring and not the page.
     #[test]
     fn a_row_inside_a_scrolled_viewport_is_left_alone() {
-        let (mut op, index) = measure_at_700();
-        op.rows[index] = Some((900.0, 60.0));
+        let mut op = measure_at_700();
+        record_row(&mut op, 900.0, 60.0);
         assert_eq!(reveal(&op), None);
     }
 
@@ -378,8 +389,36 @@ mod tests {
     /// scrolling to a stale offset.
     #[test]
     fn a_field_the_page_did_not_render_reveals_nothing() {
-        let (op, _) = measure_at_700();
+        let op = measure_at_700();
         assert_eq!(reveal(&op), None);
+    }
+
+    /// The two credential rows have no config `Key`, so they are reached by
+    /// their own widget ids — which is exactly why the map is keyed by id
+    /// rather than by `Key::ALL`. Without this the reveal would be a
+    /// `Key`-indexed array that a keyless row cannot appear in, and Tab onto
+    /// the credentials would ring a row the page never scrolls to.
+    #[test]
+    fn a_keyless_row_is_revealed_by_its_own_widget_id() {
+        let mut op = MeasureSections {
+            jump: Some(Jump::Row(Id::new("row-client-id"))),
+            content: None,
+            offsets: [0.0; Section::ALL.len()],
+            anchored: true,
+            rows: HashMap::new(),
+        };
+        op.scrollable(
+            Some(&Id::new(CONTENT_SCROLL_ID)),
+            Rectangle::new(Point::ORIGIN, Size::new(600.0, 500.0)),
+            Rectangle::new(Point::ORIGIN, Size::new(600.0, 4000.0)),
+            Vector::new(0.0, 700.0),
+            &mut Unused,
+        );
+        op.container(
+            Some(&Id::new("row-client-id")),
+            Rectangle::new(Point::new(0.0, 3600.0), Size::new(600.0, 40.0)),
+        );
+        assert_eq!(reveal(&op), Some(3592.0));
     }
 
     /// A measure pass over a page that carries the content scrollable but no
@@ -391,7 +430,7 @@ mod tests {
             content: None,
             offsets: [0.0; Section::ALL.len()],
             anchored: false,
-            rows: [None; Key::ALL.len()],
+            rows: HashMap::new(),
         };
         op.scrollable(
             Some(&Id::new(CONTENT_SCROLL_ID)),

@@ -45,6 +45,7 @@ use hyprlay_core::daemon_control::DaemonControl;
 use hyprlay_core::domain::Command;
 use hyprlay_core::domain::Key;
 use hyprlay_core::domain::Reply;
+use hyprlay_core::domain::Value;
 
 /// What the blocking-send wrapper reports when the socket connect fails, and
 /// when the off-thread task itself died. The daemon never sends either; they
@@ -71,17 +72,34 @@ enum Message {
     Anchor(hyprlay_core::config::AnchorMode),
     /// Pick the roster ordering strategy.
     RosterOrder(hyprlay_core::config::RosterOrder),
+    /// One option-select row's keyboard step: the chosen option's value. The
+    /// same shape a chip click's own message carries, so a step and a click
+    /// reach the daemon by one route.
+    SetOption(Key, Value),
     /// Flip one boolean config key (rtl, talking-only, own user).
     SetFlag(Key, bool),
     /// Integer text edited for a numeric knob; invalid or out-of-range
     /// input is kept as a draft instead of snapping back.
     NumText(Key, String),
+    /// Enter inside a numeric knob's input: commit what is typed. Refused by
+    /// the bounds, which keeps the caret in the input.
+    NumSubmit(Key),
+    /// Escape that a focused text input swallowed. Iced's own Escape arm drops
+    /// the input's focus and tells nobody, so the app hears about it here —
+    /// otherwise a number row's half-typed value would outlive the input.
+    EscapeCaptured,
     /// Numeric slider moved; the value arrives inside the slider envelope.
     NumDrag(Key, f32),
-    /// Restore one numeric knob to its default.
-    NumReset(Key),
+    /// Restore one setting to its default: the R key, a number row's reset
+    /// button and a colour editor's all send this, so every row has one
+    /// reset path. The default comes from the daemon, not from this window
+    /// reading `Config::default()` for it.
+    ResetFocused(Key),
     ColorPart(ColorTarget, u8, f32),
     ColorHex(ColorTarget, String),
+    /// Enter inside a colour row's hex input: commit what is typed. Refused
+    /// by the hex parser, which keeps the caret in the input.
+    ColorSubmit(ColorTarget),
     /// Expand / collapse one color editor's HSV picker.
     PickerToggle(ColorTarget),
     /// Press / hover-move inside a picker plane; applies while dragging.
@@ -141,12 +159,15 @@ enum Message {
 /// iced_widget-0.14.2/src/` matches only `text_input.rs` and
 /// `text_editor.rs`, and `button.rs` handles zero keyboard events. So focus
 /// is tracked here, routed by the window-global shortcut dispatcher, and
-/// rendered as a visible ring by the style closures.
+/// rendered as a background fill by the style closures.
 ///
 /// `Field(Key)` is the load-bearing variant: keying focus on the config `Key`
 /// rather than on widget identity means the field renderers need no new
 /// per-widget registration, and tab order derives from the field registry
 /// rather than being hand-maintained.
+///
+/// `Credential` is the one thing `Field(Key)` cannot hold, and it is a variant
+/// rather than a widened `Field` for that reason — see [`Credential`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusTarget {
     ClearChanges,
@@ -157,6 +178,25 @@ pub enum FocusTarget {
     ToggleDaemon,
     /// One config key: a slider, a toggle, or an integer input.
     Field(Key),
+    /// One credential row: a text input that edits auth.json, not a config key.
+    Credential(Credential),
+}
+
+/// The two Connection rows: the client id and the client secret.
+///
+/// They are keyboard-reachable because they are ordinary text inputs that any
+/// keyboard user has to be able to fill in, and they are *not* `FocusTarget::Field`
+/// because they edit no config key — the pair lives in auth.json, outside the
+/// ctl protocol. Giving them a `Key` would be the smaller diff and the wrong
+/// one: every reset path builds its commands from `Key` (`revert_commands`
+/// walks `Key::ALL`, and section/global reset speak `Command::Reset*`), so a
+/// credential key would put a secret on a wire that exists to carry settings.
+/// Their own enum keeps `Field(Key)` meaning exactly what it means today and
+/// keeps them out of every reset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Credential {
+    ClientId,
+    ClientSecret,
 }
 
 pub struct Gui {
@@ -317,7 +357,47 @@ fn subscribe(_gui: &Gui) -> Subscription<Message> {
         // Only "ignored" events reach us, so typing in a text field never
         // triggers shortcuts.
         keyboard::listen().map(Message::KeyPressed),
+        // Escape again, this time including the events a widget captured: a
+        // focused `text_input` swallows Escape to drop its own focus, so the
+        // row behind it never learns that the typing stopped.
+        iced::event::listen_with(|event, status, _| match event {
+            iced::event::Event::Keyboard(keyboard::Event::KeyPressed { key, .. })
+                if status == iced::event::Status::Captured
+                    && matches!(key, keyboard::Key::Named(keyboard::key::Named::Escape)) =>
+            {
+                Some(Message::EscapeCaptured)
+            }
+            _ => None,
+        }),
     ])
+}
+
+/// A `Gui` for the state-transition tests, built from test values because
+/// `boot()` reads and writes the real config file. One constructor for every
+/// test module, so a new field is filled in one place instead of one copy per
+/// module; the query is the only thing a test differs on.
+#[cfg(test)]
+pub(super) fn test_gui(search: &str) -> Gui {
+    Gui {
+        config: Config::default(),
+        focus: None,
+        drafts: HashMap::new(),
+        num_drafts: HashMap::new(),
+        last_reply: Reply::Ok(String::new()),
+        daemon_state: DaemonState::Connecting,
+        auto_start: AutoStart::watching(),
+        control: Arc::new(crate::platform::service::SystemControl),
+        dirty: false,
+        monitors: Vec::new(),
+        section: Section::Position,
+        search: search.to_string(),
+        last_scroll_y: 0.0,
+        picker: None,
+        picker_drag: false,
+        picker_pos: Point::ORIGIN,
+        auth_client_id: String::new(),
+        auth_client_secret: String::new(),
+    }
 }
 
 /// Blocking socket round-trip off the UI thread.

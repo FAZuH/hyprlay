@@ -72,6 +72,7 @@ const MOVE_TOKENS_HELP: &str = "positions: left | right | center | top | bottom\
 
 const RESET_SECTIONS_HELP: &str = "sections: position | layout | opacity | colors
 Omit to reset everything; the monitor choice is always kept.
+Reset a single setting with `reset <section> <key>`.
 ";
 
 const NUDGE_RUNTIME_ONLY_HELP: &str =
@@ -152,7 +153,15 @@ fn cli() -> ClapCommand {
                 Arg::new("section")
                     .required(false)
                     .value_name("section")
-                    .help("config group"),
+                    .help("config group, then optionally one key"),
+            )
+            // The section is spelled out for a single-key reset because
+            // `reset <key>` on its own is ambiguous — see `Command::ResetKey`.
+            .arg(
+                Arg::new("key")
+                    .required(false)
+                    .value_name("key")
+                    .help("one setting within the group"),
             )
             .after_help(RESET_SECTIONS_HELP),
         )
@@ -243,9 +252,19 @@ fn wire_line(name: &str, sub: &ArgMatches) -> Result<String, String> {
         },
         "move" => format!("move {}", word("pos")),
         "nudge" => format!("nudge {} {}", word("dx"), word("dy")),
-        "reset" => match sub.get_one::<String>("section") {
-            Some(section) => format!("reset {section}"),
-            None => "reset".to_string(),
+        "reset" => match (
+            sub.get_one::<String>("section"),
+            sub.get_one::<String>("key"),
+        ) {
+            (Some(section), Some(key)) => format!("reset {section} {key}"),
+            (Some(section), None) => format!("reset {section}"),
+            (None, None) => "reset".to_string(),
+            // Clap fills positionals in order, so a key cannot be paired
+            // without a section. Refused rather than answered with a bare
+            // `reset`, which is the one command that wipes every setting.
+            (None, Some(_)) => {
+                return Err("error: reset <position|layout|opacity|colors> <key>".to_string());
+            }
         },
         simple @ ("save" | "dump" | "status" | "reload" | "restart" | "quit") => simple.to_string(),
         other => unreachable!("non-wire subcommand reached the relay mapper: {other}"),
@@ -486,6 +505,49 @@ mod tests {
     }
 
     #[test]
+    fn reset_of_one_key_relays_the_two_word_wire_command() {
+        assert_eq!(
+            classified(&["reset", "opacity", "opacity"]),
+            Outcome::Relay(Command::ResetKey(Key::Opacity))
+        );
+        assert_eq!(
+            classified(&["reset", "layout", "width"]),
+            Outcome::Relay(Command::ResetKey(Key::Width))
+        );
+        // And a key whose name is also a group name still needs both words.
+        assert_eq!(
+            classified(&["reset", "position", "position"]),
+            Outcome::Relay(Command::ResetKey(Key::Position))
+        );
+        // One word is still the group reset.
+        assert_eq!(
+            classified(&["reset", "position"]),
+            Outcome::Relay(Command::ResetGroup(Group::Position))
+        );
+    }
+
+    #[test]
+    fn reset_of_a_key_reports_the_daemons_own_error_locally() {
+        let cases = [
+            (
+                &["reset", "opacity", "width"][..],
+                "error: width is not in the opacity group",
+            ),
+            (
+                &["reset", "layout", "nonsense"][..],
+                "error: unknown key \"nonsense\" (try 'help')",
+            ),
+            (
+                &["reset", "nonsense", "width"][..],
+                "error: reset <position|layout|opacity|colors> <key>",
+            ),
+        ];
+        for (args, message) in cases {
+            assert_eq!(classified(args), Outcome::LocalError(message.to_string()));
+        }
+    }
+
+    #[test]
     fn negative_values_survive_parsing_for_set_and_nudge() {
         assert_eq!(
             classified(&["set", "offset-x", "-50"]),
@@ -693,6 +755,11 @@ mod tests {
         for group in Group::ALL {
             assert!(help.contains(group.to_string().as_str()), "{group} named");
         }
+        // The per-key form, asserted as tokens: the `key` argument exists and
+        // the synopsis carries it. The wording of the sentence explaining why
+        // is not a behaviour, so rewording it must not fail a build.
+        assert!(help.contains("reset <section> <key>"), "{help}");
+        assert!(help.contains("[key]"), "the synopsis names the key: {help}");
     }
 
     #[test]
