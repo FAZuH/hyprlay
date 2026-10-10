@@ -145,6 +145,7 @@ pub(super) fn command_for(message: Message) -> Command {
         | Message::ResetFocused(_)
         | Message::ColorPart(..)
         | Message::ColorHex(..)
+        | Message::ColorSubmit(..)
         | Message::PickerToggle(..)
         | Message::SvPress(..)
         | Message::SvMove(..)

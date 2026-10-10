@@ -306,14 +306,15 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
         Message::NumSubmit(key) => commit_num(gui, key).unwrap_or_else(Task::none),
         // Escape that the input swallowed: it dropped its own focus, and typing
         // goes back to the row. The draft *keeps*, the same as Tab and Enter —
-        // discarding typed text would lose a half-typed number for no gain, and a
-        // value the bounds refuse cannot land anyway, since `apply_num` writes
-        // through `apply_config`, which rejects it. So: a legal value applies as
-        // it commits, a refused one leaves the draft and the domain's own
-        // wording in the status bar, and the hand-back is made explicit rather
-        // than left to iced having done it to produce this message.
+        // discarding typed text would lose a half-typed value for no gain, and a
+        // refused one cannot land anyway: the number path writes through
+        // `apply_config`, which rejects it, and the hex path only ever applies
+        // text the parser accepts. So: a legal value applies as it commits, a
+        // refused one leaves the draft and the domain's own wording in the
+        // status bar, and the hand-back is made explicit rather than left to
+        // iced having done it to produce this message.
         Message::EscapeCaptured => {
-            let number_row =
+            let typed_row =
                 matches!(gui.focus, Some(FocusTarget::Field(key)) if holds_typed_text(gui, key));
             // The search box is the app's only other capturing input, so an
             // Escape the shortcut dispatcher never saw, on a row that holds no
@@ -322,7 +323,7 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
             // put the one-pager back where it was. Without this arm, Ctrl+F
             // followed by Escape left the page filtered with the caret gone and
             // the key apparently doing nothing.
-            if !number_row && !gui.search.trim().is_empty() {
+            if !typed_row && !gui.search.trim().is_empty() {
                 gui.search.clear();
                 if gui.focus.is_some_and(|t| !tab_order(gui).contains(&t)) {
                     gui.focus = None;
@@ -331,7 +332,11 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
             }
             let commit = match gui.focus {
                 Some(FocusTarget::Field(key)) if holds_typed_text(gui, key) => {
-                    commit_num(gui, key).unwrap_or_else(Task::none)
+                    if let Some(target) = ColorTarget::of(key) {
+                        commit_hex(gui, target).unwrap_or_else(Task::none)
+                    } else {
+                        commit_num(gui, key).unwrap_or_else(Task::none)
+                    }
                 }
                 _ => Task::none(),
             };
@@ -364,6 +369,10 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
             let value = HexColor::from_rgb8(bytes[0], bytes[1], bytes[2]);
             update(gui, Message::ColorHex(target, value.to_string()))
         }
+        // Enter inside the hex input: commit what is typed. A draft only ever
+        // holds text `ColorHex` refused, so this is where that refusal is either
+        // stood down or answered with the daemon's own wording.
+        Message::ColorSubmit(target) => commit_hex(gui, target).unwrap_or_else(Task::none),
         Message::SvPress(target) => {
             gui.picker_drag = true;
             let p = gui.picker_pos;
@@ -729,12 +738,18 @@ fn activate_focus(gui: &mut Gui) -> Task<Message> {
             if key.num_bounds().is_some() {
                 return operation::focus(fields::num_input_id(key));
             }
+            // A colour row moves the keyboard into its hex input: the row's
+            // value is a colour, and Enter is how one gets typed instead. The
+            // same hand-off as the number row above, named through the
+            // editor that owns the input rather than through the key.
+            if let Some(target) = ColorTarget::of(key) {
+                return operation::focus(target.hex_input_id());
+            }
             // Any other row that offers a fixed set of choices is an option
             // select, and Enter activates it by stepping forward — the same
             // step the arrows take. What is left rings but stays inert: the
-            // colour editors edit no number and offer no choices, and nothing
-            // walks a focus chain for iced's widgets to be handed. Enter into
-            // them is the next pass.
+            // flags above flipped, the numbers and colours handed typing over,
+            // and nothing walks a focus chain for iced's widgets to be handed.
             step_row(gui, true)
         }
     }
@@ -787,26 +802,62 @@ fn reset_focused(gui: &mut Gui) -> Task<Message> {
 }
 
 /// Tab / Shift+Tab: move the ring along the tab order — except out of a number
-/// row that holds typed text, which swallows the Tab and commits that text
-/// instead, because committing is what Tab means in the middle of a typed
-/// value. A commit the bounds refuse keeps the caret in the input, so it keeps
+/// or colour row that holds typed text, which swallows the Tab and commits that
+/// text instead, because committing is what Tab means in the middle of a typed
+/// value. A commit the row refuses keeps the caret in the input, so it keeps
 /// the ring too; a row with nothing pending moves as every other target does.
 fn tab_out(gui: &mut Gui, backwards: bool) -> Task<Message> {
     match gui.focus {
         Some(FocusTarget::Field(key)) if holds_typed_text(gui, key) => {
-            commit_num(gui, key).unwrap_or_else(Task::none)
+            if let Some(target) = ColorTarget::of(key) {
+                commit_hex(gui, target).unwrap_or_else(Task::none)
+            } else {
+                commit_num(gui, key).unwrap_or_else(Task::none)
+            }
         }
         _ => move_focus(gui, backwards),
     }
 }
 
-/// Whether a number row holds text the input refused. `Message::NumText`
-/// applies every value the bounds allow the moment it is typed, so a draft can
-/// only ever be text that was *not* applied — which makes this the same thing
-/// as "the keyboard is typing into this row", the one question Tab has to ask
-/// before it can mean "commit".
+/// Whether a number or colour row holds text the input refused.
+/// `Message::NumText` applies every value the bounds allow the moment it is
+/// typed, and `Message::ColorHex` every value the hex parser allows, so a
+/// draft can only ever be text that was *not* applied — which makes this the
+/// same thing as "the keyboard is typing into this row", the one question Tab
+/// has to ask before it can mean "commit".
 fn holds_typed_text(gui: &Gui, key: Key) -> bool {
     key.num_bounds().is_some() && gui.num_drafts.contains_key(&key)
+        || ColorTarget::of(key).is_some_and(|target| gui.drafts.contains_key(&target))
+}
+
+/// Commit what is typed in a colour row's hex input: apply it when it is a
+/// value the hex parser allows, and hand typing back to the row either way,
+/// because the ring never left it.
+///
+/// `None` is a refusal: the daemon's own parse error becomes the reply, the
+/// row keeps the colour it had, and the caret stays in the input for the user
+/// to fix. No draft means nothing is pending — this is Enter on an untouched
+/// row — so the only work left is the hand-back.
+fn commit_hex(gui: &mut Gui, target: ColorTarget) -> Option<Task<Message>> {
+    let Some(raw) = gui.drafts.get(&target).cloned() else {
+        return Some(release_typing());
+    };
+    match raw.parse::<HexColor>() {
+        // The draft parsed after all: run the same apply the typing path
+        // takes, which clears the draft, mirrors and sends.
+        Ok(_) => Some(update(gui, Message::ColorHex(target, raw))),
+        Err(_) => {
+            // The domain's own wording for this refusal, read off the same
+            // parser the daemon uses, rather than a second message invented here.
+            gui.last_reply = Reply::Error(
+                target
+                    .key()
+                    .parse_value(None)
+                    .expect_err("a colour key needs a value"),
+            );
+            None
+        }
+    }
 }
 
 /// Commit what is typed in a number row: apply it when it is a value the bounds
@@ -929,8 +980,7 @@ mod focus_tests {
     /// this is the operation that puts a caret there, and the value moves only
     /// once something is typed or an arrow says so. Read off the returned
     /// `Task`, which is the only thing a unit test can see of a widget
-    /// operation, and compared against a colour row — the other kind of
-    /// row with no cycle-able form, which has no input to enter at all.
+    /// operation.
     #[test]
     fn enter_on_a_number_row_hands_typing_to_its_input() {
         let mut g = gui();
@@ -949,14 +999,39 @@ mod focus_tests {
             1,
             "Enter on a number row runs the focus hand-off and nothing else"
         );
+    }
 
-        let mut g = gui();
-        g.focus = Some(FocusTarget::Field(Key::SpeakingColor));
-        let task = update(
-            &mut g,
-            Message::KeyPressed(no_key(keyboard::Key::Named(key::Named::Enter))),
-        );
-        assert_eq!(task.units(), 0, "a colour editor has no input to enter");
+    /// Enter on a colour row hands typing to that row's hex input instead of
+    /// stepping anything: the hex field is the one widget on the row that can
+    /// take real focus, so this is the operation that puts a caret there, and
+    /// the colour moves only once something is typed. Read off the returned
+    /// `Task`, the only thing a unit test can see of a widget operation.
+    #[test]
+    fn enter_on_a_colour_row_hands_typing_to_its_hex_input() {
+        for key in [Key::SpeakingColor, Key::TextColor, Key::BoxColor] {
+            let mut g = gui();
+            g.focus = Some(FocusTarget::Field(key));
+            let before = key.value_of(&g.config);
+            let task = update(
+                &mut g,
+                Message::KeyPressed(no_key(keyboard::Key::Named(key::Named::Enter))),
+            );
+            assert_eq!(
+                key.value_of(&g.config),
+                before,
+                "Enter on its own changes no colour"
+            );
+            assert_eq!(
+                g.focus,
+                Some(FocusTarget::Field(key)),
+                "Enter moves typing, not the ring"
+            );
+            assert_eq!(
+                task.units(),
+                1,
+                "Enter on a colour row runs the focus hand-off and nothing else"
+            );
+        }
     }
 
     /// The option selects: Enter and Right move to the next choice and Left to
@@ -1209,8 +1284,136 @@ mod focus_tests {
         );
     }
 
-    /// Tab out of a number row commits what is typed there instead of moving
-    /// on, and a commit the bounds refuse keeps the caret in the input — so it
+    /// Enter inside a colour row's hex input hands typing back to the row. The
+    /// typed value is applied by `Message::ColorHex` the moment it parses —
+    /// that is the row's existing behaviour and it is why a draft can only ever
+    /// hold refused text — so what the commit has left to do is refuse it
+    /// properly or hand the input back.
+    #[test]
+    fn enter_inside_a_colour_row_hands_typing_back() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::SpeakingColor));
+        let _ = update(
+            &mut g,
+            Message::ColorHex(ColorTarget::Speaking, "#ff00ff".into()),
+        );
+        assert_eq!(
+            g.config.speaking_color,
+            "#ff00ff".parse().unwrap(),
+            "a valid colour applies as it is typed"
+        );
+
+        let task = update(&mut g, Message::ColorSubmit(ColorTarget::Speaking));
+        assert_eq!(
+            g.config.speaking_color,
+            "#ff00ff".parse().unwrap(),
+            "nothing is left to apply"
+        );
+        assert_eq!(g.focus, Some(FocusTarget::Field(Key::SpeakingColor)));
+        assert_eq!(
+            task.units(),
+            1,
+            "the commit hands typing back, which is the one operation it runs"
+        );
+        assert!(g.drafts.is_empty(), "and leaves no half-typed text behind");
+    }
+
+    /// A refused hex commit answers with the daemon's own error text, changes no
+    /// colour, and stays in the input: `None` is what tells the caller the caret
+    /// is still wanted there. The wording is the parser's, not a second one.
+    #[test]
+    fn a_refused_hex_commit_answers_the_error_and_keeps_the_caret() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::SpeakingColor));
+        let before = g.config.speaking_color;
+        let _ = update(
+            &mut g,
+            Message::ColorHex(ColorTarget::Speaking, "ff00ff".into()),
+        );
+        assert_eq!(
+            g.config.speaking_color, before,
+            "hex without a # never parses, so it stays a draft"
+        );
+
+        assert!(
+            commit_hex(&mut g, ColorTarget::Speaking).is_none(),
+            "text the parser refuses is refused"
+        );
+        assert_eq!(
+            g.config.speaking_color, before,
+            "and the row keeps the colour it had"
+        );
+        assert_eq!(g.focus, Some(FocusTarget::Field(Key::SpeakingColor)));
+        assert_eq!(
+            g.last_reply.text(),
+            "error: speaking-color <#rrggbb>",
+            "the refusal is the daemon's own wording for this key"
+        );
+        assert_eq!(
+            g.drafts.get(&ColorTarget::Speaking).map(String::as_str),
+            Some("ff00ff"),
+            "and the refused text stays for the user to fix"
+        );
+    }
+
+    /// Tab out of a colour row commits what is typed there instead of moving
+    /// on, and a commit the parser refuses keeps the caret in the input — so it
+    /// keeps the ring too. Nothing pending means an ordinary Tab stop: the
+    /// only text a row can hold is text `ColorHex` refused, because a value the
+    /// parser allows is applied the moment it is typed.
+    #[test]
+    fn tab_out_of_a_colour_row_commits_instead_of_moving_on() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::SpeakingColor));
+        let _ = update(
+            &mut g,
+            Message::ColorHex(ColorTarget::Speaking, "ff00ff".into()),
+        );
+
+        let refused = update(&mut g, Message::KeyPressed(no_key(tab_key())));
+        assert_eq!(g.focus, Some(FocusTarget::Field(Key::SpeakingColor)));
+        assert_eq!(
+            refused.units(),
+            0,
+            "a refused commit runs nothing at all, so nothing can move"
+        );
+        assert_eq!(
+            g.last_reply.text(),
+            "error: speaking-color <#rrggbb>",
+            "and says why, the way the commit does"
+        );
+    }
+
+    /// Escape that the hex input swallowed hands typing back to the row and keeps
+    /// what was typed, the same as Tab and Enter: discarding it would lose a
+    /// half-typed colour for no gain, since text the parser refuses cannot land
+    /// anyway. Same owner ruling as the number rows — nothing in ticket 06 says
+    /// colours differ, so they do not.
+    #[test]
+    fn escape_keeps_the_typed_hex_and_hands_typing_back() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::SpeakingColor));
+        let before = g.config.speaking_color;
+        let _ = update(
+            &mut g,
+            Message::ColorHex(ColorTarget::Speaking, "ff00ff".into()),
+        );
+        assert_eq!(g.config.speaking_color, before);
+
+        let task = update(&mut g, Message::EscapeCaptured);
+        assert_eq!(
+            g.config.speaking_color, before,
+            "a refused value cannot land"
+        );
+        assert_eq!(g.focus, Some(FocusTarget::Field(Key::SpeakingColor)));
+        assert!(
+            g.drafts.contains_key(&ColorTarget::Speaking),
+            "the draft stays for the user to finish, rather than vanishing"
+        );
+        assert_eq!(task.units(), 1, "and typing is handed back to the row");
+    }
+
+    /// Tab out of a number row commits instead of moving on, and a commit the bounds refuse keeps the caret in the input — so it
     /// keeps the ring too. Nothing pending means an ordinary Tab stop: the
     /// only text a row can hold is text `NumText` refused, because a value the
     /// bounds allow is applied the moment it is typed.

@@ -96,6 +96,13 @@ impl ColorTarget {
             _ => None,
         }
     }
+
+    /// Widget id of this editor's hex input: what `operation::focus` hands
+    /// typing to when Enter moves the keyboard into the row. Separate from the
+    /// row container's id because two widgets in one tree cannot share an id.
+    pub(super) fn hex_input_id(self) -> iced::widget::Id {
+        iced::widget::Id::from(format!("hex-input-{}", self.key().name()))
+    }
 }
 
 /// One picker interaction: square point -> saturation/value -> hex command.
@@ -144,8 +151,10 @@ pub(super) fn color_editor(gui: &Gui, target: ColorTarget) -> Element<'_, Messag
     let top = row![
         toggle_picker_button(target, color),
         text_input("#rrggbb", &hex)
+            .id(target.hex_input_id())
             .width(Length::Fixed(110.0))
-            .on_input(move |v| Message::ColorHex(target, v)),
+            .on_input(move |v| Message::ColorHex(target, v))
+            .on_submit(Message::ColorSubmit(target)),
         reset_button(Message::ResetFocused(target.key())),
     ]
     .spacing(8);

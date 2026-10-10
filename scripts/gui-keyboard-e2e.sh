@@ -1149,39 +1149,124 @@ assert_region_pixels "the step is what changed it, not the reset" \
 	r_chip_moved r_chip_reset "$CHIP_VALUE" differs
 
 # The colour row: `username background color` is #0d0d0f on a clean config.
-# A colour has no keyboard path to a new value yet (Enter on a colour row rings
-# it and stops — see `activate_focus`), so the mouse edits the hex input and
-# Escape hands typing back to the row, which is what leaves R reachable at all.
-# The hex field is the value: its text IS the hex the daemon would be told, so
-# the claim is read off the digits rather than off the swatch beside them.
+# Enter moves the keyboard into the hex input the way it does on a number row
+# (see `activate_focus`), and Escape, Tab and Enter there commit the way they
+# do on a number row. The hex field is the value: its text IS the hex the
+# daemon would be told, so the value claim is read off the digits, and the
+# swatch beside them says whether the colour itself moved.
+#
+# A swatch interior clear of every edge and of the glyphs beside it: the swatch
+# paints x 177..200, y 597..613 in this state. The hex input's own left border
+# is the same evidence the number section reads: it wears the focused colour
+# while the input holds typing and its idle colour otherwise. That colour is
+# measured mid-edge here (#6b75ff), not the corner-blended #6770f2 the number
+# section probes — same widget, same style, different pixel of the border.
+# Re-derive after any layout change, with the ring parked on the row:
+#   magick r_hex_focused.png -crop 1x30+210+592 -depth 8 txt:-   # the border
+#   magick r_hex_focused.png -crop 1x40+188+585 -depth 8 txt:-   # the swatch
+#
+# Typing commits every keystroke, so a typed value always passes through its
+# own prefixes: `#0f0` is typed rather than `#00ff00` because the prefixes of
+# a six-digit hex are colours too (`#00f` is pure blue) and the prefix would
+# apply first, leaving the tail as refused text. Same shape as the number
+# rows, where typing `99` commits the `9` first.
+HEX_SWATCH='20x14+178+598'
+HEX_BORDER_X=210
+HEX_BORDER_Y=605
+HEX_IDLE='#42444c'
+HEX_FOCUSED='#6b75ff'
 walk Tab 28
 shot r_hex_focused
-# The baseline is taken AFTER a click-and-Escape round trip into the hex input,
-# because that round trip repaints the glyphs: comparing a post-edit shot with
-# one taken before the first click would be a claim about the repaint rather
-# than about the value. So the default is photographed in exactly the state the
-# edit below leaves the input in, and R has to put the field back to *that*.
-click_hex() {
-	printf '  click %-12s sleep 1\n' 'hex input'
-	xdotool mousemove $((263 + WIN_X)) $((605 + WIN_Y)) click 1
-	sleep 1
-}
-click_hex
+# Enter hands the keyboard to the hex input: the border takes the focused
+# colour, and the caret draws bright pixels the idle box does not have. The
+# same two claims the number section makes, over this row's own input.
+key Enter 1
+shot hex_enter
+assert_pixel "Enter gave the hex input the keyboard" hex_enter $HEX_BORDER_X $HEX_BORDER_Y "$HEX_FOCUSED"
+HEX_CARET_BEFORE=$(ink r_hex_focused "$HEX_VALUE")
+HEX_CARET_AFTER=$(ink hex_enter "$HEX_VALUE")
+if [ "$HEX_CARET_AFTER" -gt "$HEX_CARET_BEFORE" ]; then
+	pass "Enter draws a caret in the hex input: $HEX_CARET_BEFORE -> $HEX_CARET_AFTER bright px"
+else
+	fail "Enter left the hex input without a caret: $HEX_CARET_BEFORE -> $HEX_CARET_AFTER bright px"
+fi
+# Escape hands typing back with nothing typed: the border goes idle and the
+# digits are byte-identical, so this state is the baseline the edits below are
+# read off. No click round trip is needed for the repaint caveat anymore: the
+# glyphs never changed under the caret.
 key Escape 1
 shot r_hex_before
-click_hex
+assert_pixel "Escape took the keyboard off the hex input" r_hex_before $HEX_BORDER_X $HEX_BORDER_Y "$HEX_IDLE"
+assert_region_pixels "Escape left the untouched digits alone" \
+	r_hex_focused r_hex_before "$HEX_VALUE" same
+# A typed hex applies and the swatch moves with it: the digits change AND the
+# swatch paints the new colour, which is what says the colour moved rather than
+# only the text. `#0f0` is over in three keystrokes with no valid prefix on the
+# way, so the commit has nothing left but to hand the keyboard back.
+key Enter 1
 key ctrl+a 1
-typ '#f00f0f' 1
+typ '#0f0' 1
+key Enter 1
+shot hex_typed_kb
+assert_region_pixels "the typed hex reached the field" \
+	r_hex_before hex_typed_kb "$HEX_VALUE" differs
+assert_region_pixels "and the swatch moved to the typed colour" \
+	r_hex_before hex_typed_kb "$HEX_SWATCH" differs
+assert_pixel "the commit handed the keyboard back to the row" hex_typed_kb $HEX_BORDER_X $HEX_BORDER_Y "$HEX_IDLE"
+# A hex the parser refuses is kept as typed and applied to nothing: the digits
+# keep the refused text while the swatch stands where the last applied colour
+# put it. The commit refuses, so the caret stays and the border stays focused.
+key Enter 1
+key ctrl+a 1
+typ zzz 1
+key Enter 1
+shot hex_refused
+assert_region_pixels "the refused text sits in the field, which still holds the keyboard" \
+	hex_typed_kb hex_refused "$HEX_VALUE" differs
+assert_region_pixels "while the refused colour moved nothing" \
+	hex_typed_kb hex_refused "$HEX_SWATCH" same
+assert_pixel "with the input still holding the keyboard" hex_refused $HEX_BORDER_X $HEX_BORDER_Y "$HEX_FOCUSED"
+# Escape keeps the refused draft and hands typing back: the swatch still stands
+# where the last applied colour put it, the border is idle — which is what
+# leaves R reachable at all, since a held keyboard would eat the keystroke —
+# and the box still shows the refused text rather than snapping back to the
+# applied colour. That last claim is read as a difference against the applied
+# state on purpose: the caret lives in this crop, so an identical claim would
+# be a claim about the blink phase wearing a draft's clothes.
 key Escape 1
-shot r_hex_typed
-assert_region_pixels "the hex field took the typed colour" \
-	r_hex_before r_hex_typed "$HEX_VALUE" differs
+shot hex_escaped
+assert_pixel "Escape took the keyboard off the hex input" hex_escaped $HEX_BORDER_X $HEX_BORDER_Y "$HEX_IDLE"
+assert_region_pixels "and a hex the parser refuses still cannot land" \
+	hex_typed_kb hex_escaped "$HEX_SWATCH" same
+assert_region_pixels "while the refused text stays on display" \
+	hex_typed_kb hex_escaped "$HEX_VALUE" differs
+# The mouse still reaches the hex input: clicking it focuses it the same way
+# Enter does, a typed hex applies live under the cursor, and Escape hands back.
+# (263, 605) in window coordinates lands in the middle of the input.
+printf '  click %-12s sleep 1\n' 'hex input'
+xdotool mousemove $((263 + WIN_X)) $((605 + WIN_Y)) click 1
+sleep 1
+shot hex_mouse
+assert_pixel "the mouse still gives the hex input the keyboard" hex_mouse $HEX_BORDER_X $HEX_BORDER_Y "$HEX_FOCUSED"
+key ctrl+a 1
+typ '#f00' 1
+key Escape 1
+shot hex_mouse_typed
+assert_region_pixels "the mouse-typed hex reached the field" \
+	hex_escaped hex_mouse_typed "$HEX_VALUE" differs
+assert_region_pixels "and the swatch moved to the mouse-typed colour" \
+	hex_escaped hex_mouse_typed "$HEX_SWATCH" differs
+# No border probe here: (210, 605) sits where the first glyph lands for some
+# strings, so an exact match would be a claim about the text wearing a border's
+# clothes — the number section's own rule against identical claims over the box.
+# The hand-back is proven behaviourally instead: R below reaches the dispatcher,
+# which a held keyboard would have eaten into the field.
 key r 1
 shot r_hex_reset
-assert_region_pixels "R put the hex field back to its default" \
-	r_hex_before r_hex_reset "$HEX_VALUE" same
+assert_region_pixels "R put the swatch back to its default" \
+	r_hex_before r_hex_reset "$HEX_SWATCH" same
 assert_region_pixels "and the typed colour is what changed, not the reset" \
-	r_hex_typed r_hex_reset "$HEX_VALUE" differs
+	hex_mouse_typed r_hex_reset "$HEX_VALUE" differs
 
 # The credentials: a credential row edits no config key, so R resets nothing —
 # and the keystroke is the input's, which is the stronger claim. Preloading made
@@ -1315,15 +1400,12 @@ cat <<SUMMARY
       a_per_key_reset_names_the_key_own_group in src/gui/commands.rs: the
       socket half of a reset is UNPROVEN here, in this harness and in every
       other test in it.
-    - Editing a colour from the keyboard. A colour row offers no way to type a
-      new value (Enter on one rings it and stops — see `activate_focus`), so
-      the hex field above is driven with the mouse and the reset is what is
-      under test. Every other row kind is driven with the keyboard alone.
     - The status-bar refusal. A refused value answers with the daemon's own
-      wording ("error: spacing <0-24>"), but the 2 s status probe overwrites the
-      status line with its own answer before a screenshot can be certain of
-      catching it, so the refusal's text is asserted by
-      a_refused_commit_answers_the_error_and_keeps_the_caret in
+      wording ("error: spacing <0-24>", "error: speaking-color <#rrggbb>"),
+      but the 2 s status probe overwrites the status line with its own answer
+      before a screenshot can be certain of catching it, so the refusal's text
+      is asserted by a_refused_commit_answers_the_error_and_keeps_the_caret and
+      a_refused_hex_commit_answers_the_error_and_keeps_the_caret in
       src/gui/update.rs and not here. What the harness does check is the rest of
       it: the value stands and the caret stays.
     - The overlay daemon is layer-shell only (ADR-004), so it cannot run on

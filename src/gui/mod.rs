@@ -97,6 +97,9 @@ enum Message {
     ResetFocused(Key),
     ColorPart(ColorTarget, u8, f32),
     ColorHex(ColorTarget, String),
+    /// Enter inside a colour row's hex input: commit what is typed. Refused
+    /// by the hex parser, which keeps the caret in the input.
+    ColorSubmit(ColorTarget),
     /// Expand / collapse one color editor's HSV picker.
     PickerToggle(ColorTarget),
     /// Press / hover-move inside a picker plane; applies while dragging.
