@@ -58,9 +58,9 @@ The repo uses this same widget-id mechanism for the search box
   `scroll_y >= max_scroll - BOTTOM_SLACK` (a small constant), it passes
   `f32::INFINITY` to the helper, which pins the highlight to the last
   section (Connection). A page that does not scroll emits no scroll events,
-  so the `max_scroll == 0` end branch never runs in practice. The tracked
-  offsets live in `Gui` as `section_offsets` and `last_scroll_y`
-  (`src/gui/mod.rs`).
+  so the `max_scroll == 0` end branch never runs in practice. Only the
+  scroll offset is tracked on `Gui` (`last_scroll_y`); the measured section
+  offsets are carried by the `Measured` message, not stored.
 - Every jump measures first, then scrolls: `Navigate` chains a measure task,
   and the resulting `Measured` message stores fresh offsets and issues
   `scrollable::scroll_to(CONTENT_SCROLL_ID, ...)`. Fresh offsets make the
@@ -100,20 +100,28 @@ fires exactly when the offset changes, so polling is strictly more work.
 
 ## Consequences
 
-- Ctrl+R resets the section the user is looking at, because `Gui.section`
-  now tracks the scrollspy highlight (D2).
+- Ctrl+R resets the section the user is in: `Gui.section` names the focused
+  row's section while keyboard focus is on a field, and the scrollspy
+  highlight otherwise (D2). A reveal deliberately does not re-run the
+  scrollspy — a reveal target past the end of the page clamps to the end,
+  which the bottom clamp reads as "scrolled to its end" and answers
+  Connection, the one section with no config group, so Ctrl+R after such a
+  Tab would reset nothing.
 - The message flow has no feedback loop: `Scrolled → Measured` only sets the
   highlight and never scrolls. The derivation includes the bottom clamp, so
   the highlight reaches the last section when the page is scrolled to its
-  end. `Navigate → Measured → scroll_to` fires `on_scroll` once on landing,
-  which re-measures and re-derives the same section.
+  end. A programmatic `scroll_to` does not re-enter the scrollspy: the
+  reveal path reports its own section instead, and only a real `Scrolled`
+  event derives one.
 - The sidebar highlight stays suppressed while search text is set; the
   existing selected condition in `sidebar` (`src/gui/view.rs`) keeps its
   `gui.search.trim().is_empty()` guard.
-- New state on `Gui`: `section_offsets` and `last_scroll_y`, plus the
-  `CONTENT_SCROLL_ID` and per-section anchor widget ids. Two pure helpers,
-  `active_section_for` and `offset_within_content`, carry the math and are
-  unit-tested in `src/gui/scroll.rs`.
+- New state on `Gui`: `last_scroll_y`, plus the `CONTENT_SCROLL_ID` and
+  per-section anchor widget ids. Two pure helpers, `active_section_for` and
+  `offset_within_content`, carry the math and are unit-tested in
+  `src/gui/scroll.rs`. A measure pass that visits no section anchor reports
+  nothing, so a page without anchors (the search results) can never claim a
+  section or overwrite `last_scroll_y`.
 - Offsets measured at jump time mean stale measurements cannot send the
   viewport to the wrong place, at the cost of one measure operation per
   scroll event batch.

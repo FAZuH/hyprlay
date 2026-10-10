@@ -14,27 +14,36 @@ use hyprlay_core::daemon_control::Toggle;
 use hyprlay_core::domain::Command;
 use hyprlay_core::domain::HexColor;
 use hyprlay_core::domain::Key;
+use hyprlay_core::domain::Reply;
 use hyprlay_core::domain::Value;
 use hyprlay_core::status::StatusFields;
 use iced::Task;
 use iced::keyboard::key;
 use iced::keyboard::{self};
+use iced_runtime::widget::operation;
 
+use super::FocusTarget;
 use super::Gui;
 use super::Message;
+use super::commands::apply_change;
 use super::commands::apply_num;
 use super::commands::command_for;
 use super::commands::mark_dirty;
 use super::commands::num_in_bounds;
+use super::commands::reset_command;
 use super::commands::revert_commands;
+use super::commands::step_command;
+use super::fields;
 use super::fields::Section;
 use super::picker::ColorTarget;
 use super::picker::apply_hue;
 use super::picker::apply_sv;
 use super::scroll::BOTTOM_SLACK;
+use super::scroll::Jump;
 use super::scroll::active_section_for;
 use super::scroll::measure_sections;
 use super::scroll::restore_scroll;
+use super::scroll::scroll_content_to;
 use super::scroll::scroll_to_section;
 use super::scroll::widget_id;
 use super::send;
@@ -42,28 +51,28 @@ use super::send;
 pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
     match message {
         Message::Applied(reply) => {
-            let reply = reply.trim().to_string();
+            let reply = reply.trimmed();
             // Every reply is a potential probe outcome; only probe outcomes
             // actually move the state (see DaemonState::advance) — and
             // while the boot auto-start has the wheel, failures hold
             // `connecting…` instead of reporting the daemon dead.
             let launch = gui.auto_start.observe(&mut gui.daemon_state, &reply);
             // `dump` replies with the live runtime config as TOML — adopt it
-            // so the GUI reflects unsaved daemon state. The [position]
-            // header marks a dump; any other text is an ordinary reply. Any
-            // in-flight input drafts are stale after an external reset, so
-            // drop them too.
-            if reply.contains("[position]") {
-                if let Ok(live) = toml::from_str::<Config>(&reply) {
+            // so the GUI reflects unsaved daemon state. Any in-flight input
+            // drafts are stale after an external reset, so drop them too.
+            if reply.is_config_dump() {
+                if let Ok(live) = toml::from_str::<Config>(reply.text()) {
                     gui.config = live;
                     gui.drafts.clear();
                     gui.num_drafts.clear();
                 }
-            } else if reply == "saved" {
+            } else if reply.text() == "saved" {
                 gui.dirty = false;
-            } else if !reply.is_empty() && !StatusFields::is_status_line(&reply) {
+            } else if !reply.text().is_empty() && !StatusFields::is_status_line(reply.text()) {
                 // status= replies are consumed by the state chip above;
-                // everything else is ordinary status-bar traffic.
+                // everything else, successes and failures alike, is
+                // ordinary status-bar traffic. The colour comes from the
+                // variant in view, so a failure paints as one.
                 gui.last_reply = reply;
             }
             match launch {
@@ -95,7 +104,7 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
             // the connecting line on its behalf.
             gui.auto_start.settled();
             if let Some(text) = failure {
-                gui.last_reply = text;
+                gui.last_reply = Reply::Error(text);
             }
             // Whether it worked is only visible through a fresh probe; do
             // not wait for the next 2 s tick.
@@ -186,7 +195,7 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
             // Immediate highlight — don't make the sidebar wait for the
             // measure round-trip.
             gui.section = section;
-            measure_sections(Some(section))
+            measure_sections(Some(Jump::Section(section)))
         }
         Message::Scrolled(offset_y) => {
             // Continuously tracked so a search-clear can restore it (D4);
@@ -224,11 +233,35 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
             // on the offset tracked before the search began.
             let restore = !gui.search.trim().is_empty() && query.trim().is_empty();
             gui.search = query;
+            // A narrower query drops rows, so the focused one may be among
+            // them: the ring is drawn where the page renders a row carrying
+            // that key, and `activate_focus` reads `gui.focus` directly. Left
+            // alone, nothing is ringed anywhere and Enter still fires the
+            // command for a row that is off screen.
+            if gui.focus.is_some_and(|t| !tab_order(gui).contains(&t)) {
+                gui.focus = None;
+            }
             if restore {
                 restore_scroll(gui)
             } else {
                 Task::none()
             }
+        }
+        // A programmatic scroll never fires `on_scroll`, so the GUI's own idea
+        // of where the page is would stay where the last user scroll left it:
+        // the search-clear restore needs the offset the user actually left
+        // from, so a reveal records it here. It deliberately does not re-run
+        // the scrollspy — a target past the end of the page clamps to the end
+        // and reads as "scrolled to the end" (see `move_focus`). The highlight
+        // belongs to the focus that asked for the reveal; the scrollspy still
+        // tracks the user's own scrolling.
+        Message::ScrollContentTo(y) => {
+            // A search-page reveal scrolls the search results, not the
+            // one-pager, so it must not become the one-pager's restore point.
+            if gui.search.trim().is_empty() {
+                gui.last_scroll_y = y;
+            }
+            scroll_content_to(y)
         }
         Message::KeyPressed(event) => shortcut(gui, event),
         Message::PickerToggle(target) => {
@@ -267,15 +300,65 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
                 Task::none()
             }
         },
+        // Enter inside the input: commit what is typed. A draft only ever holds
+        // text `NumText` refused, so this is where that refusal is either stood
+        // down or answered with the daemon's own wording.
+        Message::NumSubmit(key) => commit_num(gui, key).unwrap_or_else(Task::none),
+        // Escape that the input swallowed: it dropped its own focus, and typing
+        // goes back to the row. The draft *keeps*, the same as Tab and Enter —
+        // discarding typed text would lose a half-typed value for no gain, and a
+        // refused one cannot land anyway: the number path writes through
+        // `apply_config`, which rejects it, and the hex path only ever applies
+        // text the parser accepts. So: a legal value applies as it commits, a
+        // refused one leaves the draft and the domain's own wording in the
+        // status bar, and the hand-back is made explicit rather than left to
+        // iced having done it to produce this message.
+        Message::EscapeCaptured => {
+            let typed_row =
+                matches!(gui.focus, Some(FocusTarget::Field(key)) if holds_typed_text(gui, key));
+            // The search box is the app's only other capturing input, so an
+            // Escape the shortcut dispatcher never saw, on a row that holds no
+            // typed text, is the search box dropping its own focus. Escape means
+            // the same thing there as on the unfocused path: clear the search and
+            // put the one-pager back where it was. Without this arm, Ctrl+F
+            // followed by Escape left the page filtered with the caret gone and
+            // the key apparently doing nothing.
+            if !typed_row && !gui.search.trim().is_empty() {
+                gui.search.clear();
+                if gui.focus.is_some_and(|t| !tab_order(gui).contains(&t)) {
+                    gui.focus = None;
+                }
+                return restore_scroll(gui);
+            }
+            let commit = match gui.focus {
+                Some(FocusTarget::Field(key)) if holds_typed_text(gui, key) => {
+                    if let Some(target) = ColorTarget::of(key) {
+                        commit_hex(gui, target).unwrap_or_else(Task::none)
+                    } else {
+                        commit_num(gui, key).unwrap_or_else(Task::none)
+                    }
+                }
+                _ => Task::none(),
+            };
+            commit.chain(release_typing())
+        }
         Message::NumDrag(key, v) => {
             let (min, max) = key.num_bounds().expect("slider keys are numeric");
             apply_num(gui, key, (v as i64).clamp(min, max))
         }
-        Message::NumReset(key) => {
-            let Value::Num(default) = key.value_of(&Config::default()) else {
-                unreachable!("number_row only renders numeric keys");
-            };
-            apply_num(gui, key, default)
+        // Every reset of one field: the R key, a number row's reset button
+        // and a colour editor's all land here, so each row has one reset path
+        // rather than two that can disagree about what a reset is.
+        Message::ResetFocused(key) => {
+            // Refused text is stale the moment the value moves under it: the
+            // number input would show digits the row no longer holds, and the
+            // hex input a colour the daemon was never told. Both drafts are
+            // the focused key's alone, so only those go.
+            gui.num_drafts.remove(&key);
+            if let Some(target) = ColorTarget::of(key) {
+                gui.drafts.remove(&target);
+            }
+            apply_change(gui, reset_command(key))
         }
         Message::ColorPart(target, part, v) => {
             let current = ColorTarget::field(target, &gui.config).rgb();
@@ -286,6 +369,10 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
             let value = HexColor::from_rgb8(bytes[0], bytes[1], bytes[2]);
             update(gui, Message::ColorHex(target, value.to_string()))
         }
+        // Enter inside the hex input: commit what is typed. A draft only ever
+        // holds text `ColorHex` refused, so this is where that refusal is either
+        // stood down or answered with the daemon's own wording.
+        Message::ColorSubmit(target) => commit_hex(gui, target).unwrap_or_else(Task::none),
         Message::SvPress(target) => {
             gui.picker_drag = true;
             let p = gui.picker_pos;
@@ -323,14 +410,7 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
                 mark_dirty(gui, &command);
                 Task::perform(send(command.to_string()), Message::Applied)
             } else {
-                // The daemon decides persistence with its pre-apply autosave
-                // value; capture ours before the optimistic mirror flips too.
-                let persists = hyprlay_core::domain::should_persist(&command, gui.config.auto_save);
-                command.clone().apply_config(&mut gui.config);
-                if !persists {
-                    gui.dirty = true;
-                }
-                Task::perform(send(command.to_string()), Message::Applied)
+                apply_change(gui, command)
             }
         }
         Message::AuthClientId(id) => {
@@ -351,12 +431,7 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
             };
             Task::perform(apply_auth_credentials(creds), Message::Applied)
         }
-        command => {
-            let command = command_for(command);
-            mark_dirty(gui, &command);
-            command.clone().apply_config(&mut gui.config);
-            Task::perform(send(command.to_string()), Message::Applied)
-        }
+        command => apply_change(gui, command_for(command)),
     }
 }
 
@@ -367,6 +442,19 @@ fn shortcut(gui: &mut Gui, event: keyboard::Event) -> Task<Message> {
     let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
         return Task::none();
     };
+    // Tab / Shift+Tab move focus, Enter / Space activate it. Iced's button
+    // widget handles no keyboard events at all, so this is the only path a
+    // keyboard-only user has; see FocusTarget for why the focus concept lives
+    // in this app rather than in the framework.
+    if matches!(key, keyboard::Key::Named(key::Named::Tab)) {
+        return tab_out(gui, modifiers.shift());
+    }
+    if matches!(
+        key,
+        keyboard::Key::Named(key::Named::Enter) | keyboard::Key::Named(key::Named::Space)
+    ) {
+        return activate_focus(gui);
+    }
     if !modifiers.control() {
         if matches!(key, keyboard::Key::Named(key::Named::Escape)) && !gui.search.trim().is_empty()
         {
@@ -375,7 +463,32 @@ fn shortcut(gui: &mut Gui, event: keyboard::Event) -> Task<Message> {
             // its pre-search offset.
             return restore_scroll(gui);
         }
-        return Task::none();
+        // R restores the focused setting. Plain `r` is free: every other
+        // letter binding sits behind `modifiers.control()` below, and the
+        // dispatcher only ever sees keys no widget captured (iced hands it
+        // "ignored" events only), so a search box or a credential input that
+        // holds the keyboard keeps its own letters and R never reaches here.
+        if let keyboard::Key::Character(ch) = &key
+            && ch.eq_ignore_ascii_case("r")
+        {
+            return reset_focused(gui);
+        }
+        // An arrow steps the focused row, and arrows are free to: iced spends one on
+        // the text input that holds real focus, so reaching here means no input
+        // owns typing and the focused row is the only thing an arrow could
+        // mean. (Iced's slider takes Up and Down of its own, but only while the
+        // cursor is over it — a mouse user, not a keyboard one.) Right and Up
+        // step forward, Left and Down back, and which step that is belongs to
+        // the row: see `step_row`.
+        return match &key {
+            keyboard::Key::Named(key::Named::ArrowRight | key::Named::ArrowUp) => {
+                step_row(gui, true)
+            }
+            keyboard::Key::Named(key::Named::ArrowLeft | key::Named::ArrowDown) => {
+                step_row(gui, false)
+            }
+            _ => Task::none(),
+        };
     }
     let keyboard::Key::Character(ch) = &key else {
         return Task::none();
@@ -384,7 +497,7 @@ fn shortcut(gui: &mut Gui, event: keyboard::Event) -> Task<Message> {
         "s" => update(gui, Message::Save),
         "r" if modifiers.shift() => update(gui, Message::ResetAll),
         "r" => update(gui, Message::ResetSection(gui.section)),
-        "f" => iced_runtime::widget::operation::focus(widget_id()),
+        "f" => operation::focus(widget_id()),
         _ => match ch.parse::<usize>() {
             // Ctrl+1..5 scroll the one-pager to the section's header.
             Ok(n) if (1..=Section::ALL.len()).contains(&n) => {
@@ -408,7 +521,7 @@ async fn run_toggle(control: Arc<dyn DaemonControl>, toggle: Toggle) -> Option<S
 /// Persist own-app credentials off the UI thread, then ask the daemon to
 /// restart so it re-runs detect() and picks up the new backend. The
 /// returned text lands in the status bar via [`Message::Applied`].
-async fn apply_auth_credentials(creds: AppCredentials) -> String {
+async fn apply_auth_credentials(creds: AppCredentials) -> Reply {
     // Read before the move: the decision text depends on what was applied.
     let cleared = creds.client_id.is_empty() && creds.client_secret.is_empty();
     let saved = tokio::task::spawn_blocking(move || hyprlay_core::credentials::save(&creds))
@@ -420,29 +533,21 @@ async fn apply_auth_credentials(creds: AppCredentials) -> String {
             // text for the status bar is ours.
             let _ = send("restart".to_string()).await;
             if cleared {
-                "credentials cleared, restarting daemon".to_string()
+                Reply::Ok("credentials cleared, restarting daemon".into())
             } else {
-                "credentials saved, restarting daemon".to_string()
+                Reply::Ok("credentials saved, restarting daemon".into())
             }
         }
-        Err(e) => format!("error: could not write credentials: {e}"),
+        Err(e) => Reply::Error(format!("error: could not write credentials: {e}")),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use iced::Point;
-
     use super::*;
-    use crate::gui::daemon::AutoStart;
-    use crate::gui::daemon::DaemonState;
 
     /// D3: a sidebar click or Ctrl+1..5 while a search is up first drops
-    /// the query (returning to the one-page view) and shows the target
-    /// section's highlight immediately, without waiting for the measure
-    /// round-trip.
+    /// the query and shows the target section's highlight immediately.
     #[test]
     fn navigating_while_searching_clears_the_search_and_sets_the_section() {
         let mut gui = gui_with_search("avatar");
@@ -469,28 +574,1809 @@ mod tests {
         assert!((gui.last_scroll_y - 412.5).abs() < f32::EPSILON);
     }
 
+    /// A reveal on the search page must not overwrite the one-pager's tracked
+    /// offset: `restore_scroll` would then land the one-pager at an offset that
+    /// belonged to the search results instead of where the user left it.
+    #[test]
+    fn a_reveal_while_searching_leaves_the_one_pager_offset_alone() {
+        let mut gui = gui_with_search("avatar");
+        // A non-zero sentinel, so "unchanged" cannot pass by accident.
+        gui.last_scroll_y = 412.5;
+        let _ = update(&mut gui, Message::ScrollContentTo(640.0));
+        assert_eq!(
+            gui.last_scroll_y, 412.5,
+            "a search-content offset is not the one-pager's restore point"
+        );
+    }
+
     /// Minimal `Gui` for state-transition tests: `boot()` touches the real
     /// config file, so build the struct with test values instead. Only the
     /// navigation fields matter here.
     fn gui_with_search(query: &str) -> Gui {
-        Gui {
-            config: Config::default(),
-            drafts: HashMap::new(),
-            num_drafts: HashMap::new(),
-            last_reply: String::new(),
-            daemon_state: DaemonState::Connecting,
-            auto_start: AutoStart::watching(),
-            control: Arc::new(crate::platform::service::SystemControl),
-            dirty: false,
-            monitors: Vec::new(),
-            section: Section::Position,
-            search: query.to_string(),
-            last_scroll_y: 0.0,
-            picker: None,
-            picker_drag: false,
-            picker_pos: Point::ORIGIN,
-            auth_client_id: String::new(),
-            auth_client_secret: String::new(),
+        crate::gui::test_gui(query)
+    }
+}
+
+/// The tab order, derived from the visual order at `view.rs`
+/// (`column![header, row![sidebar, content], status_bar]`): header actions,
+/// then the sidebar nav items, then the content rows in the order
+/// [`fields::FIELDS`] renders them, then the status bar's toggle.
+///
+/// One place, not one list per control. A new field lands in `FIELDS` and is
+/// reachable without touching this. The order is `FIELDS`, not `Key::ALL`:
+/// the rows are grouped by section while `Key::ALL` is grouped by wire order,
+/// so walking `Key::ALL` puts `monitor` (the last Position row) third and
+/// `rtl` (the third) eighth, and Tab ping-pongs the viewport. It is
+/// `rendered_targets`, not `Key::ALL`, so the two credential rows are walked
+/// in their own right — they edit no key, and the walk has to reach them all
+/// the same.
+fn tab_order(gui: &Gui) -> Vec<FocusTarget> {
+    let mut out = vec![
+        FocusTarget::ClearChanges,
+        FocusTarget::ResetAll,
+        FocusTarget::Save,
+    ];
+    out.extend((0..Section::ALL.len()).map(FocusTarget::Nav));
+    out.extend(fields::rendered_targets(&gui.search));
+    out.push(FocusTarget::ToggleDaemon);
+    out
+}
+
+/// Tab / Shift+Tab: move focus to the next or previous target in the tab
+/// order, wrapping at both ends. `None` currently held starts from the top.
+fn move_focus(gui: &mut Gui, backwards: bool) -> Task<Message> {
+    let order = tab_order(gui);
+    let next = match gui.focus {
+        None => {
+            if backwards {
+                order.last().copied()
+            } else {
+                order.first().copied()
+            }
+        }
+        Some(current) => {
+            let idx = order.iter().position(|t| *t == current);
+            match idx {
+                Some(i) => {
+                    let n = order.len();
+                    let next = if backwards {
+                        (i + n - 1) % n
+                    } else {
+                        (i + 1) % n
+                    };
+                    order.get(next).copied()
+                }
+                // Focus was on something no longer in the order (a field the
+                // search page dropped); start from the top.
+                None => order.first().copied(),
+            }
+        }
+    };
+    gui.focus = next;
+    // Tab walks the field rows down a one-page scroll, so landing on a row
+    // has to bring it into view; a row already on screen leaves the page alone.
+    match next {
+        Some(target @ (FocusTarget::Field(_) | FocusTarget::Credential(_))) => {
+            // The ring is on that row, so the sidebar names its section and
+            // Ctrl+R resets that one. The scroll position cannot say which: a row
+            // in the page's last screenful has a reveal target past `max_scroll`,
+            // the scrollable clamps it to the end, and that reads as "scrolled to
+            // its end" — which names Connection, the one section with no config
+            // group, so Ctrl+R would reset nothing.
+            if let Some(section) = fields::section_of(target) {
+                gui.section = section;
+            }
+            // Iced 0.14 still owns typing: a `text_input` is the one widget
+            // that has real keyboard focus, and a credential row is one. So
+            // landing on it hands typing over — the same operation Ctrl+F uses
+            // for the search box — and Tab away hands it back by focusing
+            // nothing, which is what unfocuses the input. Without the second
+            // half, Tab would leave focus off the row and typing would go on
+            // editing the credential, which is the bug this half prevents.
+            let typing = match target {
+                FocusTarget::Credential(credential) => operation::focus(credential.input_id()),
+                _ => release_typing(),
+            };
+            let reveal = fields::row_id(target).map(|id| measure_sections(Some(Jump::Row(id))));
+            match reveal {
+                Some(reveal) => Task::batch([typing, reveal]),
+                None => typing,
+            }
+        }
+        // Focus left the rows for chrome, or was dropped entirely. Same
+        // hand-back, so no credential is left holding typing the ring has
+        // moved off; a no-op when nothing was focused, which is every Tab
+        // that never touched a credential.
+        _ => release_typing(),
+    }
+}
+
+/// Drop iced's own focus, so typing goes nowhere instead of into whatever text
+/// input the ring has walked away from. `operation::focus` only does this as a
+/// side effect of focusing something else, so a Tab that lands on chrome after
+/// a credential needs it said outright. Iced keeps no public
+/// `operation::unfocus`, but the operation itself is reachable through the
+/// re-exported core.
+fn release_typing() -> Task<Message> {
+    iced_runtime::task::widget(iced_runtime::core::widget::operation::focusable::unfocus())
+}
+
+/// Enter / Space: activate the focused control. A disabled control takes
+/// focus but is a no-op, mirroring how it drops its press target.
+fn activate_focus(gui: &mut Gui) -> Task<Message> {
+    let Some(target) = gui.focus else {
+        return Task::none();
+    };
+    match target {
+        FocusTarget::ClearChanges => update(gui, Message::ClearChanges),
+        FocusTarget::ResetAll => update(gui, Message::ResetAll),
+        FocusTarget::Save => update(gui, Message::Save),
+        FocusTarget::Nav(i) => match Section::at(i) {
+            Some(section) => update(gui, Message::Navigate(section)),
+            None => Task::none(),
+        },
+        FocusTarget::ToggleDaemon => update(gui, Message::ToggleDaemon),
+        // Typing already went into the input: `move_focus` handed iced's focus
+        // to it when the row took focus, so the keystrokes were never ours and
+        // there is nothing for Enter here to do. Committing the pair is the
+        // "apply connection" button's job, deliberately mouse-only like the
+        // per-section resets.
+        FocusTarget::Credential(_) => Task::none(),
+        FocusTarget::Field(key) => {
+            // A bare Space/Enter on a flag flips it, which is the same thing
+            // the bare `set <key>` form does on the wire.
+            if matches!(key.parse_value(None), Ok(Value::Cycle))
+                && let Value::Flag(current) = key.value_of(&gui.config)
+            {
+                return update(gui, Message::SetFlag(key, !current));
+            }
+            // A number row moves the keyboard into its input: the row's value
+            // has arrows, and Enter is how a value gets typed instead. This is
+            // the same hand-off `move_focus` makes for a credential row and the
+            // same operation Ctrl+F uses for the search box, because it is the
+            // one thing that makes typing go to a chosen widget at all.
+            if key.num_bounds().is_some() {
+                return operation::focus(fields::num_input_id(key));
+            }
+            // A colour row moves the keyboard into its hex input: the row's
+            // value is a colour, and Enter is how one gets typed instead. The
+            // same hand-off as the number row above, named through the
+            // editor that owns the input rather than through the key.
+            if let Some(target) = ColorTarget::of(key) {
+                return operation::focus(target.hex_input_id());
+            }
+            // Any other row that offers a fixed set of choices is an option
+            // select, and Enter activates it by stepping forward — the same
+            // step the arrows take. What is left rings but stays inert: the
+            // flags above flipped, the numbers and colours handed typing over,
+            // and nothing walks a focus chain for iced's widgets to be handed.
+            step_row(gui, true)
+        }
+    }
+}
+
+/// One arrow press on the focused row. The row's own kind decides what an arrow
+/// means on it, and the two kinds cannot overlap: a row that holds a number
+/// offers no choices, and a row that offers choices holds no number (see
+/// `commands::step_command`, which is where each row's step is derived). So
+/// one key has exactly one owner per row, and neither path has to know the
+/// other exists.
+///
+/// Focus does not move: the row keeps the ring the whole way, because the ring
+/// is on the row and not on the control inside it.
+fn step_row(gui: &mut Gui, forward: bool) -> Task<Message> {
+    let Some(FocusTarget::Field(key)) = gui.focus else {
+        return Task::none();
+    };
+    let Some(Command::Set(_, value)) = step_command(gui, key, forward) else {
+        return Task::none();
+    };
+    match value {
+        // `set monitor` is answered by the daemon shell rather than by config
+        // application, and it is the one option row whose local mirror its own
+        // message has to write.
+        Value::Target(_) => update(gui, Message::SwitchMonitor(fields::monitor_name(&value))),
+        // A number applies through the shared numeric path, which also drops
+        // the row's draft: an arrow over a row whose input still holds refused
+        // text leaves the input showing the value the arrow just set.
+        Value::Num(next) => apply_num(gui, key, next),
+        // Every other choice row rides the generic apply path its chip click
+        // takes.
+        _ => update(gui, Message::SetOption(key, value)),
+    }
+}
+
+/// R: restore the focused row to its default.
+///
+/// Only a config-key row has one. The ring on a chrome control (clear
+/// changes, reset all, save, a sidebar item, the daemon toggle) or on a
+/// credential resets nothing — the first already have their own resets bound
+/// to Enter and to Ctrl+R / Ctrl+Shift+R, and a credential is not a config
+/// key at all (it has no `Key`, so there is nothing to name a reset with).
+/// Same rule as `step_row`: no row, no command.
+fn reset_focused(gui: &mut Gui) -> Task<Message> {
+    let Some(FocusTarget::Field(key)) = gui.focus else {
+        return Task::none();
+    };
+    update(gui, Message::ResetFocused(key))
+}
+
+/// Tab / Shift+Tab: move the ring along the tab order — except out of a number
+/// or colour row that holds typed text, which swallows the Tab and commits that
+/// text instead, because committing is what Tab means in the middle of a typed
+/// value. A commit the row refuses keeps the caret in the input, so it keeps
+/// the ring too; a row with nothing pending moves as every other target does.
+fn tab_out(gui: &mut Gui, backwards: bool) -> Task<Message> {
+    match gui.focus {
+        Some(FocusTarget::Field(key)) if holds_typed_text(gui, key) => {
+            if let Some(target) = ColorTarget::of(key) {
+                commit_hex(gui, target).unwrap_or_else(Task::none)
+            } else {
+                commit_num(gui, key).unwrap_or_else(Task::none)
+            }
+        }
+        _ => move_focus(gui, backwards),
+    }
+}
+
+/// Whether a number or colour row holds text the input refused.
+/// `Message::NumText` applies every value the bounds allow the moment it is
+/// typed, and `Message::ColorHex` every value the hex parser allows, so a
+/// draft can only ever be text that was *not* applied — which makes this the
+/// same thing as "the keyboard is typing into this row", the one question Tab
+/// has to ask before it can mean "commit".
+fn holds_typed_text(gui: &Gui, key: Key) -> bool {
+    key.num_bounds().is_some() && gui.num_drafts.contains_key(&key)
+        || ColorTarget::of(key).is_some_and(|target| gui.drafts.contains_key(&target))
+}
+
+/// Commit what is typed in a colour row's hex input: apply it when it is a
+/// value the hex parser allows, and hand typing back to the row either way,
+/// because the ring never left it.
+///
+/// `None` is a refusal: the daemon's own parse error becomes the reply, the
+/// row keeps the colour it had, and the caret stays in the input for the user
+/// to fix. No draft means nothing is pending — this is Enter on an untouched
+/// row — so the only work left is the hand-back.
+fn commit_hex(gui: &mut Gui, target: ColorTarget) -> Option<Task<Message>> {
+    let Some(raw) = gui.drafts.get(&target).cloned() else {
+        return Some(release_typing());
+    };
+    match raw.parse::<HexColor>() {
+        // The draft parsed after all: run the same apply the typing path
+        // takes, which clears the draft, mirrors and sends.
+        Ok(_) => Some(update(gui, Message::ColorHex(target, raw))),
+        Err(_) => {
+            // The domain's own wording for this refusal, read off the same
+            // parser the daemon uses, rather than a second message invented here.
+            gui.last_reply = Reply::Error(
+                target
+                    .key()
+                    .parse_value(None)
+                    .expect_err("a colour key needs a value"),
+            );
+            None
+        }
+    }
+}
+
+/// Commit what is typed in a number row: apply it when it is a value the bounds
+/// allow, and hand typing back to the row either way, because the ring never
+/// left it.
+///
+/// `None` is a refusal: the daemon's own parse error becomes the reply, the
+/// row keeps the value it had, and the caret stays in the input for the user to
+/// fix. No draft means nothing is pending — this is Enter on an untouched row —
+/// so the only work left is the hand-back.
+fn commit_num(gui: &mut Gui, key: Key) -> Option<Task<Message>> {
+    let Some(raw) = gui.num_drafts.get(&key).cloned() else {
+        return Some(release_typing());
+    };
+    match raw
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .filter(|v| num_in_bounds(key, *v))
+    {
+        Some(value) => Some(apply_num(gui, key, value)),
+        None => {
+            // The domain's own wording for this refusal, read off the same
+            // parser the daemon uses, rather than a second message invented here.
+            gui.last_reply = Reply::Error(
+                key.parse_value(None)
+                    .expect_err("a numeric key needs a value"),
+            );
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use hyprlay_core::config::AnchorMode;
+
+    use super::*;
+    use crate::gui::Credential;
+    use crate::gui::FocusTarget;
+
+    /// A `Gui` with nothing focused and a clean config.
+    fn gui() -> Gui {
+        crate::gui::test_gui("")
+    }
+
+    /// Tab from nothing lands on the first target in the order; Tab again
+    /// advances; Shift+Tab reverses.
+    #[test]
+    fn tab_moves_focus_through_the_order() {
+        let mut g = gui();
+        let _ = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Tab))),
+        );
+        assert_eq!(g.focus, Some(FocusTarget::ClearChanges));
+
+        let _ = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Tab))),
+        );
+        assert_eq!(g.focus, Some(FocusTarget::ResetAll));
+
+        let _ = update(&mut g, Message::KeyPressed(shift_tab()));
+        assert_eq!(g.focus, Some(FocusTarget::ClearChanges));
+    }
+
+    /// Shift+Tab from nothing lands on the last target in the order.
+    #[test]
+    fn shift_tab_from_nothing_lands_on_the_last_target() {
+        let mut g = gui();
+        let _ = update(&mut g, Message::KeyPressed(shift_tab()));
+        assert_eq!(g.focus, Some(FocusTarget::ToggleDaemon));
+    }
+
+    /// Tab wraps at both ends.
+    #[test]
+    fn tab_wraps() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::ToggleDaemon);
+        let _ = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Tab))),
+        );
+        assert_eq!(g.focus, Some(FocusTarget::ClearChanges));
+
+        g.focus = Some(FocusTarget::ClearChanges);
+        let _ = update(&mut g, Message::KeyPressed(shift_tab()));
+        assert_eq!(g.focus, Some(FocusTarget::ToggleDaemon));
+    }
+
+    /// Enter activates the focused control: Save sets dirty false and sends.
+    #[test]
+    fn enter_activates_the_focused_control() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Save);
+        let _ = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Enter))),
+        );
+        assert!(!g.dirty);
+    }
+
+    /// Enter on a cycle-able field flips it, which is the same thing the
+    /// bare `set <key>` wire form does.
+    #[test]
+    fn enter_flips_a_cycle_able_field() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Rtl));
+        let before = g.config.rtl;
+        let _ = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Space))),
+        );
+        assert_eq!(g.config.rtl, !before);
+    }
+
+    /// Enter on a number row hands typing to that row's input instead of moving
+    /// the value: a `text_input` is the one widget with real keyboard focus, so
+    /// this is the operation that puts a caret there, and the value moves only
+    /// once something is typed or an arrow says so. Read off the returned
+    /// `Task`, which is the only thing a unit test can see of a widget
+    /// operation.
+    #[test]
+    fn enter_on_a_number_row_hands_typing_to_its_input() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Opacity));
+        let before = g.config.opacity;
+        let task = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Named(key::Named::Enter))),
+        );
+        assert_eq!(
+            g.config.opacity, before,
+            "Enter on its own changes no value"
+        );
+        assert_eq!(
+            task.units(),
+            1,
+            "Enter on a number row runs the focus hand-off and nothing else"
+        );
+    }
+
+    /// Enter on a colour row hands typing to that row's hex input instead of
+    /// stepping anything: the hex field is the one widget on the row that can
+    /// take real focus, so this is the operation that puts a caret there, and
+    /// the colour moves only once something is typed. Read off the returned
+    /// `Task`, the only thing a unit test can see of a widget operation.
+    #[test]
+    fn enter_on_a_colour_row_hands_typing_to_its_hex_input() {
+        for key in [Key::SpeakingColor, Key::TextColor, Key::BoxColor] {
+            let mut g = gui();
+            g.focus = Some(FocusTarget::Field(key));
+            let before = key.value_of(&g.config);
+            let task = update(
+                &mut g,
+                Message::KeyPressed(no_key(keyboard::Key::Named(key::Named::Enter))),
+            );
+            assert_eq!(
+                key.value_of(&g.config),
+                before,
+                "Enter on its own changes no colour"
+            );
+            assert_eq!(
+                g.focus,
+                Some(FocusTarget::Field(key)),
+                "Enter moves typing, not the ring"
+            );
+            assert_eq!(
+                task.units(),
+                1,
+                "Enter on a colour row runs the focus hand-off and nothing else"
+            );
+        }
+    }
+
+    /// The option selects: Enter and Right move to the next choice and Left to
+    /// the previous one, and the ring stays on the row for all three — the
+    /// choice is what moves, not the focus.
+    #[test]
+    fn enter_and_right_step_forward_and_left_steps_back() {
+        for key in [
+            keyboard::Key::Named(key::Named::Enter),
+            keyboard::Key::Named(key::Named::ArrowRight),
+        ] {
+            let mut g = gui();
+            g.focus = Some(FocusTarget::Field(Key::Anchor));
+            let task = update(&mut g, Message::KeyPressed(no_key(key.clone())));
+            assert_eq!(
+                g.config.anchor,
+                AnchorMode::Top,
+                "{key:?} from auto lands on top"
+            );
+            assert_eq!(
+                g.focus,
+                Some(FocusTarget::Field(Key::Anchor)),
+                "{key:?} moves the choice, not the focus"
+            );
+            assert_eq!(
+                task.units(),
+                1,
+                "{key:?} sends exactly one command to the daemon"
+            );
+        }
+
+        // Left walks the same row backwards, from where it already stands.
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Anchor));
+        g.config.anchor = AnchorMode::Bottom;
+        let task = update(&mut g, Message::KeyPressed(arrow_left()));
+        assert_eq!(g.config.anchor, AnchorMode::Top, "Left from bottom is top");
+        assert_eq!(task.units(), 1, "and it sends one command");
+    }
+
+    /// The option selects wrap at both ends, which is asserted as commands
+    /// spawned: a boundary step puts the other end's command on the socket.
+    /// Held arrows run the same step, so a key the user leans on keeps
+    /// cycling the row instead of resting on the last option.
+    #[test]
+    fn a_step_at_either_end_wraps_to_the_other_end() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Anchor));
+
+        let first = update(&mut g, Message::KeyPressed(arrow_left()));
+        assert_eq!(
+            g.config.anchor,
+            AnchorMode::Bottom,
+            "Left on auto wraps to bottom"
+        );
+        assert_eq!(first.units(), 1, "and puts its command on the socket");
+
+        // Three steps from bottom cycle all the way round to bottom again.
+        for _ in 0..3 {
+            let _ = update(&mut g, Message::KeyPressed(arrow_right()));
+        }
+        assert_eq!(g.config.anchor, AnchorMode::Bottom);
+        let held = update(&mut g, Message::KeyPressed(held_right()));
+        assert_eq!(
+            g.config.anchor,
+            AnchorMode::Auto,
+            "a held Right past the last option wraps to the first"
+        );
+        assert_eq!(held.units(), 1, "and sends its command while held");
+    }
+
+    /// A step onto the row's own lone option sends nothing and marks nothing:
+    /// with zero outputs reported the monitor row holds only "active", so an
+    /// arrow there is a step that changes nothing — no command on the socket,
+    /// no unsaved marker, no config touched.
+    #[test]
+    fn a_step_onto_a_lone_option_sends_nothing_and_marks_nothing() {
+        let mut g = gui();
+        assert!(
+            g.monitors.is_empty(),
+            "this test needs the zero-output shape with its lone chip"
+        );
+        g.focus = Some(FocusTarget::Field(Key::Monitor));
+        for key in [arrow_left(), arrow_right()] {
+            let task = update(&mut g, Message::KeyPressed(key));
+            assert_eq!(
+                task.units(),
+                0,
+                "a lone option puts no command on the socket"
+            );
+            assert!(
+                !g.dirty,
+                "and a step that changes nothing marks nothing dirty"
+            );
+        }
+    }
+
+    /// A held key is a stream of further KeyPressed events, and one repeat is
+    /// one step. X11 auto-repeat is how a keyboard user holds an arrow, so a
+    /// repeat that did nothing would leave held keys worse than tapped ones.
+    #[test]
+    fn a_held_arrow_repeats_the_step() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Anchor));
+        let _ = update(&mut g, Message::KeyPressed(held_right()));
+        let _ = update(&mut g, Message::KeyPressed(held_right()));
+        assert_eq!(
+            g.config.anchor,
+            AnchorMode::Bottom,
+            "two repeats from auto land on bottom"
+        );
+    }
+
+    /// The arrows are inert anywhere they cannot mean a step: a chrome button,
+    /// a credential row (where iced's own focus owns them, to move the caret)
+    /// and a colour editor, which edits no number and offers no choices.
+    #[test]
+    fn the_arrows_do_nothing_where_there_is_no_step() {
+        for target in [
+            FocusTarget::Save,
+            FocusTarget::Nav(0),
+            FocusTarget::Credential(Credential::ClientId),
+            FocusTarget::Field(Key::SpeakingColor),
+        ] {
+            let mut g = gui();
+            g.focus = Some(target);
+            for key in [arrow_left(), arrow_right(), arrow_up(), arrow_down()] {
+                let task = update(&mut g, Message::KeyPressed(key));
+                assert_eq!(task.units(), 0, "{target:?} must ignore the arrows");
+            }
+        }
+    }
+
+    /// A number row steps with all four arrows, up and right forward, down and
+    /// left back, by the row's own step — and the ring stays on the row, since
+    /// it is the row that is focused and not the slider inside it.
+    #[test]
+    fn the_arrows_step_a_number_row() {
+        let forward = [arrow_right(), arrow_up()];
+        let back = [arrow_left(), arrow_down()];
+        for key in forward {
+            let mut g = gui();
+            g.focus = Some(FocusTarget::Field(Key::Spacing));
+            let task = update(&mut g, Message::KeyPressed(key.clone()));
+            assert_eq!(g.config.spacing, 5, "{key:?} raises the value by one");
+            assert_eq!(
+                g.focus,
+                Some(FocusTarget::Field(Key::Spacing)),
+                "{key:?} moves the value, not the focus"
+            );
+            assert_eq!(task.units(), 1, "{key:?} sends exactly one command");
+        }
+        for key in back {
+            let mut g = gui();
+            g.focus = Some(FocusTarget::Field(Key::Spacing));
+            let task = update(&mut g, Message::KeyPressed(key.clone()));
+            assert_eq!(g.config.spacing, 3, "{key:?} lowers the value by one");
+            assert_eq!(task.units(), 1, "{key:?} sends exactly one command");
+        }
+        // A negative value steps the same way and keeps its sign.
+        let mut g = gui();
+        g.config.offset_x = -12;
+        g.focus = Some(FocusTarget::Field(Key::OffsetX));
+        let _ = update(&mut g, Message::KeyPressed(arrow_right()));
+        assert_eq!(
+            g.config.offset_x, -11,
+            "offsets cross zero the ordinary way"
+        );
+    }
+
+    /// At a bound the value stops and nothing is sent: no write, no wire text.
+    /// Held arrows run the same step, so leaning on one at the end of the range
+    /// holds the value there instead of running past it. `opacity` is 100 on a
+    /// clean config, which is its upper bound, so the very first press is the
+    /// boundary.
+    #[test]
+    fn a_number_row_stops_at_its_bounds() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Opacity));
+        assert_eq!(g.config.opacity, 100, "opacity's default is its maximum");
+        for _ in 0..3 {
+            let task = update(&mut g, Message::KeyPressed(arrow_right()));
+            assert_eq!(g.config.opacity, 100, "a held Right stops at the bound");
+            assert_eq!(task.units(), 0, "and puts no command on the socket");
+        }
+        // And the other end, reached by stepping down to it.
+        for _ in 0..101 {
+            let _ = update(&mut g, Message::KeyPressed(arrow_down()));
+        }
+        assert_eq!(g.config.opacity, 0, "a hundred steps reach the minimum");
+        let task = update(&mut g, Message::KeyPressed(arrow_down()));
+        assert_eq!(g.config.opacity, 0, "and one more stays there");
+        assert_eq!(task.units(), 0, "with nothing sent");
+    }
+
+    /// Enter commits what is typed and hands typing back to the row. The typed
+    /// value is applied by `Message::NumText` the moment it is valid —
+    /// that is the row's existing behaviour and it is why a draft can only ever
+    /// hold refused text — so what the commit has left to do is refuse it
+    /// properly or hand the input back.
+    #[test]
+    fn enter_inside_a_number_row_commits_and_hands_typing_back() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Spacing));
+        let _ = update(&mut g, Message::NumText(Key::Spacing, "9".into()));
+        assert_eq!(g.config.spacing, 9, "a valid value applies as it is typed");
+
+        let task = update(&mut g, Message::NumSubmit(Key::Spacing));
+        assert_eq!(g.config.spacing, 9, "nothing is left to apply");
+        assert_eq!(g.focus, Some(FocusTarget::Field(Key::Spacing)));
+        assert_eq!(
+            task.units(),
+            1,
+            "the commit hands typing back, which is the one operation it runs"
+        );
+        assert!(
+            g.num_drafts.is_empty(),
+            "and leaves no half-typed text behind"
+        );
+    }
+
+    /// A refused commit answers with the daemon's own error text, changes no
+    /// value, and stays in the input: `None` is what tells the caller the caret
+    /// is still wanted there. The wording is the parser's, not a second one.
+    #[test]
+    fn a_refused_commit_answers_the_error_and_keeps_the_caret() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Spacing));
+        let _ = update(&mut g, Message::NumText(Key::Spacing, "99".into()));
+        assert_eq!(
+            g.config.spacing, 4,
+            "99 is out of range, so it stays a draft"
+        );
+
+        assert!(
+            commit_num(&mut g, Key::Spacing).is_none(),
+            "a value outside the bounds is refused"
+        );
+        assert_eq!(g.config.spacing, 4, "and the row keeps the value it had");
+        assert_eq!(g.focus, Some(FocusTarget::Field(Key::Spacing)));
+        assert_eq!(
+            g.last_reply.text(),
+            "error: spacing <0-24>",
+            "the refusal is the daemon's own wording for this key"
+        );
+        assert_eq!(
+            g.num_drafts.get(&Key::Spacing).map(String::as_str),
+            Some("99"),
+            "and the refused text stays for the user to fix"
+        );
+    }
+
+    /// Enter inside a colour row's hex input hands typing back to the row. The
+    /// typed value is applied by `Message::ColorHex` the moment it parses —
+    /// that is the row's existing behaviour and it is why a draft can only ever
+    /// hold refused text — so what the commit has left to do is refuse it
+    /// properly or hand the input back.
+    #[test]
+    fn enter_inside_a_colour_row_hands_typing_back() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::SpeakingColor));
+        let _ = update(
+            &mut g,
+            Message::ColorHex(ColorTarget::Speaking, "#ff00ff".into()),
+        );
+        assert_eq!(
+            g.config.speaking_color,
+            "#ff00ff".parse().unwrap(),
+            "a valid colour applies as it is typed"
+        );
+
+        let task = update(&mut g, Message::ColorSubmit(ColorTarget::Speaking));
+        assert_eq!(
+            g.config.speaking_color,
+            "#ff00ff".parse().unwrap(),
+            "nothing is left to apply"
+        );
+        assert_eq!(g.focus, Some(FocusTarget::Field(Key::SpeakingColor)));
+        assert_eq!(
+            task.units(),
+            1,
+            "the commit hands typing back, which is the one operation it runs"
+        );
+        assert!(g.drafts.is_empty(), "and leaves no half-typed text behind");
+    }
+
+    /// A refused hex commit answers with the daemon's own error text, changes no
+    /// colour, and stays in the input: `None` is what tells the caller the caret
+    /// is still wanted there. The wording is the parser's, not a second one.
+    #[test]
+    fn a_refused_hex_commit_answers_the_error_and_keeps_the_caret() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::SpeakingColor));
+        let before = g.config.speaking_color;
+        let _ = update(
+            &mut g,
+            Message::ColorHex(ColorTarget::Speaking, "ff00ff".into()),
+        );
+        assert_eq!(
+            g.config.speaking_color, before,
+            "hex without a # never parses, so it stays a draft"
+        );
+
+        assert!(
+            commit_hex(&mut g, ColorTarget::Speaking).is_none(),
+            "text the parser refuses is refused"
+        );
+        assert_eq!(
+            g.config.speaking_color, before,
+            "and the row keeps the colour it had"
+        );
+        assert_eq!(g.focus, Some(FocusTarget::Field(Key::SpeakingColor)));
+        assert_eq!(
+            g.last_reply.text(),
+            "error: speaking-color <#rrggbb>",
+            "the refusal is the daemon's own wording for this key"
+        );
+        assert_eq!(
+            g.drafts.get(&ColorTarget::Speaking).map(String::as_str),
+            Some("ff00ff"),
+            "and the refused text stays for the user to fix"
+        );
+    }
+
+    /// Tab out of a colour row commits what is typed there instead of moving
+    /// on, and a commit the parser refuses keeps the caret in the input — so it
+    /// keeps the ring too. Nothing pending means an ordinary Tab stop: the
+    /// only text a row can hold is text `ColorHex` refused, because a value the
+    /// parser allows is applied the moment it is typed.
+    #[test]
+    fn tab_out_of_a_colour_row_commits_instead_of_moving_on() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::SpeakingColor));
+        let _ = update(
+            &mut g,
+            Message::ColorHex(ColorTarget::Speaking, "ff00ff".into()),
+        );
+
+        let refused = update(&mut g, Message::KeyPressed(no_key(tab_key())));
+        assert_eq!(g.focus, Some(FocusTarget::Field(Key::SpeakingColor)));
+        assert_eq!(
+            refused.units(),
+            0,
+            "a refused commit runs nothing at all, so nothing can move"
+        );
+        assert_eq!(
+            g.last_reply.text(),
+            "error: speaking-color <#rrggbb>",
+            "and says why, the way the commit does"
+        );
+    }
+
+    /// Escape that the hex input swallowed hands typing back to the row and keeps
+    /// what was typed, the same as Tab and Enter: discarding it would lose a
+    /// half-typed colour for no gain, since text the parser refuses cannot land
+    /// anyway. Same owner ruling as the number rows — nothing in ticket 06 says
+    /// colours differ, so they do not.
+    #[test]
+    fn escape_keeps_the_typed_hex_and_hands_typing_back() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::SpeakingColor));
+        let before = g.config.speaking_color;
+        let _ = update(
+            &mut g,
+            Message::ColorHex(ColorTarget::Speaking, "ff00ff".into()),
+        );
+        assert_eq!(g.config.speaking_color, before);
+
+        let task = update(&mut g, Message::EscapeCaptured);
+        assert_eq!(
+            g.config.speaking_color, before,
+            "a refused value cannot land"
+        );
+        assert_eq!(g.focus, Some(FocusTarget::Field(Key::SpeakingColor)));
+        assert!(
+            g.drafts.contains_key(&ColorTarget::Speaking),
+            "the draft stays for the user to finish, rather than vanishing"
+        );
+        assert_eq!(task.units(), 1, "and typing is handed back to the row");
+    }
+
+    /// Tab out of a number row commits instead of moving on, and a commit the bounds refuse keeps the caret in the input — so it
+    /// keeps the ring too. Nothing pending means an ordinary Tab stop: the
+    /// only text a row can hold is text `NumText` refused, because a value the
+    /// bounds allow is applied the moment it is typed.
+    #[test]
+    fn tab_out_of_a_number_row_commits_instead_of_moving_on() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Spacing));
+        let _ = update(&mut g, Message::NumText(Key::Spacing, "99".into()));
+
+        let refused = update(&mut g, Message::KeyPressed(no_key(tab_key())));
+        assert_eq!(g.focus, Some(FocusTarget::Field(Key::Spacing)));
+        assert_eq!(
+            refused.units(),
+            0,
+            "a refused commit runs nothing at all, so nothing can move"
+        );
+        assert_eq!(
+            g.last_reply.text(),
+            "error: spacing <0-24>",
+            "and says why, the way the commit does"
+        );
+
+        // Fixing the text applies it, which clears what Tab was about to
+        // commit, so the next Tab is a plain move — and it takes typing with it.
+        let _ = update(&mut g, Message::NumText(Key::Spacing, "8".into()));
+        assert_eq!(g.config.spacing, 8);
+        let moved = update(&mut g, Message::KeyPressed(no_key(tab_key())));
+        assert_eq!(field(&g), Key::MaxName, "Tab moved to the next row");
+        assert_eq!(
+            moved.units(),
+            2,
+            "the reveal of the row it landed on, plus the hand-back that stops \
+             the input it left holding the keyboard"
+        );
+    }
+
+    /// Escape that the input swallowed hands typing back to the row and keeps
+    /// what was typed, the same as Tab and Enter: discarding it would lose a
+    /// half-typed number for no gain, since a value the bounds refuse cannot
+    /// land anyway. Iced's own Escape arm does the unfocusing and tells nobody,
+    /// which is why the app is told separately.
+    #[test]
+    fn escape_keeps_the_typed_value_and_hands_typing_back() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Spacing));
+        let _ = update(&mut g, Message::NumText(Key::Spacing, "99".into()));
+        assert_eq!(g.config.spacing, 4);
+
+        // 99 is out of bounds for `spacing` (0..=24), so the commit is refused:
+        // the domain's own wording becomes the reply and the row keeps its value.
+        let task = update(&mut g, Message::EscapeCaptured);
+        assert_eq!(g.config.spacing, 4, "a refused value cannot land");
+        assert_eq!(g.focus, Some(FocusTarget::Field(Key::Spacing)));
+        assert!(
+            g.num_drafts.contains_key(&Key::Spacing),
+            "the draft stays for the user to finish, rather than vanishing"
+        );
+        assert_eq!(task.units(), 1, "and typing is handed back to the row");
+
+        // Tab is the other way out and it does not move: the draft is still
+        // unapplicable, so Tab commits again and refuses again, which is how the
+        // row asks to be fixed. Escape is what leaves.
+        let _ = update(&mut g, Message::KeyPressed(no_key(tab_key())));
+        assert_eq!(
+            field(&g),
+            Key::Spacing,
+            "Tab stays while the text is still not a value"
+        );
+    }
+
+    /// Escape keeps a draft, so the row is left holding one. Coming back to it
+    /// must not refuse forever: fixing the text applies it, and the next Tab is a
+    /// plain move. The draft is escapable, not a dead end.
+    #[test]
+    fn a_kept_draft_is_fixable_rather_than_a_dead_end() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Spacing));
+        let _ = update(&mut g, Message::NumText(Key::Spacing, "99".into()));
+        let _ = update(&mut g, Message::EscapeCaptured);
+        assert!(g.num_drafts.contains_key(&Key::Spacing));
+
+        // The row is still refused while the text is still wrong, and still says
+        // why, so the user knows what to do about it.
+        let refused = update(&mut g, Message::KeyPressed(no_key(tab_key())));
+        assert_eq!(field(&g), Key::Spacing);
+        assert_eq!(refused.units(), 0);
+        assert_eq!(g.last_reply.text(), "error: spacing <0-24>");
+
+        // Fix it, and the row is an ordinary stop again.
+        let _ = update(&mut g, Message::NumText(Key::Spacing, "8".into()));
+        assert_eq!(g.config.spacing, 8);
+        let _ = update(&mut g, Message::KeyPressed(no_key(tab_key())));
+        assert_eq!(field(&g), Key::MaxName, "Tab moved to the next row");
+        assert!(g.num_drafts.is_empty(), "and the draft is gone with it");
+    }
+
+    /// The same exit with a value the bounds *do* allow applies it, so Escape
+    /// is not a way to strand a good number either.
+    #[test]
+    fn escape_applies_a_typed_value_the_bounds_allow() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Spacing));
+        let _ = update(&mut g, Message::NumText(Key::Spacing, "9".into()));
+        assert_eq!(g.config.spacing, 9, "a legal value applies as it is typed");
+
+        let _ = update(&mut g, Message::EscapeCaptured);
+        assert_eq!(g.config.spacing, 9);
+        assert!(
+            g.num_drafts.is_empty(),
+            "the draft committed, so none is left"
+        );
+    }
+
+    /// Tab far enough down to the page's last *keyed* row, then run the reveal
+    /// that row needs: it sits in the final screenful, so the reveal target is
+    /// past the end of the page, which is where a scrollable clamps it. The
+    /// sidebar must still name the row's own section — the ring is on it, and
+    /// Ctrl+R resets whatever the sidebar names. The trap is Connection: a page
+    /// read as "scrolled to its end" names it, and it is the one section with no
+    /// config group, so Ctrl+R then resets nothing at all.
+    #[test]
+    fn the_sidebar_names_the_section_of_the_focused_row_at_the_page_end() {
+        let mut g = gui();
+        // Three header actions and five sidebar buttons come first, so Tab once
+        // per keyed row after them lands on the last one. The credential rows
+        // render after every keyed row, so counting them in here would land on
+        // a credential instead and lose the row this test is about.
+        let keyed = fields::rendered_targets("")
+            .filter(|t| matches!(t, FocusTarget::Field(_)))
+            .count();
+        for _ in 0..(3 + Section::ALL.len() + keyed) {
+            let _ = update(
+                &mut g,
+                Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Tab))),
+            );
+        }
+        assert_eq!(field(&g), Key::BoxColor, "the last keyed row on the page");
+
+        // The reveal that row needs: its top minus the margin, which is past
+        // the end of the page. A `Task` is inert in a unit test, so this is the
+        // request the reveal issues and the state it leaves behind, never the
+        // position a scrollable would settle on. It must move the page and
+        // nothing else.
+        let _ = update(&mut g, Message::ScrollContentTo(2100.0));
+        assert_eq!(
+            g.section,
+            Section::Colors,
+            "the ring is on a Colors row, so the sidebar has to name Colors"
+        );
+    }
+
+    /// The two credential rows are the last rows the page renders, so from a
+    /// known start they are a known number of Tabs away: three header actions,
+    /// five sidebar items, and one press per row before them. Tabbed *to* them
+    /// in both directions, because Tab reaching a row only in one direction
+    /// means a Shift+Tab user cannot reach it at all.
+    #[test]
+    fn tab_reaches_the_credential_rows_from_the_top_and_from_the_bottom() {
+        let mut g = gui();
+        // Forward from nothing: three header actions, five sidebar items, one
+        // press per keyed row, then the credential.
+        let to_first = 3 + Section::ALL.len() + keyed_rows() + 1;
+        tab_n(&mut g, to_first);
+        assert_eq!(g.focus, Some(FocusTarget::Credential(Credential::ClientId)));
+
+        tab_n(&mut g, 1);
+        assert_eq!(
+            g.focus,
+            Some(FocusTarget::Credential(Credential::ClientSecret))
+        );
+
+        // Shift+Tab back out of the pair lands on the last keyed row, which is
+        // what the pair was appended after: adding credentials renumbered no
+        // Tab above them.
+        shift_tab_n(&mut g, 2);
+        assert_eq!(
+            g.focus,
+            Some(FocusTarget::Field(Key::BoxColor)),
+            "the row before the first credential is still the last keyed row"
+        );
+    }
+
+    /// Both ends of the order wrap onto the credential rows the same way every
+    /// other target does: Shift+Tab off the daemon toggle (the last) reaches
+    /// the last credential by wrapping past the header, and Tab forward off
+    /// the end reaches the first credential. Getting this wrong strands a
+    /// keyboard user on a row they cannot leave in one direction.
+    #[test]
+    fn tab_wraps_onto_and_off_the_credential_rows() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::ToggleDaemon);
+        shift_tab_n(&mut g, 1);
+        assert_eq!(
+            g.focus,
+            Some(FocusTarget::Credential(Credential::ClientSecret)),
+            "Shift+Tab off the last target wraps to the last credential"
+        );
+
+        shift_tab_n(&mut g, 1);
+        assert_eq!(
+            g.focus,
+            Some(FocusTarget::Credential(Credential::ClientId)),
+            "and Shift+Tab again reaches the first credential"
+        );
+
+        // Tab off the last target still wraps to the first, so the pair is
+        // inside the same cycle rather than appended after it.
+        g.focus = Some(FocusTarget::ToggleDaemon);
+        tab_n(&mut g, 1);
+        assert_eq!(g.focus, Some(FocusTarget::ClearChanges));
+        tab_n(&mut g, 3 + Section::ALL.len() + keyed_rows());
+        assert_eq!(
+            g.focus,
+            Some(FocusTarget::Credential(Credential::ClientId)),
+            "Tab forward through the chrome reaches the first credential"
+        );
+        tab_n(&mut g, 1);
+        assert_eq!(
+            g.focus,
+            Some(FocusTarget::Credential(Credential::ClientSecret))
+        );
+        tab_n(&mut g, 1);
+        assert_eq!(
+            g.focus,
+            Some(FocusTarget::ToggleDaemon),
+            "and Tab on leaves the credentials for the toggle, as for every row"
+        );
+    }
+
+    /// Focus on a credential row hands typing to that row's text input, and
+    /// Tab off it hands typing back — iced's focus is what makes typing work at
+    /// all, and it is not the same thing as the ring. Left holding the input,
+    /// a Tab away from a credential would keep sending every later keystroke
+    /// into it, silently rewriting a secret the user is no longer looking at.
+    /// Read off the returned `Task`: the number of operations it runs is the
+    /// only thing a unit test can see, and a credential must run two (focus
+    /// the input, measure the reveal) where a keyed row ran one.
+    #[test]
+    fn focus_hands_typing_to_a_credential_row_and_takes_it_back_on_tab_away() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Credential(Credential::ClientId));
+        let onto = update(&mut g, Message::KeyPressed(no_key(tab_key())));
+        assert_eq!(
+            onto.units(),
+            2,
+            "landing on a credential runs the focus hand-off and the reveal"
+        );
+
+        // And off it again, to a target that is not a credential.
+        let off = update(&mut g, Message::KeyPressed(no_key(tab_key())));
+        assert_eq!(
+            off.units(),
+            1,
+            "Tab off a credential runs the hand-back and nothing else: no row, \
+             so no reveal"
+        );
+    }
+
+    /// Enter on a focused credential does nothing: the keystrokes that built
+    /// the draft were already the input's, and committing the pair is the
+    /// "apply connection" button's job. Pinned because a credential that grew
+    /// an Enter arm would commit a half-typed secret with no confirmation.
+    #[test]
+    fn enter_on_a_credential_row_is_a_noop() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Credential(Credential::ClientId));
+        let _ = update(&mut g, Message::KeyPressed(no_key(enter_key())));
+        assert_eq!(
+            g.auth_client_id, "",
+            "no apply, and no daemon restart: that is the button's job"
+        );
+    }
+
+    /// A narrowed search drops the rows it does not render, so Tab walks only
+    /// the hits.
+    #[test]
+    fn a_search_narrows_the_tab_order_to_the_rows_it_renders() {
+        let mut g = gui();
+        g.search = "color".to_string();
+        let order = tab_order(&g);
+        let fields: Vec<Key> = order
+            .iter()
+            .filter_map(|t| match t {
+                FocusTarget::Field(key) => Some(*key),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            fields,
+            [Key::SpeakingColor, Key::TextColor, Key::BoxColor],
+            "only the three hits the search page renders are in the order"
+        );
+    }
+
+    /// Tab on the search page reaches the hits: the chrome and the sidebar come
+    /// first, so the first field is the next press after them.
+    #[test]
+    fn tab_on_the_search_page_walks_the_hits() {
+        let mut g = gui();
+        g.search = "color".to_string();
+        for _ in 0..(4 + Section::ALL.len()) {
+            let _ = update(
+                &mut g,
+                Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Tab))),
+            );
+        }
+        assert_eq!(
+            field(&g),
+            Key::SpeakingColor,
+            "the press after the chrome lands on the first hit"
+        );
+    }
+
+    /// Clearing the search lands the one-pager back on the offset tracked
+    /// before it, but nothing re-derived the highlight for that offset:
+    /// `move_focus` had left `gui.section` naming the search hit's section,
+    /// so the sidebar named a row the restored viewport does not show.
+    /// Restoring therefore has to measure as well as scroll. A `Task` counts
+    /// the operations it runs in `units()`, which is the only thing a unit
+    /// test can read off it — the highlighted section itself only changes
+    /// when the pass this guard asks for reports back below.
+    #[test]
+    fn clearing_the_search_re_derives_the_highlight_at_the_restored_offset() {
+        let mut g = gui();
+        // Where the user left the one-pager: a screenful into Opacity.
+        let _ = update(&mut g, Message::Scrolled(1900.0));
+        let _ = update(
+            &mut g,
+            Message::Measured {
+                offsets: one_pager_headers(),
+                max_scroll: 2600.0,
+                jump: None,
+            },
+        );
+        assert_eq!(g.section, Section::Opacity);
+
+        // The search page renders no sections, but the ring is on a hit and
+        // Ctrl+R has to reach that hit's section while the search is up.
+        g.search = "color".to_string();
+        for _ in 0..(4 + Section::ALL.len()) {
+            let _ = update(
+                &mut g,
+                Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Tab))),
+            );
+        }
+        let _ = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Tab))),
+        );
+        assert_eq!(field(&g), Key::TextColor);
+        assert_eq!(g.section, Section::Colors, "the ring is on a Colors row");
+
+        // Esc empties the search, so the one-pager returns and the sidebar
+        // must name the section of the offset it returns to, not the hit.
+        let task = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Escape))),
+        );
+        assert_eq!(
+            task.units(),
+            2,
+            "the restore has to run the measure pass that re-derives the \
+             highlight, not only the scroll"
+        );
+        // The typed clear takes the same path, so it must measure too.
+        g.search = "color".to_string();
+        let task = update(&mut g, Message::Search(String::new()));
+        assert_eq!(
+            task.units(),
+            2,
+            "same restore, reached by emptying the input"
+        );
+
+        // What that pass reports: Opacity, the section the restored offset
+        // is in, rather than the Colors the search page left behind.
+        let _ = update(
+            &mut g,
+            Message::Measured {
+                offsets: one_pager_headers(),
+                max_scroll: 2600.0,
+                jump: None,
+            },
+        );
+        assert_eq!(g.section, Section::Opacity);
+    }
+
+    /// Escape the search box swallowed clears the search, which is what Escape
+    /// already means when the box does not hold the keyboard. The box is the app's
+    /// only other capturing input, so a captured Escape on a row holding no typed
+    /// text is the search — no extra state needed to tell the two apart.
+    #[test]
+    fn escape_from_the_search_box_clears_the_search_too() {
+        let mut g = gui();
+        g.search = "avatar".to_string();
+        // Focus on a chrome control, not a number row with a draft.
+        g.focus = Some(FocusTarget::ClearChanges);
+
+        let _ = update(&mut g, Message::EscapeCaptured);
+        assert!(
+            g.search.is_empty(),
+            "Escape clears the search whether or not the box held the keyboard"
+        );
+    }
+
+    /// R restores the focused row to its default and leaves every other
+    /// setting alone. One representative of each row kind — a flag, an
+    /// option select, a number and a colour — because "R works" has to mean
+    /// all four: each is a different renderer, and the rows with no kind of
+    /// own are exactly the ones a single probe would miss.
+    #[test]
+    fn r_restores_the_focused_row_on_every_kind_of_row() {
+        // (key, the value it is moved away from its default with)
+        let cases = [
+            (Key::TalkingOnly, "set talking-only on"),
+            (Key::Anchor, "set anchor bottom"),
+            (Key::Opacity, "set opacity 42"),
+            (Key::SpeakingColor, "set speaking-color #ff00ff"),
+        ];
+        for (key, edit) in cases {
+            let mut g = gui();
+            let _ = update(&mut g, Message::KeyPressed(no_key(r_key())));
+            g.focus = Some(FocusTarget::Field(key));
+            apply_edit(&mut g, edit);
+            assert_ne!(
+                key.value_of(&g.config),
+                key.value_of(&Config::default()),
+                "{edit} must move {key:?} off its default first"
+            );
+
+            let task = update(&mut g, Message::KeyPressed(no_key(r_key())));
+            assert_eq!(
+                key.value_of(&g.config),
+                key.value_of(&Config::default()),
+                "R must restore {key:?} to its default"
+            );
+            assert_eq!(task.units(), 1, "R on {key:?} sends exactly one command");
+            assert_eq!(
+                g.focus,
+                Some(FocusTarget::Field(key)),
+                "R moves the value, not the focus"
+            );
+        }
+    }
+
+    /// The other half of "leaves everything else alone", on one row: the
+    /// neighbouring settings in the same group and in other groups keep their
+    /// values across the reset, and only the focused key comes back.
+    #[test]
+    fn r_restores_one_key_and_leaves_its_neighbours_where_they_were() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Width));
+        for line in [
+            "set width 500",
+            "set scale 150",
+            "set opacity 42",
+            "set speaking-color #ff00ff",
+            "set offset-x -30",
+        ] {
+            apply_edit(&mut g, line);
+        }
+        // The premise: every one of them is off its default before the reset,
+        // so "unchanged" cannot pass on a value that never moved.
+        assert_ne!(g.config.width, Config::default().width);
+        assert_ne!(g.config.scale, Config::default().scale);
+        assert_ne!(g.config.opacity, Config::default().opacity);
+        assert_ne!(g.config.offset_x, Config::default().offset_x);
+
+        let task = update(&mut g, Message::KeyPressed(no_key(r_key())));
+        assert_eq!(task.units(), 1);
+        assert_eq!(g.config.width, Config::default().width, "width came back");
+        assert_eq!(g.config.scale, 150, "a sibling in the same group stands");
+        assert_eq!(g.config.opacity, 42, "another group stands");
+        assert_eq!(g.config.offset_x, -30);
+        assert_eq!(g.config.speaking_color, "#ff00ff".parse().unwrap());
+    }
+
+    /// R does nothing where there is no field to restore: no focus at all,
+    /// a chrome control, and a credential. Asserted as nothing spawned and
+    /// nothing changed — the same shape the arrow tests use, because "it
+    /// changed nothing" must not be satisfied by a command that changed
+    /// nothing visible.
+    #[test]
+    fn r_does_nothing_where_there_is_no_field() {
+        for target in [
+            None,
+            Some(FocusTarget::ClearChanges),
+            Some(FocusTarget::ResetAll),
+            Some(FocusTarget::Save),
+            Some(FocusTarget::Nav(0)),
+            Some(FocusTarget::ToggleDaemon),
+            Some(FocusTarget::Credential(Credential::ClientId)),
+            Some(FocusTarget::Credential(Credential::ClientSecret)),
+        ] {
+            let mut g = gui();
+            g.focus = target;
+            let before = g.config.clone();
+            let task = update(&mut g, Message::KeyPressed(no_key(r_key())));
+            assert_eq!(task.units(), 0, "{target:?} must ignore R");
+            assert_eq!(g.config, before, "{target:?} must change nothing");
+            assert!(
+                g.auth_client_id.is_empty() && g.auth_client_secret.is_empty(),
+                "{target:?} must not touch a credential"
+            );
+        }
+    }
+
+    /// R on the monitor row moves nothing, and says so rather than pretending
+    /// it reset something. The monitor is the one key a reset never touches —
+    /// `reset` and `reset <group>` both keep it — so the GUI's own mirror
+    /// keeps it too, since it applies the same command the daemon runs.
+    ///
+    /// Both auto-save states, because the marker only has a decision to make in
+    /// one of them: a refused reset changed nothing, so it is not an unsaved
+    /// change in either. The auto-save-off case is where a marker decided from
+    /// the *intent* (`reset` would not persist) instead of the *outcome* (the
+    /// daemon refused) would put a badge on a no-op.
+    #[test]
+    fn r_on_the_monitor_row_changes_nothing() {
+        for auto_save in [true, false] {
+            let mut g = gui();
+            g.config.auto_save = auto_save;
+            g.monitors = ["DP-1".to_string(), "HDMI-A-1".to_string()].into();
+            g.config.monitor = Some("DP-1".into());
+            g.focus = Some(FocusTarget::Field(Key::Monitor));
+            let before = g.config.clone();
+
+            let task = update(&mut g, Message::KeyPressed(no_key(r_key())));
+            assert_eq!(
+                g.config, before,
+                "auto-save {auto_save}: the monitor stands"
+            );
+            assert_eq!(
+                task.units(),
+                1,
+                "auto-save {auto_save}: the daemon is still told, so it can answer with the refusal"
+            );
+            assert_eq!(g.focus, Some(FocusTarget::Field(Key::Monitor)));
+            assert!(
+                !g.dirty,
+                "auto-save {auto_save}: a refused reset changed nothing, so it is not unsaved"
+            );
+        }
+    }
+
+    /// Uppercase R is the same key: the binding is the letter, not the
+    /// case, and a keyboard user pressing Shift+R means the same thing.
+    #[test]
+    fn uppercase_r_restores_the_same_way() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Opacity));
+        apply_edit(&mut g, "set opacity 42");
+        let task = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Character("R".into()))),
+        );
+        assert_eq!(g.config.opacity, Config::default().opacity);
+        assert_eq!(task.units(), 1);
+    }
+
+    /// R is not a group reset in disguise. Ctrl+R still resets the section
+    /// and Ctrl+Shift+R still resets everything, and neither moved to a
+    /// bare R — the pair of them is the whole reason plain `r` was free.
+    #[test]
+    fn the_letter_bindings_stay_where_they_were() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Width));
+        // `move_focus` sets this from the ring; set by hand because the test
+        // parks the focus without walking to the row. Ctrl+R resets whatever
+        // the sidebar names, so it has to name this row's section.
+        g.section = Section::Layout;
+        apply_edit(&mut g, "set width 500");
+
+        // Ctrl+R is still the section reset, and it still cannot report back
+        // here (the reply arrives over the socket, and the mirror follows the
+        // dump it chains), which is exactly how it differs from the plain R
+        // added beside it.
+        let ctrl_r = update(&mut g, Message::KeyPressed(ctrl(r_key())));
+        assert_eq!(g.config.width, 500, "Ctrl+R waits for the daemon");
+        assert_eq!(
+            ctrl_r.units(),
+            2,
+            "Ctrl+R is the reset plus the dump that carries the new config back"
+        );
+        assert_eq!(g.focus, Some(FocusTarget::Field(Key::Width)));
+
+        let ctrl_shift_r = update(&mut g, Message::KeyPressed(ctrl_shift(r_key())));
+        assert_eq!(
+            ctrl_shift_r.units(),
+            2,
+            "Ctrl+Shift+R is the global reset plus its dump"
+        );
+        assert!(!g.dirty, "neither ctrl form left an unsaved marker here");
+
+        // And the plain letter is the one that resets the focused key in
+        // place, from the same starting point.
+        apply_edit(&mut g, "set width 500");
+        let plain = update(&mut g, Message::KeyPressed(no_key(r_key())));
+        assert_eq!(g.config.width, Config::default().width);
+        assert_eq!(plain.units(), 1, "plain R sends exactly its own command");
+    }
+
+    /// The unsaved marker: a reset is an edit like any other, so it is
+    /// "unsaved" exactly when the daemon would not have persisted it, and it
+    /// never claims a change while auto-save is on. `should_persist` decides,
+    /// and `mark_dirty` mirrors that decision — this pins the GUI half.
+    #[test]
+    fn a_reset_follows_the_unsaved_marker_rules() {
+        // A clean config has auto-save on, so a reset persists and leaves no
+        // marker.
+        let mut g = gui();
+        assert!(g.config.auto_save, "the test premise");
+        g.focus = Some(FocusTarget::Field(Key::Opacity));
+        apply_edit(&mut g, "set opacity 42");
+        let task = update(&mut g, Message::KeyPressed(no_key(r_key())));
+        assert_eq!(g.config.opacity, Config::default().opacity);
+        assert!(
+            !g.dirty,
+            "auto-save persists a reset, so nothing is unsaved"
+        );
+        assert_eq!(task.units(), 1);
+
+        // With auto-save off, the same reset is an unsaved change.
+        let mut g = gui();
+        g.config.auto_save = false;
+        g.focus = Some(FocusTarget::Field(Key::Opacity));
+        apply_edit(&mut g, "set opacity 42");
+        let _ = update(&mut g, Message::KeyPressed(no_key(r_key())));
+        assert_eq!(g.config.opacity, Config::default().opacity);
+        assert!(
+            g.dirty,
+            "without auto-save the daemon keeps nothing on disk, so the reset is unsaved"
+        );
+        // And Save clears it, exactly as it does for any other edit.
+        let _ = update(&mut g, Message::Save);
+        assert!(!g.dirty);
+    }
+
+    /// The marker follows the OUTCOME, not the intent, on every change path.
+    /// A refused command changed nothing, so it is never an unsaved change —
+    /// with auto-save off, where a marker decided from the command alone would
+    /// light up for a no-op. Two refusals, one per path that shares the
+    /// bookkeeping: the per-key reset of the monitor, and a number the GUI's
+    /// own bounds check passes but the domain refuses (`offset-min` may not
+    /// reach `offset-max`, a cross-check `num_in_bounds` does not know).
+    #[test]
+    fn a_refused_change_leaves_no_unsaved_marker() {
+        // The refused reset: `reset <group> monitor`.
+        let mut g = gui();
+        g.config.auto_save = false;
+        g.monitors = ["DP-1".to_string()].into();
+        g.config.monitor = Some("DP-1".into());
+        g.focus = Some(FocusTarget::Field(Key::Monitor));
+        let _ = update(&mut g, Message::KeyPressed(no_key(r_key())));
+        assert!(!g.dirty, "a refused reset is not an unsaved change");
+
+        // The refused set: 600 is inside OFFSETS, so the GUI hands it to the
+        // domain, and the domain refuses it against the window's own max.
+        let mut g = gui();
+        g.config.auto_save = false;
+        apply_edit(&mut g, "set offset-max 500");
+        g.focus = Some(FocusTarget::Field(Key::OffsetMin));
+        let before = g.config.offset_min;
+        let task = update(&mut g, Message::NumText(Key::OffsetMin, "600".into()));
+        assert_eq!(g.config.offset_min, before, "the domain refused it");
+        assert!(!g.dirty, "a refused set is not an unsaved change");
+        assert_eq!(task.units(), 1, "and the daemon still hears about it");
+    }
+
+    /// The command itself is pinned here rather than only in the core: the
+    /// harness runs no daemon, so this is the only place that says what the
+    /// GUI's R puts on the socket.
+    #[test]
+    fn r_sends_the_reset_command_for_the_focused_key() {
+        for (key, wire) in [
+            (Key::Width, "reset layout width"),
+            (Key::Opacity, "reset opacity opacity"),
+            (Key::Position, "reset position position"),
+            (Key::SpeakingColor, "reset colors speaking-color"),
+            (Key::TalkingOnly, "reset layout talking-only"),
+        ] {
+            let command = reset_command(key);
+            assert_eq!(command.to_string(), wire, "{key:?}");
+            assert_eq!(
+                wire.parse::<Command>().unwrap(),
+                command,
+                "the daemon parses exactly this back"
+            );
+        }
+    }
+
+    /// A refused draft on a number row is stale once the value moves under
+    /// it, so R drops it. Otherwise the input would keep showing text the
+    /// row no longer holds — the same rule `apply_num` follows on a step.
+    #[test]
+    fn r_drops_a_refused_draft_on_the_row_it_resets() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Spacing));
+        let _ = update(&mut g, Message::NumText(Key::Spacing, "99".into()));
+        assert!(g.num_drafts.contains_key(&Key::Spacing));
+
+        let _ = update(&mut g, Message::KeyPressed(no_key(r_key())));
+        assert_eq!(g.config.spacing, Config::default().spacing);
+        assert!(
+            g.num_drafts.is_empty(),
+            "the refused text must not outlive the value it was refused for"
+        );
+    }
+
+    /// The two capturing inputs, plain R included. iced's keyboard listener
+    /// delivers only "ignored" events, so a key typed into the search box or
+    /// a credential input never reaches `shortcut` — that is the property
+    /// this rests on, and it is why a search query containing `r` cannot
+    /// reset the setting behind it. Asserted here over the dispatcher itself:
+    /// `KeyPressed` is the path only uncaptured keys take, so reaching the
+    /// reset arm from a `Search` message is impossible, and the search box
+    /// owning the keyboard is what makes the keystroke uncaptured.
+    #[test]
+    fn typing_into_the_search_box_resets_nothing() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Opacity));
+        let _ = update(&mut g, Message::KeyPressed(no_key(r_key())));
+        apply_edit(&mut g, "set opacity 42");
+        // A search query containing `r`, as a widget input would deliver it.
+        let task = update(&mut g, Message::Search("avatar".into()));
+        assert_eq!(task.units(), 0);
+        assert_eq!(g.config.opacity, 42, "typing a search changes no setting");
+        assert_eq!(g.search, "avatar");
+    }
+
+    /// The same for a credential row: the keystrokes that build the draft
+    /// are the input's, never the dispatcher's, so a letter typed there edits
+    /// the credential and spawns nothing.
+    #[test]
+    fn a_credential_row_takes_its_own_letters() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Credential(Credential::ClientId));
+        apply_edit(&mut g, "set opacity 42");
+        let before = g.config.clone();
+        // What the input does with an `r` keystroke: appends it to the draft.
+        let task = update(&mut g, Message::AuthClientId("prober".into()));
+        assert_eq!(task.units(), 0, "a credential draft spawns nothing");
+        assert_eq!(g.config, before, "and changes no setting");
+        assert_eq!(g.auth_client_id, "prober");
+        assert!(g.auth_client_secret.is_empty());
+    }
+
+    /// A refused hex draft on a colour row is stale once R restores the colour,
+    /// exactly like a refused number on a number row. Without this the row
+    /// would display text the daemon never holds — the hex input keeps
+    /// whatever it refused, so a reset behind it would be invisible and look
+    /// like R did nothing.
+    #[test]
+    fn r_drops_a_refused_hex_draft_on_the_row_it_resets() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::BoxColor));
+        // No leading '#': `HexColor` refuses it, so it stays a draft and the
+        // value never moves — the state a half-typed colour leaves behind.
+        let _ = update(&mut g, Message::ColorHex(ColorTarget::Box, "f00f0f".into()));
+        assert!(
+            g.drafts.contains_key(&ColorTarget::Box),
+            "the premise: refused hex is kept as a draft"
+        );
+
+        let _ = update(&mut g, Message::KeyPressed(no_key(r_key())));
+        assert_eq!(g.config.box_color, Config::default().box_color);
+        assert!(
+            g.drafts.is_empty(),
+            "the refused hex must not outlive the value it was refused for"
+        );
+        // And the other editor's draft is none of this row's business.
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::BoxColor));
+        let _ = update(&mut g, Message::ColorHex(ColorTarget::Text, "abc".into()));
+        let _ = update(&mut g, Message::KeyPressed(no_key(r_key())));
+        assert!(
+            g.drafts.contains_key(&ColorTarget::Text),
+            "resetting one colour must not discard another row's typing"
+        );
+    }
+
+    /// `ColorTarget::of` is the reverse of `ColorTarget::key`, and the pair
+    /// is what lets a command naming a colour key find that editor's draft.
+    /// Pinned so one cannot grow a key the other does not know.
+    #[test]
+    fn a_colour_key_maps_back_to_its_editor() {
+        for key in [Key::SpeakingColor, Key::TextColor, Key::BoxColor] {
+            assert_eq!(ColorTarget::of(key).map(|t| t.key()), Some(key));
+        }
+        for key in [Key::Width, Key::Opacity, Key::Monitor] {
+            assert_eq!(ColorTarget::of(key), None, "{key:?} edits no colour");
+        }
+    }
+
+    /// Apply one `set <key> <value>` line through the real `Command` path,
+    /// standing in for the mouse-side edit that moves a row off its default
+    /// before R is pressed.
+    fn apply_edit(gui: &mut Gui, line: &str) {
+        line.parse::<Command>()
+            .expect("a set line")
+            .apply_config(&mut gui.config);
+    }
+
+    fn r_key() -> keyboard::Key {
+        keyboard::Key::Character("r".into())
+    }
+
+    fn ctrl(key: keyboard::Key) -> keyboard::Event {
+        key_event(key, keyboard::Modifiers::CTRL)
+    }
+
+    fn ctrl_shift(key: keyboard::Key) -> keyboard::Event {
+        key_event(key, keyboard::Modifiers::CTRL | keyboard::Modifiers::SHIFT)
+    }
+
+    /// The two capturing inputs stay distinguishable: a number row holding a draft
+    /// keeps it, and the same key does not clear a search on its behalf.
+    #[test]
+    fn a_number_draft_is_not_mistaken_for_the_search_box() {
+        let mut g = gui();
+        g.search = "avatar".to_string();
+        g.focus = Some(FocusTarget::Field(Key::Spacing));
+        let _ = update(&mut g, Message::NumText(Key::Spacing, "99".into()));
+
+        let _ = update(&mut g, Message::EscapeCaptured);
+        assert_eq!(g.search, "avatar", "the search is not what Escape cleared");
+        assert!(
+            g.num_drafts.contains_key(&Key::Spacing),
+            "the draft is what Escape kept"
+        );
+    }
+
+    /// Section header offsets of a one-pager tall enough to scroll, in
+    /// `Section::ALL` order. Same numbers the scrollspy's own tests use.
+    fn one_pager_headers() -> [f32; Section::ALL.len()] {
+        [8.0, 900.0, 1500.0, 2100.0, 2600.0]
+    }
+
+    /// Narrowing the search can drop the focused row: the ring is drawn only
+    /// where the page renders a row carrying that key, so keeping the focus
+    /// would leave nothing ringed anywhere while Enter still fired the command
+    /// for a row that is not on screen.
+    #[test]
+    fn narrowing_the_search_drops_a_focus_it_no_longer_renders() {
+        let mut g = gui();
+        g.focus = Some(FocusTarget::Field(Key::Rtl));
+        let _ = update(&mut g, Message::Search("color".to_string()));
+        assert_eq!(
+            g.focus, None,
+            "`rtl` is not one of the rows the search page renders, so it cannot stay focused"
+        );
+    }
+
+    /// The focused field's key, or a panic naming what focus is on instead.
+    fn field(g: &Gui) -> Key {
+        match g.focus {
+            Some(FocusTarget::Field(key)) => key,
+            other => panic!("expected a focused field, got {other:?}"),
+        }
+    }
+
+    /// Enter with nothing focused is a no-op.
+    #[test]
+    fn enter_with_no_focus_is_a_noop() {
+        let mut g = gui();
+        let _ = update(
+            &mut g,
+            Message::KeyPressed(no_key(keyboard::Key::Named(keyboard::key::Named::Enter))),
+        );
+        assert_eq!(g.focus, None);
+    }
+
+    fn key_event(key: keyboard::Key, modifiers: keyboard::Modifiers) -> keyboard::Event {
+        keyboard::Event::KeyPressed {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            location: keyboard::Location::Standard,
+            modifiers,
+            repeat: false,
+            text: None,
+        }
+    }
+
+    fn no_key(key: keyboard::Key) -> keyboard::Event {
+        key_event(key, keyboard::Modifiers::default())
+    }
+
+    fn arrow_left() -> keyboard::Event {
+        no_key(keyboard::Key::Named(key::Named::ArrowLeft))
+    }
+
+    fn arrow_right() -> keyboard::Event {
+        no_key(keyboard::Key::Named(key::Named::ArrowRight))
+    }
+
+    fn arrow_up() -> keyboard::Event {
+        no_key(keyboard::Key::Named(key::Named::ArrowUp))
+    }
+
+    fn arrow_down() -> keyboard::Event {
+        no_key(keyboard::Key::Named(key::Named::ArrowDown))
+    }
+
+    /// The same key as [`arrow_right`], arriving the way a held one does: X11
+    /// auto-repeat is a stream of further KeyPressed events, each one a step.
+    fn held_right() -> keyboard::Event {
+        match arrow_right() {
+            keyboard::Event::KeyPressed {
+                key,
+                modified_key,
+                physical_key,
+                location,
+                modifiers,
+                text,
+                ..
+            } => keyboard::Event::KeyPressed {
+                key,
+                modified_key,
+                physical_key,
+                location,
+                modifiers,
+                repeat: true,
+                text,
+            },
+            other => other,
+        }
+    }
+
+    fn shift_tab() -> keyboard::Event {
+        key_event(
+            keyboard::Key::Named(keyboard::key::Named::Tab),
+            keyboard::Modifiers::SHIFT,
+        )
+    }
+
+    fn tab_key() -> keyboard::Key {
+        keyboard::Key::Named(keyboard::key::Named::Tab)
+    }
+
+    fn enter_key() -> keyboard::Key {
+        keyboard::Key::Named(keyboard::key::Named::Enter)
+    }
+
+    /// The number of keyed rows on the one-pager, which is what the tab
+    /// arithmetic counts through: the credential rows come after all of them,
+    /// so a test that wants a credential counts these.
+    fn keyed_rows() -> usize {
+        fields::rendered_targets("")
+            .filter(|t| matches!(t, FocusTarget::Field(_)))
+            .count()
+    }
+
+    fn tab_n(gui: &mut Gui, times: usize) {
+        for _ in 0..times {
+            let _ = update(gui, Message::KeyPressed(no_key(tab_key())));
+        }
+    }
+
+    fn shift_tab_n(gui: &mut Gui, times: usize) {
+        for _ in 0..times {
+            let _ = update(gui, Message::KeyPressed(shift_tab()));
         }
     }
 }

@@ -29,6 +29,45 @@ pub struct Roster {
     pub users: Vec<Participant>,
 }
 
+impl Roster {
+    /// Write this roster to the cache. The free `save_roster(channel, me_id,
+    /// users)` this replaced took exactly the three fields of this type, so
+    /// the caller had to pull them out to decide for it (Tell, Don't Ask).
+    pub fn write(&self) {
+        self.write_to(&cache_dir())
+    }
+
+    /// Core of [`Self::write`] with the cache root injected, so a test can use
+    /// a tempdir instead of the real `$XDG_CACHE_HOME`. The same shape as
+    /// `config::load_from` — this module owned the most persistent state and
+    /// was the one never given the injection point.
+    pub fn write_to(&self, base: &std::path::Path) {
+        let sig = format!(
+            "{:?}|{:?}|{}",
+            self.channel,
+            self.me_id,
+            roster_signature(&self.users)
+        );
+        {
+            let mut last = last_signature().lock().unwrap();
+            if *last == sig {
+                return;
+            }
+            *last = sig;
+        }
+        let dir = base.to_path_buf();
+        let write = || -> std::io::Result<()> {
+            std::fs::create_dir_all(&dir)?;
+            let payload = serde_json::to_string(self)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            std::fs::write(dir.join("roster.json"), payload)
+        };
+        if let Err(e) = write() {
+            tracing::warn!(event = "roster_save_failed", error = %e, "could not persist roster cache");
+        }
+    }
+}
+
 /// Cheap identity of a roster for write dedup — the serde output of every
 /// participant, so the signature covers exactly the fields the cache file
 /// persists and can never drift away from the file format. The live-only
@@ -52,35 +91,10 @@ fn last_signature() -> &'static Mutex<String> {
     LAST.get_or_init(|| Mutex::new(String::new()))
 }
 
-/// Persist the roster if it changed since the last write.
-pub fn save_roster(channel: Option<&str>, me_id: Option<&str>, users: &[Participant]) {
-    let sig = format!("{:?}|{:?}|{}", channel, me_id, roster_signature(users));
-    {
-        let mut last = last_signature().lock().unwrap();
-        if *last == sig {
-            return;
-        }
-        *last = sig;
-    }
-    let roster = Roster {
-        channel: channel.map(str::to_string),
-        me_id: me_id.map(str::to_string),
-        users: users.to_vec(),
-    };
-    let dir = cache_dir();
-    let write = || -> std::io::Result<()> {
-        std::fs::create_dir_all(&dir)?;
-        let payload = serde_json::to_string(&roster)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(dir.join("roster.json"), payload)
-    };
-    if let Err(e) = write() {
-        tracing::warn!(event = "roster_save_failed", error = %e, "could not persist roster cache");
-    }
-}
-
-pub fn load_roster() -> Option<Roster> {
-    let text = match std::fs::read_to_string(cache_dir().join("roster.json")) {
+/// The last-known roster from the cache root injected by the caller — the
+/// read side of [`Roster::write_to`] on an injected root.
+pub fn load_roster_from(base: &std::path::Path) -> Option<Roster> {
+    let text = match std::fs::read_to_string(base.join("roster.json")) {
         Ok(t) => t,
         // First run after install has no cache yet — that is normal.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
@@ -295,5 +309,81 @@ mod tests {
         let p = avatar_path("123", "deadbeef");
         assert!(p.to_string_lossy().contains("123-deadbeef.png"));
         assert_ne!(avatar_path("123", "deadbeef"), avatar_path("123", "other"));
+    }
+}
+
+#[cfg(test)]
+mod fs_tests {
+    use super::*;
+
+    /// A fresh directory per call, matching the helper the front integration
+    /// suites use. Cleaned up on drop.
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("hyprlay-cache-test-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The roster write path, exercised through a real temp directory. This
+    /// module owned the most persistent state and had no filesystem test;
+    /// `Roster::write` writes to the real `$XDG_CACHE_HOME`, which is why
+    /// `Overlay`'s model tests never called it.
+    #[test]
+    fn roster_roundtrips_through_a_real_temp_directory() {
+        let dir = TempDir::new("roster");
+        let path = dir.path().join("roster.json");
+
+        let roster = Roster {
+            channel: Some("ngobrol 3".into()),
+            me_id: Some("42".into()),
+            users: vec![Participant {
+                id: "42".into(),
+                name: "fazuh".into(),
+                avatar_hash: None,
+                speaking: false,
+                self_mute: false,
+                self_deaf: false,
+                server_mute: false,
+                server_deaf: false,
+            }],
+        };
+        roster.write_to(dir.path());
+        let payload = std::fs::read_to_string(path).expect("the write created the cache file");
+
+        let parsed: Roster = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed.channel.as_deref(), Some("ngobrol 3"));
+        assert_eq!(parsed.me_id.as_deref(), Some("42"));
+        assert_eq!(parsed.users.len(), 1);
+        assert_eq!(parsed.users[0].name, "fazuh");
+    }
+
+    /// A missing avatar is a cache miss, which is normal and stays silent.
+    #[test]
+    fn a_missing_avatar_loads_none() {
+        assert_eq!(load_avatar("999", "no-such-hash"), None);
+    }
+
+    /// `store_avatar` then `load_avatar` round-trip, keyed by user and hash.
+    #[test]
+    fn avatars_roundtrip_through_the_live_cache_dir() {
+        store_avatar("777", "cafe", &[1, 2, 3]);
+        assert_eq!(load_avatar("777", "cafe"), Some(vec![1, 2, 3]));
+        // A different hash is a different file.
+        assert_eq!(load_avatar("777", "other"), None);
+        // A different user is a different file.
+        assert_eq!(load_avatar("778", "cafe"), None);
     }
 }

@@ -44,6 +44,15 @@ use hyprlay_core::ctl;
 use hyprlay_core::daemon_control::DaemonControl;
 use hyprlay_core::domain::Command;
 use hyprlay_core::domain::Key;
+use hyprlay_core::domain::Reply;
+use hyprlay_core::domain::Value;
+
+/// What the blocking-send wrapper reports when the socket connect fails, and
+/// when the off-thread task itself died. The daemon never sends either; they
+/// are this wrapper's own failures, and the only two texts that may mark the
+/// daemon down.
+pub(super) const DAEMON_UNREACHABLE: &str = "error: daemon unreachable";
+pub(super) const COMMAND_TASK_FAILED: &str = "error: command task failed";
 use hyprlay_core::singleton::AcquireError;
 use iced::Point;
 use iced::Subscription;
@@ -63,17 +72,34 @@ enum Message {
     Anchor(hyprlay_core::config::AnchorMode),
     /// Pick the roster ordering strategy.
     RosterOrder(hyprlay_core::config::RosterOrder),
+    /// One option-select row's keyboard step: the chosen option's value. The
+    /// same shape a chip click's own message carries, so a step and a click
+    /// reach the daemon by one route.
+    SetOption(Key, Value),
     /// Flip one boolean config key (rtl, talking-only, own user).
     SetFlag(Key, bool),
     /// Integer text edited for a numeric knob; invalid or out-of-range
     /// input is kept as a draft instead of snapping back.
     NumText(Key, String),
+    /// Enter inside a numeric knob's input: commit what is typed. Refused by
+    /// the bounds, which keeps the caret in the input.
+    NumSubmit(Key),
+    /// Escape that a focused text input swallowed. Iced's own Escape arm drops
+    /// the input's focus and tells nobody, so the app hears about it here —
+    /// otherwise a number row's half-typed value would outlive the input.
+    EscapeCaptured,
     /// Numeric slider moved; the value arrives inside the slider envelope.
     NumDrag(Key, f32),
-    /// Restore one numeric knob to its default.
-    NumReset(Key),
+    /// Restore one setting to its default: the R key, a number row's reset
+    /// button and a colour editor's all send this, so every row has one
+    /// reset path. The default comes from the daemon, not from this window
+    /// reading `Config::default()` for it.
+    ResetFocused(Key),
     ColorPart(ColorTarget, u8, f32),
     ColorHex(ColorTarget, String),
+    /// Enter inside a colour row's hex input: commit what is typed. Refused
+    /// by the hex parser, which keeps the caret in the input.
+    ColorSubmit(ColorTarget),
     /// Expand / collapse one color editor's HSV picker.
     PickerToggle(ColorTarget),
     /// Press / hover-move inside a picker plane; applies while dragging.
@@ -97,6 +123,11 @@ enum Message {
         max_scroll: f32,
         jump: Option<Section>,
     },
+    /// Scroll the one-pager so `f32` px into it sit at the viewport top, and
+    /// re-derive the sidebar highlight from it: the reveal the measure
+    /// operation decides on when keyboard focus lands on a field the viewport
+    /// does not show.
+    ScrollContentTo(f32),
     Search(String),
     KeyPressed(keyboard::Event),
     Save,
@@ -106,7 +137,7 @@ enum Message {
     ResetSection(Section),
     SwitchMonitor(Option<String>),
     Monitors(Vec<String>),
-    Applied(String),
+    Applied(Reply),
     RefreshStatus,
     /// Bottom-left toggle pressed; meaning (Start/Stop) is decided from the
     /// live state at press time, never baked into the message.
@@ -123,16 +154,66 @@ enum Message {
     AuthApply,
 }
 
+/// The one widget keyboard focus holds. Iced 0.14 has no focus concept for
+/// `button`, `checkbox`, `slider`, or `pick_list` — `grep -rn "Focused"
+/// iced_widget-0.14.2/src/` matches only `text_input.rs` and
+/// `text_editor.rs`, and `button.rs` handles zero keyboard events. So focus
+/// is tracked here, routed by the window-global shortcut dispatcher, and
+/// rendered as a background fill by the style closures.
+///
+/// `Field(Key)` is the load-bearing variant: keying focus on the config `Key`
+/// rather than on widget identity means the field renderers need no new
+/// per-widget registration, and tab order derives from the field registry
+/// rather than being hand-maintained.
+///
+/// `Credential` is the one thing `Field(Key)` cannot hold, and it is a variant
+/// rather than a widened `Field` for that reason — see [`Credential`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusTarget {
+    ClearChanges,
+    ResetAll,
+    Save,
+    /// Index into `Section::ALL` — the sidebar nav items.
+    Nav(usize),
+    ToggleDaemon,
+    /// One config key: a slider, a toggle, or an integer input.
+    Field(Key),
+    /// One credential row: a text input that edits auth.json, not a config key.
+    Credential(Credential),
+}
+
+/// The two Connection rows: the client id and the client secret.
+///
+/// They are keyboard-reachable because they are ordinary text inputs that any
+/// keyboard user has to be able to fill in, and they are *not* `FocusTarget::Field`
+/// because they edit no config key — the pair lives in auth.json, outside the
+/// ctl protocol. Giving them a `Key` would be the smaller diff and the wrong
+/// one: every reset path builds its commands from `Key` (`revert_commands`
+/// walks `Key::ALL`, and section/global reset speak `Command::Reset*`), so a
+/// credential key would put a secret on a wire that exists to carry settings.
+/// Their own enum keeps `Field(Key)` meaning exactly what it means today and
+/// keeps them out of every reset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Credential {
+    ClientId,
+    ClientSecret,
+}
+
 pub struct Gui {
     /// Local mirror of the daemon config; updated optimistically on change.
     config: Config,
+    /// The widget keyboard focus holds. `None` when the mouse is in use and
+    /// nothing has been Tab-reached yet.
+    focus: Option<FocusTarget>,
     /// In-progress hex text per color editor, kept only while invalid so the
     /// text input doesn't snap back while typing; cleared on a valid commit.
     drafts: HashMap<ColorTarget, String>,
     /// Same idea as `drafts`, but for numeric inputs keyed by config key.
     num_drafts: HashMap<Key, String>,
     /// Last daemon reply (or connection error), labeled in the status bar.
-    last_reply: String,
+    /// Carries its kind, so an error paints as one instead of the success
+    /// colour.
+    last_reply: Reply,
     /// Probe-driven view of the daemon: connecting → up/down.
     daemon_state: DaemonState,
     /// Boot watcher that auto-starts the daemon when the first probe
@@ -149,9 +230,9 @@ pub struct Gui {
     /// (scrollspy). Drives the sidebar highlight and Ctrl+R's target.
     section: Section,
     search: String,
-    /// Scroll offset of the one-page content, tracked from Scrolled.
-    /// Frozen while the search page is up (its scrollable reports nothing)
-    /// and used to restore the position on search-clear.
+    /// Scroll offset of the one-page content, used to restore the position on
+    /// search-clear. Frozen while the search page is up: its scrollable reports
+    /// no `Scrolled`, and a search-page reveal is not the one-pager's offset.
     last_scroll_y: f32,
     /// Which color editor has its HSV picker expanded.
     picker: Option<ColorTarget>,
@@ -231,9 +312,10 @@ fn boot() -> (Gui, Task<Message>) {
     (
         Gui {
             config: config::load(),
+            focus: None,
             drafts: HashMap::new(),
             num_drafts: HashMap::new(),
-            last_reply: String::new(),
+            last_reply: Reply::Ok(String::new()),
             daemon_state: DaemonState::Connecting,
             auto_start: AutoStart::watching(),
             control: Arc::new(SystemControl),
@@ -275,15 +357,69 @@ fn subscribe(_gui: &Gui) -> Subscription<Message> {
         // Only "ignored" events reach us, so typing in a text field never
         // triggers shortcuts.
         keyboard::listen().map(Message::KeyPressed),
+        // Escape again, this time including the events a widget captured: a
+        // focused `text_input` swallows Escape to drop its own focus, so the
+        // row behind it never learns that the typing stopped.
+        iced::event::listen_with(|event, status, _| match event {
+            iced::event::Event::Keyboard(keyboard::Event::KeyPressed { key, .. })
+                if status == iced::event::Status::Captured
+                    && matches!(key, keyboard::Key::Named(keyboard::key::Named::Escape)) =>
+            {
+                Some(Message::EscapeCaptured)
+            }
+            _ => None,
+        }),
     ])
 }
 
+/// A `Gui` for the state-transition tests, built from test values because
+/// `boot()` reads and writes the real config file. One constructor for every
+/// test module, so a new field is filled in one place instead of one copy per
+/// module; the query is the only thing a test differs on.
+#[cfg(test)]
+pub(super) fn test_gui(search: &str) -> Gui {
+    Gui {
+        config: Config::default(),
+        focus: None,
+        drafts: HashMap::new(),
+        num_drafts: HashMap::new(),
+        last_reply: Reply::Ok(String::new()),
+        daemon_state: DaemonState::Connecting,
+        auto_start: AutoStart::watching(),
+        control: Arc::new(crate::platform::service::SystemControl),
+        dirty: false,
+        monitors: Vec::new(),
+        section: Section::Position,
+        search: search.to_string(),
+        last_scroll_y: 0.0,
+        picker: None,
+        picker_drag: false,
+        picker_pos: Point::ORIGIN,
+        auth_client_id: String::new(),
+        auth_client_secret: String::new(),
+    }
+}
+
 /// Blocking socket round-trip off the UI thread.
-async fn send(command: String) -> String {
+///
+/// This is the one place a reply's kind is decided. The socket returns an
+/// untyped string, and these two failure texts are the wrapper's own — the
+/// daemon never sends them. Classifying here rather than at each consumer
+/// means no caller inspects reply *content* to learn its *kind*.
+async fn send(command: String) -> Reply {
+    let classified = |txt: String| {
+        if txt == DAEMON_UNREACHABLE || txt == COMMAND_TASK_FAILED {
+            Reply::Error(txt)
+        } else {
+            Reply::Ok(txt)
+        }
+    };
     tokio::task::spawn_blocking(move || {
-        ctl::send_command_line(&crate::platform::ipc::control::Control, &command)
-            .unwrap_or_else(|| "error: daemon unreachable".into())
+        classified(
+            ctl::send_command_line(&crate::platform::ipc::control::Control, &command)
+                .unwrap_or_else(|| DAEMON_UNREACHABLE.into()),
+        )
     })
     .await
-    .unwrap_or_else(|_| "error: command task failed".into())
+    .unwrap_or_else(|_| classified(COMMAND_TASK_FAILED.into()))
 }

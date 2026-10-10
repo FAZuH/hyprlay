@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### GUI
+
+- Added keyboard operation to settings window
+- Added settings window to X11 sessions
+- Added per-setting reset with R key and `reset <section> <key>` command
+
+### Overlay
+
+- Fixed roster rows clipping after a daemon restart
+
+### Platforms
+
+- Reduced release download size by about half
+- Reduced memory use of the overlay and settings window by about 90%
+
 ## 0.3.2 (2026-09-16)
 
 ### Overlay

@@ -11,7 +11,8 @@ use hyprlay_core::ctl::ControlStream;
 use tokio::sync::oneshot;
 
 /// One inbound command line plus the channel to answer it on. The shell
-/// parses, applies, and sends exactly one reply string.
+/// parses, applies, and sends exactly one reply; the wire form travels as a
+/// plain string, so the channel carries that, not the typed [`Reply`].
 pub struct CtlRequest {
     pub command: String,
     pub reply: oneshot::Sender<String>,

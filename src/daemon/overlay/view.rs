@@ -33,6 +33,12 @@ fn color_of(hex: HexColor) -> Color {
 /// Glyph drawn inline after the username, logical px.
 const INLINE_SIZE: u32 = 16;
 
+/// Speaking-ring thickness, idle and speaking, logical px. The ring is the
+/// non-colour channel for "this participant is talking", so the two widths
+/// must differ enough to read at a glance.
+const RING_IDLE: f32 = 2.0;
+const RING_SPEAKING: f32 = 4.0;
+
 const FALLBACK_COLORS: [Color; 6] = [
     Color::from_rgb(0.36, 0.44, 0.96),
     Color::from_rgb(0.85, 0.32, 0.42),
@@ -78,20 +84,28 @@ fn participant_row<'a, M: 'static>(
     let avatar_px = scaled(state, state.config().avatar_size);
     let speaking = p.speaking;
 
+    // No `border_radius` here: the circular alpha is baked into the avatar
+    // pixels when the handle is built (`overlay::state::circular_avatar`),
+    // because tiny-skia never reads that field. Leaving it set would have
+    // the wgpu path clip a second time over the same circle.
     let avatar: Element<'_, M> = match state.avatar(&p.id) {
         Some(handle) => image::Image::new(handle.clone())
             .width(Length::Fixed(avatar_px))
             .height(Length::Fixed(avatar_px))
-            .border_radius(iced::border::Radius::from(avatar_px / 2.0))
             .opacity(alphas.avatar)
             .into(),
         None => fallback_avatar(&p.id, &p.name, avatar_px, alphas.avatar),
     };
 
-    // Speaking ring hugs the circular avatar. Constant padding + border
-    // width whether speaking or not, so toggling the ring never shifts the
-    // avatar's position (only its color changes). Owned values so the style
-    // closure captures no reference to `state`.
+    // Speaking ring hugs the circular avatar, doubling in thickness when the
+    // participant talks so "who is speaking" survives forced-colors mode and
+    // a colorblind reader instead of resting on hue alone.
+    //
+    // Padding stays constant at the *thick* ring's width, for two reasons.
+    // A border draws inside the container bounds and contributes nothing to
+    // layout, so padding alone fixes the footprint and toggling the ring can
+    // never shift the avatar. And a ring thicker than its padding would eat
+    // into the avatar's own pixels.
     let ring = Border {
         color: if speaking {
             Color {
@@ -101,11 +115,11 @@ fn participant_row<'a, M: 'static>(
         } else {
             Color::TRANSPARENT
         },
-        width: 2.0,
+        width: if speaking { RING_SPEAKING } else { RING_IDLE },
         radius: iced::border::Radius::from((avatar_px + 8.0) / 2.0),
     };
     let avatar: Element<'_, M> = container(avatar)
-        .padding(2.0)
+        .padding(RING_SPEAKING)
         .style(move |_t| ContainerStyle {
             border: ring,
             ..ContainerStyle::default()
@@ -143,9 +157,14 @@ fn participant_row<'a, M: 'static>(
         })
         .into();
 
-    // The mark, inline right after the username.
-    let inline =
-        mark.map(|mark| glyph(mark.glyph, scaled(state, INLINE_SIZE), alpha(mark, alphas)));
+    // The mark, inline right after the username. A server-caused mark wears
+    // a plate behind it; a self-set one stays bare, which is the channel
+    // that tells "a moderator muted you" from "you muted yourself" when hue
+    // is unavailable.
+    let inline = mark.map(|mark| {
+        let g = glyph(mark.glyph, scaled(state, INLINE_SIZE), alpha(mark, alphas));
+        if mark.badged() { badged(g, alphas) } else { g }
+    });
 
     if state.config().rtl {
         // Avatar on the right, name to its left, text right-aligned.
@@ -176,6 +195,30 @@ fn alpha(mark: Mark, alphas: Alphas) -> Color {
         a: alphas.text,
         ..mark.color()
     }
+}
+
+/// Plate behind a server-caused mark: a filled square in the row's own box
+/// color, so the badge reads as a badge in forced-colors mode and to a
+/// colorblind reader. The glyph keeps its own color, so the plate adds a
+/// shape channel without replacing the red/grey one.
+fn badged<'a, M: 'static>(mark: Element<'a, M>, alphas: Alphas) -> Element<'a, M> {
+    container(mark)
+        .padding(2)
+        .style(move |_t| ContainerStyle {
+            background: Some(
+                Color {
+                    a: alphas.box_bg,
+                    ..Color::WHITE
+                }
+                .into(),
+            ),
+            border: Border {
+                radius: 3.0.into(),
+                ..Border::default()
+            },
+            ..ContainerStyle::default()
+        })
+        .into()
 }
 
 /// The "+N" overflow pill: one quiet row after the capped roster, indented
