@@ -171,7 +171,7 @@ pub fn usage() -> String {
     // from what the parser actually accepts.
     let keys = keys_table();
     format!(
-        "hyprlay {} — lightweight Discord voice overlay (Wayland/Hyprland)
+        "hyprlay {} - lightweight Discord voice overlay (Wayland/Hyprland)
 
 USAGE:
     hyprlay                      run the overlay daemon
@@ -269,7 +269,7 @@ mod tests {
             Some(concat!(
                 "hyprlay ",
                 env!("CARGO_PKG_VERSION"),
-                " — lightweight Discord voice overlay (Wayland/Hyprland)"
+                " - lightweight Discord voice overlay (Wayland/Hyprland)"
             )),
             "banner line is the wire-visible first line"
         );

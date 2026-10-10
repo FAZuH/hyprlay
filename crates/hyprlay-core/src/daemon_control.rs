@@ -530,3 +530,82 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod execute_toggle_tests {
+    use std::sync::Mutex;
+
+    use super::Action;
+    use super::DaemonControl;
+    use super::ServiceError;
+    use super::StopPolicy;
+    use super::Toggle;
+    use super::execute_toggle;
+
+    /// Spy at the process/socket boundary: records what ran so tests verify
+    /// state, not call mechanics. `fail_with` is a factory because
+    /// `ServiceError` is not `Clone`: every performed action fails the same
+    /// way, exactly as the old `String` double did.
+    ///
+    /// This is the one copy. The GUI and the tray each used to carry their
+    /// own, byte-identical, testing `execute_toggle` directly rather than
+    /// their own wiring.
+    #[derive(Default)]
+    pub(super) struct FakeControl {
+        pub installed: bool,
+        pub fail_with: Option<Box<dyn Fn() -> ServiceError + Send + Sync>>,
+        performed: Mutex<Vec<Action>>,
+    }
+
+    impl FakeControl {
+        pub fn performed(&self) -> Vec<Action> {
+            self.performed.lock().unwrap().clone()
+        }
+    }
+
+    impl DaemonControl for FakeControl {
+        fn unit_installed(&self) -> bool {
+            self.installed
+        }
+
+        fn perform(&self, action: Action) -> Result<(), ServiceError> {
+            self.performed.lock().unwrap().push(action);
+            match &self.fail_with {
+                Some(failure) => Err(failure()),
+                None => Ok(()),
+            }
+        }
+    }
+
+    #[test]
+    fn a_successful_toggle_runs_exactly_one_action_and_stays_quiet() {
+        for policy in [StopPolicy::ViaSystemctl, StopPolicy::ViaSocket] {
+            let control = FakeControl {
+                installed: true,
+                ..FakeControl::default()
+            };
+            let outcome = execute_toggle(&control, Toggle::Start, policy);
+            assert_eq!(outcome, None);
+            assert_eq!(control.performed(), vec![Action::SystemctlStart]);
+        }
+    }
+
+    #[test]
+    fn a_failed_action_surfaces_its_error_text_and_stops_the_daemon() {
+        let control = FakeControl {
+            installed: false,
+            fail_with: Some(Box::new(|| ServiceError::SpawnDaemon {
+                source: std::io::Error::other("ENOENT"),
+            })),
+            ..FakeControl::default()
+        };
+        // Stop without a unit resolves to the socket path; its failure must
+        // reach the status line verbatim.
+        let outcome = execute_toggle(&control, Toggle::Stop, StopPolicy::ViaSocket);
+        assert_eq!(
+            outcome,
+            Some("error: could not start hyprlayd: ENOENT".into())
+        );
+        assert_eq!(control.performed(), vec![Action::SocketQuit]);
+    }
+}

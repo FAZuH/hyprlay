@@ -1,11 +1,13 @@
 //! Linux/Wayland surface host: the existing `iced_layershell` shell. Carved
-//! out of `daemon/mod.rs` into its own arm; behaviour is byte-identical —
-//! same anchor vocabulary, layer, `StartMode`, keyboard-interactivity and
-//! transparent-events settings. This module only runs on Linux, where
-//! iced_layershell (and iced's `wayland` feature) are available.
+//! out of `daemon/mod.rs` into its own arm, and unchanged apart from the
+//! surface height: same anchor vocabulary, layer, `StartMode`,
+//! keyboard-interactivity and transparent-events settings. This module only
+//! runs on Linux, where iced_layershell (and iced's `wayland` feature) are
+//! available.
 
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use hyprlay_core::config::Config;
 use iced::Color;
@@ -25,13 +27,14 @@ use crate::daemon::Lifecycle;
 use crate::daemon::adapters::auth::OwnAppAuth;
 use crate::daemon::adapters::avatar;
 use crate::daemon::adapters::discord;
-use crate::daemon::hover_poll_enabled;
 use crate::daemon::monitor_for_overlay;
 use crate::daemon::overlay::geometry;
 use crate::daemon::overlay::state;
 use crate::daemon::overlay::state::Overlay;
 use crate::daemon::overlay::view;
 use crate::daemon::resolve_command;
+use crate::daemon::surface_host::boot_size;
+use crate::daemon::surface_host::take_boot;
 
 #[to_layer_message]
 #[derive(Debug)]
@@ -49,13 +52,46 @@ enum Message {
 }
 
 /// Build and run the layer-shell overlay application.
+/// The one conversion from [`geometry::SurfaceAnchor`] to the layer-shell
+/// `Anchor`. Lives here because this is the sanctioned composition point for
+/// platform crates (ADR-004): `geometry` stays free of `iced_layershell`
+/// imports and this module owns the renderer's types.
+fn to_wayland_anchor(anchor: geometry::SurfaceAnchor) -> iced_layershell::reexport::Anchor {
+    use iced_layershell::reexport::Anchor;
+    // The same construction the original inline code used: bitflag `|` over
+    // the four edges, which is what the wlr layer-shell protocol defines.
+    let mut out = Anchor::empty();
+    if anchor.0 {
+        out |= Anchor::Top;
+    }
+    if anchor.1 {
+        out |= Anchor::Right;
+    }
+    if anchor.2 {
+        out |= Anchor::Bottom;
+    }
+    if anchor.3 {
+        out |= Anchor::Left;
+    }
+    out
+}
+
 pub(crate) fn run(cfg: Config, auth: Option<OwnAppAuth>) -> ExitCode {
     // No text input in the overlay; skip the always-on clipboard worker.
     iced_layershell::disable_clipboard();
 
-    let size = (cfg.width, 64);
+    // One overlay for both the surface size and the boot closure, so the
+    // height the surface is created at and the height the model reports are
+    // never two different reads of the roster cache.
+    let overlay = Overlay::boot(cfg.clone());
+    let size = boot_size(&overlay);
+    let boot_overlay = Mutex::new(Some(overlay));
     let offset = geometry::offset(&cfg);
-    let anchor = geometry::anchor(&cfg);
+    // The one conversion from geometry's own anchor vocabulary to the
+    // renderer's type. This is the sanctioned composition point for platform
+    // crates (ADR-004), so the conversion lives here and geometry stays free
+    // of iced_layershell imports.
+    let anchor = to_wayland_anchor(geometry::anchor(&cfg));
     let layer = if cfg.show_on_fullscreen {
         Layer::Overlay
     } else {
@@ -68,11 +104,7 @@ pub(crate) fn run(cfg: Config, auth: Option<OwnAppAuth>) -> ExitCode {
     let rpc_auth = DiscordRpc(auth.map(Arc::new));
 
     let result = application(
-        move || {
-            let mut overlay = Overlay::new(cfg.clone());
-            overlay.hydrate_roster();
-            (overlay, Task::none())
-        },
+        move || (take_boot(&boot_overlay, &cfg), Task::none()),
         "hyprlay",
         update,
         view::view::<Message>,
@@ -109,7 +141,7 @@ pub(crate) fn run(cfg: Config, auth: Option<OwnAppAuth>) -> ExitCode {
 }
 
 fn subscription(state: &Overlay, auth: &DiscordRpc) -> Subscription<Message> {
-    let hover = if hover_poll_enabled(state) {
+    let hover = if state.hover_polling() {
         Subscription::run(hover_subscription)
     } else {
         Subscription::none()
@@ -161,8 +193,8 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
     match message {
         Message::Discord(ev) => {
             let change = state.apply_discord(ev);
-            if !hover_poll_enabled(state) && state.is_hovered() {
-                state.set_hovered(false);
+            if !state.hover_polling() {
+                state.clear_hover_if_set();
             }
             match change {
                 state::RosterChange::Changed => {
@@ -179,20 +211,16 @@ fn update(state: &mut Overlay, message: Message) -> Task<Message> {
         }
         Message::Ctl { command, reply } => handle_ctl(state, command, reply),
         Message::HoverCursor(pos) => {
-            if !state.config().dim_on_hover
-                || !state.config().visible
-                || state.displayed().is_empty()
-                || state.status() != hyprlay_core::domain::ConnectionStatus::Connected
-            {
-                if state.is_hovered() {
-                    state.set_hovered(false);
-                }
+            // Same guard as the Discord arm above, which calls the shared
+            // helper; the winit arm does too. The audit found this arm
+            // re-implemented it inline with a De Morgan'd `||` and had
+            // already diverged, so it is the shared helper now.
+            if !state.hover_polling() {
+                state.clear_hover_if_set();
                 return Task::none();
             }
             let Some((x, y)) = pos else {
-                if state.is_hovered() {
-                    state.set_hovered(false);
-                }
+                state.clear_hover_if_set();
                 return Task::none();
             };
             let monitor = monitor_for_overlay(state.config());
@@ -239,7 +267,7 @@ fn handle_ctl(
 
     let outcome = resolve_command(state, cmd);
 
-    let _ = reply.send(outcome.reply);
+    let _ = reply.send(outcome.reply.text().to_string());
 
     let mut tasks: Vec<Task<Message>> = Vec::new();
 
@@ -248,7 +276,9 @@ fn handle_ctl(
             hyprlay_core::domain::Effect::Resize => tasks.push(resize_task(state)),
             hyprlay_core::domain::Effect::Reanchor => {
                 state.reanchor();
-                let anchor = geometry::anchor(state.config());
+                // Same conversion as the boot path above: geometry owns the
+                // vocabulary, this module owns the renderer's type.
+                let anchor = to_wayland_anchor(geometry::anchor(state.config()));
                 tasks.push(Task::done(Message::AnchorChange(anchor)));
                 tasks.push(Task::done(Message::MarginChange(state.offset())));
             }

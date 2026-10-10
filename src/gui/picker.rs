@@ -82,6 +82,27 @@ impl ColorTarget {
     pub(super) fn command(self, value: HexColor) -> Command {
         Command::Set(self.key(), Value::Color(value))
     }
+
+    /// The editor that edits this config key, or `None` for every key that
+    /// edits no colour. The reverse of [`Self::key`], so a command naming a
+    /// colour key can find that editor's draft buffer and nothing else: a
+    /// reset restores the value under the input, so leaving refused text in
+    /// it would show a row displaying something the daemon never holds.
+    pub(super) fn of(key: Key) -> Option<Self> {
+        match key {
+            Key::SpeakingColor => Some(Self::Speaking),
+            Key::TextColor => Some(Self::Text),
+            Key::BoxColor => Some(Self::Box),
+            _ => None,
+        }
+    }
+
+    /// Widget id of this editor's hex input: what `operation::focus` hands
+    /// typing to when Enter moves the keyboard into the row. Separate from the
+    /// row container's id because two widgets in one tree cannot share an id.
+    pub(super) fn hex_input_id(self) -> iced::widget::Id {
+        iced::widget::Id::from(format!("hex-input-{}", self.key().name()))
+    }
 }
 
 /// One picker interaction: square point -> saturation/value -> hex command.
@@ -119,12 +140,6 @@ fn iced_hex(hex: HexColor) -> Color {
 pub(super) fn color_editor(gui: &Gui, target: ColorTarget) -> Element<'_, Message> {
     let value = ColorTarget::field(target, &gui.config);
     let color = iced_hex(value);
-    let defaults = Config::default();
-    let default_hex = match target {
-        ColorTarget::Speaking => defaults.speaking_color,
-        ColorTarget::Text => defaults.text_color,
-        ColorTarget::Box => defaults.box_color,
-    };
     // While the typed text is invalid it lives in the draft buffer instead
     // of the config; a valid commit clears it.
     let hex = gui
@@ -136,9 +151,11 @@ pub(super) fn color_editor(gui: &Gui, target: ColorTarget) -> Element<'_, Messag
     let top = row![
         toggle_picker_button(target, color),
         text_input("#rrggbb", &hex)
+            .id(target.hex_input_id())
             .width(Length::Fixed(110.0))
-            .on_input(move |v| Message::ColorHex(target, v)),
-        reset_button(Message::ColorHex(target, default_hex.to_string())),
+            .on_input(move |v| Message::ColorHex(target, v))
+            .on_submit(Message::ColorSubmit(target)),
+        reset_button(Message::ResetFocused(target.key())),
     ]
     .spacing(8);
 

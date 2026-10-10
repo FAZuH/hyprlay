@@ -16,7 +16,8 @@ binary package.
 |---|---|---|
 | `Cargo.toml` + `src/` | 2 bins + doc-hidden lib | Everything user-facing: the `hyprlay` and `hyprlayd` binaries plus their shared code. The launcher runs its `gui`/`tray` fronts in-process (`hyprlay gui`, `hyprlay tray`) through the composition root in `src/lib.rs`. A bare `cargo install --git <repo>` installs both |
 | `crates/hyprlay-core` | lib | Shared foundation: domain vocabulary (commands, keys, replies), persisted config with its bounds table (single source of truth), framework-free color math, Discord credential storage, compositor/cursor port traits, the `Platform` facade, ctl socket protocol |
-| `scripts/` | examples only | Standalone debug probes (`wsprobe`, `ipcprobe`) for raw Discord traffic; run via `cargo run -p hyprlay-scripts --example <name>` from that directory |
+| `scripts/` | examples only + one shell script | Standalone debug probes (`wsprobe`, `ipcprobe`) for raw Discord traffic; run via `cargo run -p hyprlay-scripts --example <name>` from that directory. `gui-keyboard-e2e.sh` is the keyboard harness for the settings window: it drives the real binary under Xvfb + i3, sends keystrokes and diffs screenshots, so keyboard behaviour is asserted rather than assumed |
+| `vendor/softbuffer/` | patched path dep | crates.io `softbuffer` 0.4.8 with its Wayland shm format fixed to `Argb8888`, so tiny-skia surfaces keep their alpha; see `vendor/softbuffer/PATCH.md` before touching it |
 
 ## Module interfaces
 
@@ -48,11 +49,11 @@ boundary.
 | `src/cli/install.rs` | `run_install`/`run_uninstall` | Thin resolver: real config/data/exe dirs in, the platform's install/uninstall flow out (`src/platform/service/`), report printed; the unit/registry writing lives in the platform adapters |
 | `src/bin/hyprlayd.rs` | thin main → `daemon::run()` | Process entry only |
 | `src/daemon/mod.rs` | daemon shell (`run()`, effect → `Task` translation, subscription wiring, logging init) | Shell-answered commands, single-instance guard, re-exec paths, command resolution shared by both surface hosts; domain logic lives in the modules below |
-| `src/daemon/surface_host/mod.rs` | `run(cfg, auth) -> ExitCode` | `#[cfg]` dispatch between the two overlay shells; roster state and domain logic stay in the parent `daemon` module |
-| `src/daemon/surface_host/layershell.rs` | Linux/Wayland overlay shell | The existing `iced_layershell` app, behaviour byte-identical: edge anchoring with margins, hover polling |
-| `src/daemon/surface_host/winit.rs` | Windows/macOS overlay shell | Frameless, transparent, always-on-top `iced` window moved to the computed on-screen position; same shared logic and hover poll |
+| `src/daemon/surface_host/mod.rs` | `run(cfg, auth) -> ExitCode`, `boot_size`, `take_boot` | `#[cfg]` dispatch between the two overlay shells; `boot_size` turns a booted roster into the surface size (floored at `EMPTY_HEIGHT`, since layer-shell rejects a zero height on a surface not anchored to opposite edges) and `take_boot` hands that same overlay to the boot closure, which iced may call more than once; roster state and domain logic stay in the parent `daemon` module |
+| `src/daemon/surface_host/layershell.rs` | Linux/Wayland overlay shell | The existing `iced_layershell` app: edge anchoring with margins, hover polling, surface created at `boot_size` so a cached roster is never clipped |
+| `src/daemon/surface_host/winit.rs` | Windows/macOS overlay shell | Frameless, transparent, always-on-top `iced` window moved to the computed on-screen position, created at the same `boot_size`; same shared logic and hover poll |
 | `src/daemon/ctl_server.rs` | `incoming()` stream of `CtlRequest` | Serves the core `ControlListener` on a dedicated thread (accept loop never stalls the async host), one thread per connection; the wire vocabulary itself lives in core (single source of truth) |
-| `src/daemon/overlay/state.rs` | `Overlay` model methods (`desired_size`, `displayed`, `hidden_rows`, `apply_discord`) | Roster filtering, sizing, avatar cache/dedup |
+| `src/daemon/overlay/state.rs` | `Overlay` model methods (`desired_size`, `displayed`, `hidden_rows`, `apply_discord`), `boot`/`boot_from` | Roster filtering, sizing, avatar cache/dedup; `boot` reads the roster cache and records the size that roster needs, so the surface and the model agree on the first frame |
 | `src/daemon/overlay/geometry.rs` | `anchor/margin/drag(cfg, …)` | All screen-placement math |
 | `src/daemon/overlay/view.rs` | `view(&Overlay)` | Widget construction only |
 | `src/daemon/overlay/glyph.rs` | `mark_of(&Participant) -> Option<Mark>` | Mute/deafen glyph mapping for roster rows, free of widgets |
@@ -63,9 +64,9 @@ boundary.
 | `src/gui/mod.rs` | iced app shell: `Gui::run()` | `Message`, `Gui`, boot/subscribe wiring, window settings, and the blocking `send` wrapper; every change stays a `Command` — the layer modules below own the rest |
 | `src/gui/update.rs` | `pub(super)` `update(gui, msg)` | The one flat update match (the app's dispatch table), the `shortcut` dispatcher, and the async daemon-toggle / auth effects |
 | `src/gui/commands.rs` | `pub(super)` `command_for`, `apply_num`, `revert_commands` | Message → Command translation plus the bookkeeping the update arms share: unsaved marker, numeric bounds check, revert diff |
-| `src/gui/scroll.rs` | `pub(super)` `measure_sections`, `scroll_to_section` | One-page navigation: the measure operation, section jumps, scrollspy highlight, and the shared widget ids |
+| `src/gui/scroll.rs` | `pub(super)` `measure_sections`, `scroll_to_section`, `scroll_content_to` | One-page navigation: the measure operation, section and field jumps, scrollspy highlight, and the shared widget ids |
 | `src/gui/view.rs` | `pub(super)` `view(gui)` | Window composition: header (title, search, global actions), sidebar (section anchors), status bar (unsaved marker, daemon toggle, last reply) |
-| `src/gui/fields.rs` | per-key field registry | Section, label, tooltip, and control rendering for each setting |
+| `src/gui/fields.rs` | per-key field registry, `rendered_keys`, `section_of` | Section, label, tooltip, and control rendering for each setting; `Field.key` names the config key a row edits, `rendered_keys` gives the rows the current query actually renders, in page order — the tab order's single source of truth — and `section_of` the section a row belongs to |
 | `src/gui/daemon.rs` | `DaemonState` machine | Status chip states (connecting… / up / daemon not active) and the Start/Stop toggle plumbing (systemctl vs spawn vs `quit`) |
 | `src/gui/picker.rs` | color picker widget | Color selection UI |
 | `src/gui/theme.rs` | theme | Look and feel constants |

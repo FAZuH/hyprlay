@@ -178,7 +178,14 @@ fn desktop_path(data_base: &Path) -> PathBuf {
 /// The hicolor sizes installed for the app icon. `scalable` carries the SVG;
 /// each raster size carries a PNG. XDG icon launchers look up `Icon=hyprlay`
 /// under `hicolor/<size>/apps/hyprlay.<ext>`.
-const ICON_SIZES: &[u32] = &[48, 64, 128, 256];
+/// The four raster sizes and the bytes for each, as one table: a `match`
+/// re-listing the same literals (with an `unreachable!()`) was the old shape.
+const ICONS: &[(u32, &[u8])] = &[
+    (48, include_bytes!("../../../assets/hyprlay-48.png")),
+    (64, include_bytes!("../../../assets/hyprlay-64.png")),
+    (128, include_bytes!("../../../assets/hyprlay-128.png")),
+    (256, include_bytes!("../../../assets/hyprlay-256.png")),
+];
 
 fn icon_svg_path(data_base: &Path) -> PathBuf {
     data_base.join("icons/hicolor/scalable/apps/hyprlay.svg")
@@ -362,15 +369,8 @@ fn install_icon(data_base: &Path, report: &mut Vec<String>) -> Result<(), Servic
     fs_util::write_file(&svg, include_bytes!("../../../assets/hyprlay.svg"))?;
     report.push(format!("wrote {}", svg.display()));
 
-    for size in ICON_SIZES {
+    for (size, bytes) in ICONS {
         let png = icon_png_path(data_base, *size);
-        let bytes: &[u8] = match *size {
-            48 => include_bytes!("../../../assets/hyprlay-48.png"),
-            64 => include_bytes!("../../../assets/hyprlay-64.png"),
-            128 => include_bytes!("../../../assets/hyprlay-128.png"),
-            256 => include_bytes!("../../../assets/hyprlay-256.png"),
-            _ => unreachable!(),
-        };
         fs_util::write_file(&png, bytes)?;
         report.push(format!("wrote {}", png.display()));
     }
@@ -380,7 +380,7 @@ fn install_icon(data_base: &Path, report: &mut Vec<String>) -> Result<(), Servic
 /// Remove the installed app icon files. `scalable` SVG plus each raster size.
 fn uninstall_icon(data_base: &Path, report: &mut Vec<String>) -> Result<(), ServiceError> {
     fs_util::remove_reported(&icon_svg_path(data_base), report)?;
-    for size in ICON_SIZES {
+    for (size, _) in ICONS {
         fs_util::remove_reported(&icon_png_path(data_base, *size), report)?;
     }
     Ok(())

@@ -15,42 +15,41 @@
 //! daemon state and the boot auto-start watcher.
 
 use hyprlay_core::daemon_control::Toggle;
+use hyprlay_core::domain::Reply;
 use hyprlay_core::status::StatusFields;
 
 /// Chip text before the first probe has answered.
 pub(super) const CONNECTING_TEXT: &str = "connecting…";
 const DAEMON_DOWN_TEXT: &str = "daemon not active";
-/// What our blocking-send wrapper reports when the socket connect fails.
-const DAEMON_UNREACHABLE: &str = "error: daemon unreachable";
-/// Same wrapper, when the off-thread task itself died.
-const PROBE_TASK_FAILED: &str = "error: command task failed";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum DaemonState {
     Connecting,
-    Up(String),
+    Up(Reply),
     Unreachable,
 }
 
 impl DaemonState {
     /// Fold one daemon reply into the machine. Only probe outcomes move it:
-    /// a `status=` line proves the daemon answers, our own send-wrapper's
-    /// failure texts prove nothing does, and everything else is an ordinary
-    /// reply that must not disturb the chip.
-    pub(super) fn advance(self, reply: &str) -> Self {
-        if StatusFields::is_status_line(reply) {
-            Self::Up(reply.to_string())
-        } else if is_probe_failure(reply) {
-            Self::Unreachable
-        } else {
-            self
+    /// a `status=` line proves the daemon answers, the send-wrapper's
+    /// `Reply::Error` proves nothing does, and everything else is an
+    /// ordinary reply that must not disturb the chip.
+    pub(super) fn advance(self, reply: &Reply) -> Self {
+        match reply {
+            Reply::Ok(txt) if StatusFields::is_status_line(txt) => Self::Up(reply.clone()),
+            Reply::Error(txt)
+                if txt == crate::gui::DAEMON_UNREACHABLE || txt == super::COMMAND_TASK_FAILED =>
+            {
+                Self::Unreachable
+            }
+            _ => self,
         }
     }
 
     pub(super) fn text(&self) -> &str {
         match self {
             Self::Connecting => CONNECTING_TEXT,
-            Self::Up(reply) => reply,
+            Self::Up(reply) => reply.text(),
             Self::Unreachable => DAEMON_DOWN_TEXT,
         }
     }
@@ -75,10 +74,12 @@ impl DaemonState {
     }
 }
 
-/// Does this reply prove that no daemon answered? Only these two texts —
-/// our own send-wrapper's failures — may mark the daemon down.
-fn is_probe_failure(reply: &str) -> bool {
-    reply == DAEMON_UNREACHABLE || reply == PROBE_TASK_FAILED
+/// Does this reply prove that no daemon answered? Only the send-wrapper's
+/// two failure texts may mark the daemon down; the daemon never sends
+/// either. Decided by the `Reply::Error` variant the wrapper produces, so
+/// no caller re-derives it from the text.
+fn is_probe_failure(reply: &Reply) -> bool {
+    matches!(reply, Reply::Error(_))
 }
 
 /// Boot watcher behind the one-shot auto-start: opening the GUI must bring
@@ -108,10 +109,12 @@ impl AutoStart {
     /// proves the daemon down at boot. While the launched call is still
     /// out, later failures hold [`DaemonState::Connecting`] — they mean
     /// "not up yet", not "dead".
-    pub(super) fn observe(&mut self, state: &mut DaemonState, reply: &str) -> Option<Toggle> {
+    pub(super) fn observe(&mut self, state: &mut DaemonState, reply: &Reply) -> Option<Toggle> {
         if self.0 == Phase::Running {
             // Hold the connecting line until the launch settles.
-            if StatusFields::is_status_line(reply) {
+            if let Reply::Ok(txt) = reply
+                && StatusFields::is_status_line(txt)
+            {
                 *state = state.clone().advance(reply);
                 self.0 = Phase::Done;
             }
@@ -141,43 +144,43 @@ impl AutoStart {
 
 #[cfg(test)]
 mod tests {
-    use hyprlay_core::daemon_control::Action;
-    use hyprlay_core::daemon_control::DaemonControl;
-    use hyprlay_core::daemon_control::ServiceError;
-    use hyprlay_core::daemon_control::StopPolicy;
-    use hyprlay_core::daemon_control::execute_toggle;
 
     use super::*;
 
     #[test]
     fn first_status_reply_moves_connecting_to_up() {
         let reply = "status=connected channel=ngobrol 3 participants=2 rtl=on monitor=eDP-1";
-        let next = DaemonState::Connecting.advance(reply);
-        assert_eq!(next, DaemonState::Up(reply.to_string()));
+        let next = DaemonState::Connecting.advance(&Reply::Ok(reply.into()));
+        assert_eq!(next, DaemonState::Up(Reply::Ok(reply.into())));
     }
 
     #[test]
     fn any_later_status_reply_keeps_or_restores_up() {
         let reply = "status=disconnected";
         assert_eq!(
-            DaemonState::Up("status=connected channel=a participants=1".into()).advance(reply),
-            DaemonState::Up(reply.to_string())
+            DaemonState::Up(Reply::Ok(
+                "status=connected channel=a participants=1".into()
+            ))
+            .advance(&Reply::Ok(reply.into())),
+            DaemonState::Up(Reply::Ok(reply.into()))
         );
         assert_eq!(
-            DaemonState::Unreachable.advance(reply),
-            DaemonState::Up(reply.to_string())
+            DaemonState::Unreachable.advance(&Reply::Ok(reply.into())),
+            DaemonState::Up(Reply::Ok(reply.into()))
         );
     }
 
     #[test]
     fn unreachable_probe_marks_the_daemon_down_from_any_state() {
         assert_eq!(
-            DaemonState::Connecting.advance(DAEMON_UNREACHABLE),
+            DaemonState::Connecting.advance(&Reply::Error(crate::gui::DAEMON_UNREACHABLE.into())),
             DaemonState::Unreachable
         );
         assert_eq!(
-            DaemonState::Up("status=connected channel=a participants=1".into())
-                .advance(DAEMON_UNREACHABLE),
+            DaemonState::Up(Reply::Ok(
+                "status=connected channel=a participants=1".into()
+            ))
+            .advance(&Reply::Error(crate::gui::DAEMON_UNREACHABLE.into())),
             DaemonState::Unreachable
         );
     }
@@ -185,8 +188,10 @@ mod tests {
     #[test]
     fn dead_probe_task_counts_as_unreachable_too() {
         assert_eq!(
-            DaemonState::Up("status=connected channel=a participants=1".into())
-                .advance(PROBE_TASK_FAILED),
+            DaemonState::Up(Reply::Ok(
+                "status=connected channel=a participants=1".into()
+            ))
+            .advance(&Reply::Error(crate::gui::COMMAND_TASK_FAILED.into())),
             DaemonState::Unreachable
         );
     }
@@ -201,19 +206,25 @@ mod tests {
             "",
         ];
         for reply in bystanders {
+            let reply = Reply::Ok(reply.into());
             assert_eq!(
-                DaemonState::Connecting.advance(reply),
+                DaemonState::Connecting.advance(&reply),
                 DaemonState::Connecting,
                 "reply {reply:?} must not leave connecting"
             );
             assert_eq!(
-                DaemonState::Unreachable.advance(reply),
+                DaemonState::Unreachable.advance(&reply),
                 DaemonState::Unreachable,
                 "reply {reply:?} must not revive a down daemon"
             );
             assert_eq!(
-                DaemonState::Up("status=connected channel=a participants=1".into()).advance(reply),
-                DaemonState::Up("status=connected channel=a participants=1".into()),
+                DaemonState::Up(Reply::Ok(
+                    "status=connected channel=a participants=1".into()
+                ))
+                .advance(&reply),
+                DaemonState::Up(Reply::Ok(
+                    "status=connected channel=a participants=1".into()
+                )),
                 "reply {reply:?} must not drop an up daemon"
             );
         }
@@ -221,17 +232,23 @@ mod tests {
 
     #[test]
     fn validation_errors_from_a_live_daemon_do_not_mean_down() {
-        let next = DaemonState::Up("status=connected channel=a participants=1".into())
-            .advance("error: opacity <0-100>");
+        let next = DaemonState::Up(Reply::Ok(
+            "status=connected channel=a participants=1".into(),
+        ))
+        .advance(&Reply::Error("error: opacity <0-100>".into()));
         assert_eq!(
             next,
-            DaemonState::Up("status=connected channel=a participants=1".into())
+            DaemonState::Up(Reply::Ok(
+                "status=connected channel=a participants=1".into()
+            ))
         );
     }
 
     #[test]
     fn an_up_daemon_offers_stop() {
-        let up = DaemonState::Up("status=connected channel=a participants=1".into());
+        let up = DaemonState::Up(Reply::Ok(
+            "status=connected channel=a participants=1".into(),
+        ));
         assert_eq!(up.label(), "Stop daemon");
         assert_eq!(up.toggle(), Some(Toggle::Stop));
     }
@@ -249,91 +266,22 @@ mod tests {
     }
 
     #[test]
-    fn an_installed_unit_routes_start_through_systemctl() {
-        assert_eq!(
-            hyprlay_core::daemon_control::plan_action(
-                Toggle::Start,
-                true,
-                StopPolicy::ViaSystemctl
-            ),
-            Action::SystemctlStart
-        );
-    }
-
-    #[test]
-    fn an_installed_unit_routes_stop_through_systemctl() {
-        assert_eq!(
-            hyprlay_core::daemon_control::plan_action(Toggle::Stop, true, StopPolicy::ViaSystemctl),
-            Action::SystemctlStop
-        );
-    }
-
-    #[test]
-    fn without_a_unit_start_spawns_the_sibling_daemon() {
-        assert_eq!(
-            hyprlay_core::daemon_control::plan_action(
-                Toggle::Start,
-                false,
-                StopPolicy::ViaSystemctl
-            ),
-            Action::SpawnDaemon
-        );
-    }
-
-    #[test]
-    fn without_a_unit_stop_quits_over_the_control_socket() {
-        assert_eq!(
-            hyprlay_core::daemon_control::plan_action(
-                Toggle::Stop,
-                false,
-                StopPolicy::ViaSystemctl
-            ),
-            Action::SocketQuit
-        );
-    }
-
-    #[test]
-    fn a_successful_toggle_runs_exactly_one_action_and_stays_quiet() {
-        let control = FakeControl {
-            installed: true,
-            ..FakeControl::default()
-        };
-        let outcome = execute_toggle(&control, Toggle::Start, StopPolicy::ViaSystemctl);
-        assert_eq!(outcome, None);
-        assert_eq!(control.performed(), vec![Action::SystemctlStart]);
-    }
-
-    #[test]
-    fn a_failed_action_surfaces_its_error_text() {
-        let control = FakeControl {
-            installed: false,
-            fail_with: Some(Box::new(|| ServiceError::SystemctlFailed {
-                subcommand: "stop".into(),
-                detail: "unit not loaded".into(),
-            })),
-            ..FakeControl::default()
-        };
-        // Stop without a unit resolves to the socket path; its failure must
-        // reach the status line verbatim.
-        let outcome = execute_toggle(&control, Toggle::Stop, StopPolicy::ViaSystemctl);
-        assert_eq!(
-            outcome,
-            Some("error: systemctl stop failed: unit not loaded".into())
-        );
-        assert_eq!(control.performed(), vec![Action::SocketQuit]);
-    }
-
-    #[test]
     fn first_failed_probe_at_boot_fires_exactly_one_start_and_holds_connecting() {
         let mut watcher = AutoStart::watching();
         let mut state = DaemonState::Connecting;
 
-        let fired = watcher.observe(&mut state, DAEMON_UNREACHABLE);
+        let fired = watcher.observe(
+            &mut state,
+            &Reply::Error(crate::gui::DAEMON_UNREACHABLE.into()),
+        );
 
         assert_eq!(fired, Some(Toggle::Start));
         assert_eq!(state, DaemonState::Connecting);
         assert_eq!(
-            watcher.observe(&mut state, DAEMON_UNREACHABLE),
+            watcher.observe(
+                &mut state,
+                &Reply::Error(crate::gui::DAEMON_UNREACHABLE.into())
+            ),
             None,
             "the launch is one-shot per GUI session"
         );
@@ -346,11 +294,17 @@ mod tests {
         let mut watcher = AutoStart::watching();
         let mut state = DaemonState::Connecting;
         assert_eq!(
-            watcher.observe(&mut state, DAEMON_UNREACHABLE),
+            watcher.observe(
+                &mut state,
+                &Reply::Error(crate::gui::DAEMON_UNREACHABLE.into())
+            ),
             Some(Toggle::Start)
         );
 
-        let fired_again = watcher.observe(&mut state, PROBE_TASK_FAILED);
+        let fired_again = watcher.observe(
+            &mut state,
+            &Reply::Error(crate::gui::COMMAND_TASK_FAILED.into()),
+        );
 
         assert_eq!(fired_again, None);
         assert_eq!(state, DaemonState::Connecting);
@@ -362,10 +316,10 @@ mod tests {
         let mut state = DaemonState::Connecting;
         let reply = "status=disconnected";
 
-        let fired = watcher.observe(&mut state, reply);
+        let fired = watcher.observe(&mut state, &Reply::Ok(reply.into()));
 
         assert_eq!(fired, None);
-        assert_eq!(state, DaemonState::Up(reply.to_string()));
+        assert_eq!(state, DaemonState::Up(Reply::Ok(reply.into())));
     }
 
     #[test]
@@ -373,12 +327,15 @@ mod tests {
         let mut watcher = AutoStart::watching();
         let mut state = DaemonState::Connecting;
 
-        let fired = watcher.observe(&mut state, "saved");
+        let fired = watcher.observe(&mut state, &Reply::Ok("saved".into()));
 
         assert_eq!(fired, None);
         assert_eq!(state, DaemonState::Connecting);
         assert_eq!(
-            watcher.observe(&mut state, DAEMON_UNREACHABLE),
+            watcher.observe(
+                &mut state,
+                &Reply::Error(crate::gui::DAEMON_UNREACHABLE.into())
+            ),
             Some(Toggle::Start),
             "the watcher stays armed until a probe gives a verdict"
         );
@@ -388,14 +345,23 @@ mod tests {
     fn successful_probe_during_the_launch_marks_up_and_retires_the_watcher() {
         let mut watcher = AutoStart::watching();
         let mut state = DaemonState::Connecting;
-        watcher.observe(&mut state, DAEMON_UNREACHABLE);
+        watcher.observe(
+            &mut state,
+            &Reply::Error(crate::gui::DAEMON_UNREACHABLE.into()),
+        );
 
-        let fired = watcher.observe(&mut state, "status=connected channel=a participants=1");
+        let fired = watcher.observe(
+            &mut state,
+            &Reply::Ok("status=connected channel=a participants=1".into()),
+        );
 
         assert_eq!(fired, None);
         assert!(matches!(state, DaemonState::Up(_)));
         // Retired: probes speak for themselves again.
-        watcher.observe(&mut state, DAEMON_UNREACHABLE);
+        watcher.observe(
+            &mut state,
+            &Reply::Error(crate::gui::DAEMON_UNREACHABLE.into()),
+        );
         assert_eq!(state, DaemonState::Unreachable);
     }
 
@@ -404,48 +370,23 @@ mod tests {
         let mut watcher = AutoStart::watching();
         let mut state = DaemonState::Connecting;
         assert_eq!(
-            watcher.observe(&mut state, DAEMON_UNREACHABLE),
+            watcher.observe(
+                &mut state,
+                &Reply::Error(crate::gui::DAEMON_UNREACHABLE.into())
+            ),
             Some(Toggle::Start)
         );
         watcher.settled();
 
-        watcher.observe(&mut state, DAEMON_UNREACHABLE);
+        watcher.observe(
+            &mut state,
+            &Reply::Error(crate::gui::DAEMON_UNREACHABLE.into()),
+        );
 
         assert_eq!(
             state,
             DaemonState::Unreachable,
             "once the launch returned, a dead daemon must be reported"
         );
-    }
-
-    /// Spy at the process/socket boundary: records what ran so tests verify
-    /// state, not call mechanics. `fail_with` is a factory because
-    /// `ServiceError` is not `Clone`: every performed action fails the same
-    /// way, exactly as the old `String` double did.
-    #[derive(Default)]
-    struct FakeControl {
-        installed: bool,
-        fail_with: Option<Box<dyn Fn() -> ServiceError + Send + Sync>>,
-        performed: std::sync::Mutex<Vec<Action>>,
-    }
-
-    impl FakeControl {
-        fn performed(&self) -> Vec<Action> {
-            self.performed.lock().unwrap().clone()
-        }
-    }
-
-    impl DaemonControl for FakeControl {
-        fn unit_installed(&self) -> bool {
-            self.installed
-        }
-
-        fn perform(&self, action: Action) -> Result<(), ServiceError> {
-            self.performed.lock().unwrap().push(action);
-            match &self.fail_with {
-                Some(failure) => Err(failure()),
-                None => Ok(()),
-            }
-        }
     }
 }
