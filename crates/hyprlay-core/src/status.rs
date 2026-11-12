@@ -56,6 +56,9 @@ pub struct StatusFields {
     pub dim_on_hover: bool,
     /// Hover opacity in percent from ADR-002.
     pub hover_opacity: u8,
+    /// Running daemon's crate version, e.g. `0.4.0`; empty from an older
+    /// daemon that predates the field.
+    pub version: String,
 }
 
 impl StatusFields {
@@ -70,7 +73,7 @@ impl StatusFields {
         format!(
             "status={} channel={} participants={} position={} rtl={} visible={} \
              anchor={} scale={} opacity={} offset=({},{}) monitor={} auth={} \
-             show-on-fullscreen={} dim-on-hover={} hover-opacity={}",
+             show-on-fullscreen={} dim-on-hover={} hover-opacity={} version={}",
             self.status_word,
             self.channel,
             self.participants,
@@ -87,6 +90,7 @@ impl StatusFields {
             on_off(self.show_on_fullscreen),
             on_off(self.dim_on_hover),
             self.hover_opacity,
+            self.version,
         )
     }
 
@@ -128,6 +132,7 @@ impl StatusFields {
             show_on_fullscreen: token_after(line, " show-on-fullscreen=") == Some("on"),
             dim_on_hover: token_after(line, " dim-on-hover=") == Some("on"),
             hover_opacity: number(token_after(line, " hover-opacity=")),
+            version: word(line, " version="),
         })
     }
 }
@@ -224,6 +229,7 @@ mod tests {
             show_on_fullscreen: true,
             dim_on_hover: true,
             hover_opacity: 40,
+            version: "0.4.0".into(),
         };
         let parsed = StatusFields::parse_wire(&fields.to_wire()).expect("roundtrip parses");
         assert_eq!(parsed.status_word.as_str(), "connected");
@@ -242,6 +248,7 @@ mod tests {
         assert!(parsed.show_on_fullscreen);
         assert!(parsed.dim_on_hover);
         assert_eq!(parsed.hover_opacity, 40);
+        assert_eq!(parsed.version, "0.4.0");
     }
 
     #[test]
@@ -263,13 +270,14 @@ mod tests {
             show_on_fullscreen: true,
             dim_on_hover: false,
             hover_opacity: 40,
+            version: "0.4.0".into(),
         };
         assert_eq!(
             fields.to_wire(),
             "status=connected channel=ngobrol 3 participants=2 position=top-left \
              rtl=on visible=off anchor=auto scale=100 opacity=90 offset=(-12,34) \
              monitor=active auth=own-app show-on-fullscreen=on dim-on-hover=off \
-             hover-opacity=40"
+             hover-opacity=40 version=0.4.0"
         );
     }
 
@@ -313,6 +321,7 @@ mod tests {
         assert!(!fields.show_on_fullscreen);
         assert!(!fields.dim_on_hover);
         assert_eq!(fields.hover_opacity, 0);
+        assert_eq!(fields.version, "");
     }
 
     #[test]
@@ -343,6 +352,7 @@ mod tests {
                 show_on_fullscreen: true,
                 dim_on_hover: false,
                 hover_opacity: 40,
+                version: String::new(),
             }
         );
     }
@@ -369,7 +379,7 @@ mod tests {
             fields.to_wire(),
             "status=relinking channel=a participants=1 position= rtl=off visible=off \
              anchor= scale=0 opacity=0 offset=(0,0) monitor=active auth= \
-             show-on-fullscreen=off dim-on-hover=off hover-opacity=0"
+             show-on-fullscreen=off dim-on-hover=off hover-opacity=0 version="
         );
     }
 
@@ -403,6 +413,7 @@ mod tests {
                 show_on_fullscreen: true,
                 dim_on_hover: false,
                 hover_opacity: 40,
+                version: "0.4.0".into(),
             }
             .to_wire();
             assert!(wire.starts_with(&format!("status={word} ")), "{wire}");

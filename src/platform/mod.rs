@@ -12,6 +12,7 @@ pub mod ipc;
 pub mod service;
 pub mod tray;
 pub mod update;
+pub mod version;
 
 pub use host::Host;
 pub use host::host;
