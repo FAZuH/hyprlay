@@ -166,12 +166,18 @@ fn status_bar(gui: &Gui) -> Element<'_, Message> {
     } else {
         text("").size(11)
     };
+    let outdated = if gui.daemon_outdated {
+        text("restart to update").size(11).color(AMBER)
+    } else {
+        text("").size(11)
+    };
     container(
         row![
             unsaved,
             daemon_toggle(gui),
             text("daemon").size(10).color(MUTED),
             text(brief_status(gui.daemon_state.text())).size(11),
+            outdated,
             iced::widget::Space::new().width(Length::Fill),
             text("last change").size(10).color(MUTED),
             text(match gui.last_reply {

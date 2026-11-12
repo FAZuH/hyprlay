@@ -57,6 +57,12 @@ pub(super) fn update(gui: &mut Gui, message: Message) -> Task<Message> {
             // while the boot auto-start has the wheel, failures hold
             // `connecting…` instead of reporting the daemon dead.
             let launch = gui.auto_start.observe(&mut gui.daemon_state, &reply);
+            // Only a status line carries the daemon's build version, so the
+            // cached on-disk probe is consulted there and nowhere else.
+            if StatusFields::is_status_line(reply.text()) {
+                let on_disk = crate::platform::version::on_disk_version();
+                gui.daemon_outdated = super::daemon::outdated(&reply, on_disk.as_deref());
+            }
             // `dump` replies with the live runtime config as TOML — adopt it
             // so the GUI reflects unsaved daemon state. Any in-flight input
             // drafts are stale after an external reset, so drop them too.
