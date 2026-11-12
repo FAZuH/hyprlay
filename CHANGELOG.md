@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### CLI
+
+- Added `hyprlay update` to install the latest release
+
 ### Upgrading
 
 - Re-run `hyprlay install` after replacing the binaries to rewrite the systemd units.
