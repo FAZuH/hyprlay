@@ -6,8 +6,9 @@
 //!
 //! Behaviour is byte-identical to the old implementation: the same systemctl
 //! invocation, the same detached sibling spawn, the same socket quit, the same
-//! unit/desktop templates and report lines, the same systemctl command
-//! sequence. Only the location moved (host CLI + core → this host adapter) so
+//! unit/desktop templates and report lines (apart from the daemon unit's
+//! session ordering, below), the same systemctl command sequence. Only the
+//! location moved (host CLI + core → this host adapter) so
 //! `hyprlay-core` stays platform-neutral and every OS's install/autostart
 //! routes through the same `ServiceManager` port.
 //!
@@ -202,17 +203,29 @@ fn tray_unit_path(config_base: &Path) -> PathBuf {
 fn unit_text(exe_dir: &Path) -> String {
     // %h is systemd's own home specifier, resolved by the manager at load
     // time — credentials may arrive via service.env even under systemd.
+    //
+    // The overlay is a Wayland layer surface: it cannot start before a
+    // compositor exists. `default.target` is reached seconds before uwsm
+    // starts Hyprland, so every login raced the daemon against the compositor
+    // and lost. `graphical-session.target` is reached only after
+    // `WAYLAND_DISPLAY` is exported; the longer `RestartSec` keeps a
+    // compositor restart from exhausting the start limit the same way.
     format!(
         "[Unit]\n\
          Description=hyprlay overlay daemon\n\
+         After=graphical-session.target\n\
+         PartOf=graphical-session.target\n\
+         StartLimitIntervalSec=30s\n\
+         StartLimitBurst=5\n\
          \n\
          [Service]\n\
          ExecStart={}/{}\n\
          Restart=on-failure\n\
+         RestartSec=2s\n\
          EnvironmentFile=-%h/.config/hyprlay/service.env\n\
          \n\
          [Install]\n\
-         WantedBy=default.target\n",
+         WantedBy=graphical-session.target\n",
         exe_dir.display(),
         DAEMON_BIN
     )
