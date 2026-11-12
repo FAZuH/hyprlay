@@ -4,7 +4,8 @@ stateDiagram-v2
     state "installed" as Installed
     state "checking releases/latest" as Checking
     state "up to date" as Current
-    state "refused: cargo or system owned path" as Refused
+    state "system owned path" as Refused
+    state "cargo install (compiles)" as CargoInstall
     state "report only, --check" as Reporting
     state "downloading both assets" as Downloading
     state "aborted, nothing replaced" as Aborted
@@ -17,7 +18,8 @@ stateDiagram-v2
 
     [*] --> Installed
     Installed --> Checking : hyprlay update
-    Checking --> Refused : path owned by cargo or package manager
+    Checking --> CargoInstall : path owned by cargo
+    Checking --> Refused : path owned by the package manager
     Checking --> Reporting : --check
     Checking --> Current : tag is not newer
     Checking --> Downloading : newer tag
@@ -30,6 +32,7 @@ stateDiagram-v2
     CliSwapped --> NoService : no unit
     Refreshing --> Updated : reenable + restart + tray
     NoService --> Updated : prints run hyprlay install
+    CargoInstall --> Updated : cargo rebuilds both, unit refreshed
     Updated --> [*]
 
     note right of DaemonSwapped
