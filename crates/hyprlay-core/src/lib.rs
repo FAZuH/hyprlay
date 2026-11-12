@@ -15,3 +15,4 @@ pub mod domain;
 pub mod platform;
 pub mod singleton;
 pub mod status;
+pub mod version;
