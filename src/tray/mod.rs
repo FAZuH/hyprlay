@@ -137,13 +137,16 @@ async fn refresh<T: Tray>(tray: &mut T, last: &mut Option<TrayState>) {
 /// Blocking `status` round-trip off the async loop, mirroring the GUI's
 /// `send` helper (`gui/mod.rs:236`).
 async fn poll_state() -> TrayState {
-    let reply = tokio::task::spawn_blocking(|| {
-        hyprlay_core::ctl::send_command_line(&crate::platform::ipc::control::Control, "status")
+    let (reply, on_disk) = tokio::task::spawn_blocking(|| {
+        (
+            hyprlay_core::ctl::send_command_line(&crate::platform::ipc::control::Control, "status"),
+            crate::platform::version::on_disk_version(),
+        )
     })
     .await
-    .unwrap_or(None);
+    .unwrap_or((None, None));
     match reply {
-        Some(reply) => parse_status(&reply),
+        Some(reply) => parse_status(&reply, on_disk.as_deref()),
         None => TrayState::down(),
     }
 }
@@ -196,6 +199,16 @@ async fn perform(action: MenuAction, state: Option<&TrayState>) {
                 )
             })
             .await;
+        }
+        MenuAction::RestartDaemon => {
+            tokio::task::spawn_blocking(|| {
+                hyprlay_core::ctl::send_command_line(
+                    &crate::platform::ipc::control::Control,
+                    &Command::Restart.to_string(),
+                )
+            })
+            .await
+            .ok();
         }
         MenuAction::Quit => unreachable!("Quit is handled by the loop before perform"),
     }
