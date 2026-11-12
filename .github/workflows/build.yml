@@ -82,6 +82,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           key: release-manifests-${{ github.run_id }}-${{ github.run_attempt }}
+          enableCrossOsArchive: true
           path: |
             Cargo.toml
             Cargo.lock
