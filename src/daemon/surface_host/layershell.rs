@@ -5,6 +5,9 @@
 //! runs on Linux, where iced_layershell (and iced's `wayland` feature) are
 //! available.
 
+use std::ffi::OsStr;
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -76,7 +79,48 @@ fn to_wayland_anchor(anchor: geometry::SurfaceAnchor) -> iced_layershell::reexpo
     out
 }
 
+/// Resolve the Wayland socket from the two variables the protocol defines.
+/// Pure so the mapping is testable without touching the process environment:
+/// an absolute `WAYLAND_DISPLAY` is the socket itself, a bare one is a name
+/// under `XDG_RUNTIME_DIR`.
+fn socket_path(
+    wayland_display: Option<&OsStr>,
+    xdg_runtime_dir: Option<&OsStr>,
+) -> Result<PathBuf, String> {
+    let display = wayland_display.ok_or_else(|| "WAYLAND_DISPLAY is not set".to_string())?;
+    let display = Path::new(display);
+    if display.is_absolute() {
+        return Ok(display.to_path_buf());
+    }
+    let runtime = xdg_runtime_dir.ok_or_else(|| "XDG_RUNTIME_DIR is not set".to_string())?;
+    Ok(Path::new(runtime).join(display))
+}
+
+/// Connect once to prove a compositor is listening. A stale socket file left
+/// by a dead compositor fails here rather than inside `iced_layershell`.
+fn ensure_compositor() -> Result<(), String> {
+    let path = socket_path(
+        std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+        std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
+    )?;
+    std::os::unix::net::UnixStream::connect(&path)
+        .map(|_| ())
+        .map_err(|error| format!("cannot connect to {}: {error}", path.display()))
+}
+
 pub(crate) fn run(cfg: Config, auth: Option<OwnAppAuth>) -> ExitCode {
+    // `iced_layershell` panics on a missing compositor
+    // (`ConnectError(NoCompositor)`), which aborts the process and dumps core.
+    // A plain error exit lets systemd's restart policy retry instead.
+    if let Err(reason) = ensure_compositor() {
+        tracing::error!(
+            event = "daemon_no_compositor",
+            reason = %reason,
+            "no Wayland compositor to attach the overlay to; exiting"
+        );
+        return ExitCode::FAILURE;
+    }
+
     // No text input in the overlay; skip the always-on clipboard worker.
     iced_layershell::disable_clipboard();
 
@@ -354,4 +398,41 @@ fn restart_daemon() -> Task<Message> {
 /// in-process pin — it is a single runtime call, verified by live smoke.
 fn clean_shutdown() -> Task<Message> {
     iced::exit()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+    use std::path::PathBuf;
+
+    use super::socket_path;
+
+    #[test]
+    fn an_absolute_wayland_display_is_the_socket_itself() {
+        let path = socket_path(Some(OsStr::new("/run/user/1000/wayland-9")), None)
+            .expect("absolute display resolves without a runtime dir");
+
+        assert_eq!(path, PathBuf::from("/run/user/1000/wayland-9"));
+    }
+
+    #[test]
+    fn a_bare_wayland_display_lives_under_the_runtime_dir() {
+        let path = socket_path(
+            Some(OsStr::new("wayland-1")),
+            Some(OsStr::new("/run/user/1000")),
+        )
+        .expect("a bare display resolves under the runtime dir");
+
+        assert_eq!(path, PathBuf::from("/run/user/1000/wayland-1"));
+    }
+
+    #[test]
+    fn no_wayland_display_is_an_error() {
+        assert!(socket_path(None, Some(OsStr::new("/run/user/1000"))).is_err());
+    }
+
+    #[test]
+    fn a_bare_wayland_display_without_a_runtime_dir_is_an_error() {
+        assert!(socket_path(Some(OsStr::new("wayland-1")), None).is_err());
+    }
 }
