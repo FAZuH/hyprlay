@@ -47,6 +47,8 @@ serde = { version = "1", features = ["derive"] }
 toml = "1"
 serde_json = "1"
 ureq = { version = "2", features = ["json"] }
+sha2 = "0.10"
+self-replace = "1"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
 dirs = "6"
@@ -83,6 +85,8 @@ dirs = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
+sha2 = { workspace = true }
+self-replace = { workspace = true }
 
 # The system-tray backend is target-specific: `ksni` (D-Bus StatusNotifierItem)
 # on Linux, `tray-icon` (Shell_NotifyIcon / NSStatusItem) on Windows/macOS.

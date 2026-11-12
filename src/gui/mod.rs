@@ -219,6 +219,9 @@ pub struct Gui {
     /// Boot watcher that auto-starts the daemon when the first probe
     /// proves it down; retired once settled (see `daemon::AutoStart`).
     auto_start: AutoStart,
+    /// Whether the running daemon predates the on-disk binary. Refreshed
+    /// from probe replies in `update`, never re-derived per frame.
+    daemon_outdated: bool,
     /// Process/socket boundary behind the Start/Stop toggle, injectable so
     /// tests can drive the same decision logic without systemctl.
     control: Arc<dyn DaemonControl>,
@@ -319,6 +322,7 @@ fn boot() -> (Gui, Task<Message>) {
             daemon_state: DaemonState::Connecting,
             auto_start: AutoStart::watching(),
             control: Arc::new(SystemControl),
+            daemon_outdated: false,
             dirty: false,
             monitors: Vec::new(),
             section: Section::Position,
@@ -387,6 +391,7 @@ pub(super) fn test_gui(search: &str) -> Gui {
         daemon_state: DaemonState::Connecting,
         auto_start: AutoStart::watching(),
         control: Arc::new(crate::platform::service::SystemControl),
+        daemon_outdated: false,
         dirty: false,
         monitors: Vec::new(),
         section: Section::Position,

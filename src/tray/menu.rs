@@ -17,6 +17,8 @@ pub struct TrayState {
     pub visible: bool,
     /// Compact, human-readable summary for the greyed status row.
     pub summary: String,
+    /// Whether the running daemon predates the on-disk binary.
+    pub outdated: bool,
 }
 
 impl TrayState {
@@ -27,6 +29,7 @@ impl TrayState {
             up: false,
             visible: false,
             summary: "daemon: down".to_string(),
+            outdated: false,
         }
     }
 
@@ -35,7 +38,8 @@ impl TrayState {
     ///   `disconnected`) means up; `off` / `disconnected` means down.
     /// - `visible` — `on` / `off`.
     /// - `channel` / `participants` — feed the compact summary.
-    fn from_fields(fields: &StatusFields) -> Self {
+    /// - `version` against `on_disk` — the restart-for-the-new-build notice.
+    fn from_fields(fields: &StatusFields, on_disk: Option<&str>) -> Self {
         let status = fields.status_word.as_str();
         let up = !status.is_empty() && status != "off" && status != "disconnected";
         let summary = if up {
@@ -64,6 +68,7 @@ impl TrayState {
             up,
             visible: fields.visible,
             summary,
+            outdated: hyprlay_core::version::is_older(&fields.version, on_disk.unwrap_or_default()),
         }
     }
 }
@@ -78,6 +83,8 @@ pub enum MenuAction {
     ToggleVisible,
     /// Start or stop the daemon (routing decided by live state).
     ToggleDaemon,
+    /// Ask the running daemon to re-exec the on-disk binary.
+    RestartDaemon,
     /// Exit the tray process only.
     Quit,
 }
@@ -123,6 +130,15 @@ pub fn build_menu(state: &TrayState) -> Vec<MenuRow> {
             .into(),
             action: MenuAction::ToggleDaemon,
         },
+        MenuRow::Item {
+            label: if state.outdated {
+                "Restart daemon (new version)"
+            } else {
+                "Restart daemon"
+            }
+            .into(),
+            action: MenuAction::RestartDaemon,
+        },
         MenuRow::Separator,
         MenuRow::Item {
             label: "Quit".into(),
@@ -135,10 +151,11 @@ pub fn build_menu(state: &TrayState) -> Vec<MenuRow> {
 /// owned by [`StatusFields`] — the single source of truth shared with the
 /// daemon writer and the GUI reader — so channel names with spaces and
 /// lenient numbers are handled there; this only maps the parsed fields onto
-/// what the tray renders.
-pub fn parse_status(reply: &str) -> TrayState {
+/// what the tray renders. `on_disk` is the installed binary's version, for
+/// the outdated flag.
+pub fn parse_status(reply: &str, on_disk: Option<&str>) -> TrayState {
     match StatusFields::parse_wire(reply) {
-        Some(fields) => TrayState::from_fields(&fields),
+        Some(fields) => TrayState::from_fields(&fields, on_disk),
         None => TrayState::down(),
     }
 }
@@ -152,6 +169,7 @@ mod tests {
         let state = TrayState::down();
         assert!(!state.up);
         assert!(!state.visible);
+        assert!(!state.outdated);
         assert_eq!(state.summary, "daemon: down");
     }
 
@@ -161,7 +179,7 @@ mod tests {
         assert_eq!(rows[0], MenuRow::Status("daemon: down".into()));
         assert!(matches!(rows[1], MenuRow::Separator));
         // Open settings, then Show overlay (down => not visible), then
-        // Start daemon (down => Start), then Quit.
+        // Start daemon (down => Start), then Restart daemon, then Quit.
         let labels: Vec<_> = rows
             .iter()
             .filter_map(|r| match r {
@@ -171,7 +189,13 @@ mod tests {
             .collect();
         assert_eq!(
             labels,
-            ["Open settings", "Show overlay", "Start daemon", "Quit"]
+            [
+                "Open settings",
+                "Show overlay",
+                "Start daemon",
+                "Restart daemon",
+                "Quit"
+            ]
         );
     }
 
@@ -181,6 +205,7 @@ mod tests {
             up: true,
             visible: true,
             summary: "connected · #general · 3".into(),
+            outdated: false,
         };
         let rows = build_menu(&state);
         assert_eq!(rows[0], MenuRow::Status("connected · #general · 3".into()));
@@ -193,14 +218,48 @@ mod tests {
             .collect();
         assert_eq!(
             labels,
-            ["Open settings", "Hide overlay", "Stop daemon", "Quit"]
+            [
+                "Open settings",
+                "Hide overlay",
+                "Stop daemon",
+                "Restart daemon",
+                "Quit"
+            ]
+        );
+    }
+
+    #[test]
+    fn menu_marks_the_restart_row_when_the_daemon_is_outdated() {
+        let state = TrayState {
+            up: true,
+            visible: false,
+            summary: "connected · #general · 3".into(),
+            outdated: true,
+        };
+        let rows = build_menu(&state);
+        let labels: Vec<_> = rows
+            .iter()
+            .filter_map(|r| match r {
+                MenuRow::Item { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Open settings",
+                "Show overlay",
+                "Stop daemon",
+                "Restart daemon (new version)",
+                "Quit"
+            ]
         );
     }
 
     #[test]
     fn parse_status_up_connected_with_channel_and_participants() {
         let reply = "status=connected channel=#general participants=3 rtl=on monitor=eDP-1";
-        let state = parse_status(reply);
+        let state = parse_status(reply, None);
         assert!(state.up);
         assert!(!state.visible);
         assert_eq!(state.summary, "connected · #general · 3");
@@ -208,21 +267,21 @@ mod tests {
 
     #[test]
     fn parse_status_visible_flag_is_read() {
-        let state = parse_status("status=connected channel=a participants=2 visible=on");
+        let state = parse_status("status=connected channel=a participants=2 visible=on", None);
         assert!(state.up);
         assert!(state.visible);
     }
 
     #[test]
     fn parse_status_disconnected_is_down_with_word_summary() {
-        let state = parse_status("status=disconnected");
+        let state = parse_status("status=disconnected", None);
         assert!(!state.up);
         assert_eq!(state.summary, "disconnected");
     }
 
     #[test]
     fn parse_status_off_word_is_treated_as_down() {
-        let state = parse_status("status=off channel=- participants=0 visible=off");
+        let state = parse_status("status=off channel=- participants=0 visible=off", None);
         assert!(!state.up);
         assert_eq!(state.summary, "off");
     }
@@ -231,20 +290,43 @@ mod tests {
     fn parse_status_without_status_prefix_is_down() {
         // A connect error (ctl::send_command_line returned None upstream) or
         // any non-status reply must not be mistaken for an up daemon.
-        assert_eq!(parse_status("error: daemon unreachable"), TrayState::down());
-        assert_eq!(parse_status(""), TrayState::down());
+        assert_eq!(
+            parse_status("error: daemon unreachable", None),
+            TrayState::down()
+        );
+        assert_eq!(parse_status("", None), TrayState::down());
     }
 
     #[test]
     fn parse_status_keeps_multiword_channel_intact() {
         // Channels may contain spaces; the summary must not split mid-name.
-        let state = parse_status("status=connected channel=my cool guild participants=12");
+        let state = parse_status(
+            "status=connected channel=my cool guild participants=12",
+            None,
+        );
         assert_eq!(state.summary, "connected · my cool guild · 12");
     }
 
     #[test]
     fn parse_status_includes_the_participant_count() {
-        let state = parse_status("status=connected channel=solo participants=1");
+        let state = parse_status("status=connected channel=solo participants=1", None);
         assert_eq!(state.summary, "connected · solo · 1");
+    }
+
+    #[test]
+    fn parse_status_flags_a_daemon_older_than_the_on_disk_binary() {
+        let reply = "status=connected channel=a participants=1 version=0.3.9";
+        assert!(parse_status(reply, Some("0.4.0")).outdated);
+        assert!(!parse_status(reply, None).outdated);
+        assert!(
+            !parse_status(
+                "status=connected channel=a participants=1 version=0.4.0",
+                Some("0.4.0")
+            )
+            .outdated
+        );
+        // A reply from a daemon that predates the field carries no version;
+        // unjudgeable never means outdated.
+        assert!(!parse_status("status=connected channel=a participants=1", Some("0.4.0")).outdated);
     }
 }

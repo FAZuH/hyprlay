@@ -1,0 +1,41 @@
+stateDiagram-v2
+    direction TB
+
+    state "installed" as Installed
+    state "checking releases/latest" as Checking
+    state "up to date" as Current
+    state "system owned path" as Refused
+    state "cargo install (compiles)" as CargoInstall
+    state "report only, --check" as Reporting
+    state "downloading both assets" as Downloading
+    state "aborted, nothing replaced" as Aborted
+    state "staged and verified" as Staged
+    state "hyprlayd swapped" as DaemonSwapped
+    state "hyprlay swapped by self-replace" as CliSwapped
+    state "unit refreshed" as Refreshing
+    state "updated, no unit present" as NoService
+    state "updated" as Updated
+
+    [*] --> Installed
+    Installed --> Checking : hyprlay update
+    Checking --> CargoInstall : path owned by cargo
+    Checking --> Refused : path owned by the package manager
+    Checking --> Reporting : --check
+    Checking --> Current : tag is not newer
+    Checking --> Downloading : newer tag
+    Downloading --> Aborted : network or digest failure
+    Downloading --> Staged : both digests match
+
+    Staged --> DaemonSwapped : rename hyprlayd
+    DaemonSwapped --> CliSwapped : self-replace hyprlay
+    CliSwapped --> Refreshing : unit installed
+    CliSwapped --> NoService : no unit
+    Refreshing --> Updated : reenable + restart + tray
+    NoService --> Updated : prints run hyprlay install
+    CargoInstall --> Updated : cargo rebuilds both, unit refreshed
+    Updated --> [*]
+
+    note right of DaemonSwapped
+        A running daemon keeps its old inode;
+        the restart in Refreshing applies the new binary.
+    end note

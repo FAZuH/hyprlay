@@ -211,6 +211,7 @@ pub(crate) fn resolve_command(state: &mut Overlay, cmd: Command) -> CommandOutco
                 show_on_fullscreen: cfg.show_on_fullscreen,
                 dim_on_hover: cfg.dim_on_hover,
                 hover_opacity: cfg.hover_opacity,
+                version: env!("CARGO_PKG_VERSION").to_string(),
             };
             return CommandOutcome {
                 reply: Reply::Ok(fields.to_wire()),

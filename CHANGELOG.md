@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### CLI
+
+- Added `hyprlay update` to install the latest release
+- `hyprlay update` now runs a cargo install when hyprlay was installed by cargo
+
+### Upgrading
+
+- Re-run `hyprlay install` after replacing the binaries to rewrite the systemd units.
+
+### Overlay
+
+- Fixed overlay not starting at login
+
 ## 0.4.0 (2026-10-10)
 
 ### GUI

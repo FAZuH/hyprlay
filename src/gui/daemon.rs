@@ -82,6 +82,20 @@ fn is_probe_failure(reply: &Reply) -> bool {
     matches!(reply, Reply::Error(_))
 }
 
+/// Whether the daemon behind this reply runs a build older than the on-disk
+/// binary. Only a `status` reply carries the running version, so any other
+/// reply — and any on-disk version this reader cannot judge — is not
+/// outdated.
+pub(super) fn outdated(reply: &Reply, on_disk: Option<&str>) -> bool {
+    let Some(on_disk) = on_disk else {
+        return false;
+    };
+    match StatusFields::parse_wire(reply.text()) {
+        Some(fields) => hyprlay_core::version::is_older(&fields.version, on_disk),
+        None => false,
+    }
+}
+
 /// Boot watcher behind the one-shot auto-start: opening the GUI must bring
 /// the daemon up when it is down. This type only owns WHEN; the start
 /// itself goes through [`DaemonControl`] (the same path as the Start
@@ -242,6 +256,30 @@ mod tests {
                 "status=connected channel=a participants=1".into()
             ))
         );
+    }
+
+    #[test]
+    fn an_older_daemon_is_outdated() {
+        let reply = Reply::Ok("status=connected channel=a participants=1 version=0.3.9".into());
+        assert!(outdated(&reply, Some("0.4.0")));
+    }
+
+    #[test]
+    fn equal_versions_are_not_outdated() {
+        let reply = Reply::Ok("status=connected channel=a participants=1 version=0.4.0".into());
+        assert!(!outdated(&reply, Some("0.4.0")));
+    }
+
+    #[test]
+    fn a_reply_without_a_version_field_is_not_outdated() {
+        let reply = Reply::Ok("status=connected channel=a participants=1 auth=own-app".into());
+        assert!(!outdated(&reply, Some("0.4.0")));
+    }
+
+    #[test]
+    fn an_unknown_on_disk_version_is_never_outdated() {
+        let reply = Reply::Ok("status=connected channel=a participants=1 version=0.3.9".into());
+        assert!(!outdated(&reply, None));
     }
 
     #[test]

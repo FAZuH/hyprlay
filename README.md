@@ -28,6 +28,14 @@ cargo build --release
 # then copy target/release/hyprlay{,d} to $PATH
 ```
 
+### Updating
+
+Run `hyprlay update`. It downloads the latest release, verifies each asset's
+checksum, replaces both binaries, and refreshes the autostart entry if one is
+installed. Add `--check` to report the available version without installing it.
+
+To update by hand, replace both binaries and re-run `hyprlay install`.
+
 ## Preview
 
 <table>
