@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Overlay
+
+- Fixed overlay not starting at login
+
 ## 0.4.0 (2026-10-10)
 
 ### GUI

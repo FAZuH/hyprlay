@@ -110,14 +110,19 @@ impl World {
         format!(
             "[Unit]\n\
              Description=hyprlay overlay daemon\n\
+             After=graphical-session.target\n\
+             PartOf=graphical-session.target\n\
+             StartLimitIntervalSec=30s\n\
+             StartLimitBurst=5\n\
              \n\
              [Service]\n\
              ExecStart={}/hyprlayd\n\
              Restart=on-failure\n\
+             RestartSec=2s\n\
              EnvironmentFile=-%h/.config/hyprlay/service.env\n\
              \n\
              [Install]\n\
-             WantedBy=default.target\n",
+             WantedBy=graphical-session.target\n",
             self.bin_dir.display()
         )
     }
