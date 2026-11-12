@@ -14,6 +14,9 @@ use super::release::Release;
 /// The production boundary `hyprlay update` runs against.
 pub struct SystemHost;
 
+/// Where `cargo install` builds hyprlay from.
+const CARGO_REPOSITORY: &str = "https://github.com/FAZuH/hyprlay";
+
 fn agent() -> String {
     format!("hyprlay/{}", env!("CARGO_PKG_VERSION"))
 }
@@ -87,6 +90,56 @@ impl UpdateHost for SystemHost {
     fn stop_daemon(&self) -> Result<(), String> {
         crate::platform::service::quit_daemon().map_err(|error| error.to_string())
     }
+
+    fn run_cargo_install(&self, force: bool) -> Result<Vec<String>, String> {
+        let mut command = std::process::Command::new("cargo");
+        command
+            .args(["install", "--locked", "--git", CARGO_REPOSITORY])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if force {
+            command.arg("--force");
+        }
+        // A console window over the tray is noise, as with the other spawns.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        let output = command
+            .output()
+            .map_err(|error| format!("could not run cargo: {error}"))?;
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if !output.status.success() {
+            return Err(format!(
+                "cargo install failed ({})\n{}",
+                output.status,
+                tail(&combined, 5).join("\n")
+            ));
+        }
+        let mut lines = vec!["updated hyprlay with cargo install".to_string()];
+        lines.extend(tail(&combined, 3));
+        Ok(lines)
+    }
+}
+
+/// The last `count` non-empty lines, where cargo puts its error or the final
+/// install summary. The build log itself is too noisy to print.
+fn tail(text: &str, count: usize) -> Vec<String> {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    lines[lines.len().saturating_sub(count)..]
+        .iter()
+        .map(|line| (*line).to_string())
+        .collect()
 }
 
 /// Replace a file that is not the running image. Unix renames over the target
@@ -114,5 +167,20 @@ fn replace_file(staged: &Path, target: &Path) -> Result<(), String> {
             target.display(),
             last.expect("at least one rename attempt ran")
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tail;
+
+    #[test]
+    fn tail_keeps_the_last_non_empty_lines() {
+        let text = "error: boom\n\n  warning: other  \nInstalled package hyprlay v0.5.0\n";
+        assert_eq!(
+            tail(text, 2),
+            vec!["warning: other", "Installed package hyprlay v0.5.0"]
+        );
+        assert!(tail("", 3).is_empty());
     }
 }

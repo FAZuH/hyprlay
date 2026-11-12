@@ -5,6 +5,7 @@
 ### CLI
 
 - Added `hyprlay update` to install the latest release
+- `hyprlay update` now runs a cargo install when hyprlay was installed by cargo
 
 ### Upgrading
 
