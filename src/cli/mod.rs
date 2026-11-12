@@ -15,6 +15,7 @@
 
 pub mod dispatch;
 pub mod install;
+pub mod update;
 
 use clap::Arg;
 use clap::ArgAction;
@@ -45,6 +46,9 @@ pub(crate) enum Outcome {
     /// Stop/disable the unit and remove both files; never touches the
     /// daemon socket.
     Uninstall,
+    /// Replace both binaries with the latest GitHub release and refresh the
+    /// autostart registration; never touches the daemon socket.
+    Update { check: bool, force: bool },
     /// Send this command (canonical wire form) to the daemon.
     Relay(Command),
     /// A semantic parse failure: the message is the daemon's own error
@@ -188,6 +192,21 @@ fn cli() -> ClapCommand {
             "uninstall",
             "remove the systemd user service + desktop entry",
         ))
+        .subcommand(
+            leaf("update", "install the latest release")
+                .arg(
+                    Arg::new("check")
+                        .long("check")
+                        .action(ArgAction::SetTrue)
+                        .help("report the latest release without installing it"),
+                )
+                .arg(
+                    Arg::new("force")
+                        .long("force")
+                        .action(ArgAction::SetTrue)
+                        .help("reinstall even when the running version is current"),
+                ),
+        )
         .subcommand(leaf("quit", "stop the running daemon cleanly"))
 }
 
@@ -229,6 +248,10 @@ fn outcome(matches: &ArgMatches) -> Outcome {
             no_start: sub.get_flag("no_start"),
         },
         "uninstall" => Outcome::Uninstall,
+        "update" => Outcome::Update {
+            check: sub.get_flag("check"),
+            force: sub.get_flag("force"),
+        },
         _ => match wire_line(name, sub).and_then(|line| line.parse::<Command>()) {
             Ok(command) => Outcome::Relay(command),
             Err(message) => Outcome::LocalError(message),
@@ -285,6 +308,7 @@ pub(crate) fn execute(outcome: Outcome) -> i32 {
         Outcome::Monitors => list_monitors(),
         Outcome::Install { no_start } => crate::cli::install::run_install(no_start),
         Outcome::Uninstall => crate::cli::install::run_uninstall(),
+        Outcome::Update { check, force } => crate::cli::update::run_update(check, force),
         Outcome::Relay(command) => relay(&command.to_string()),
         Outcome::LocalError(message) => {
             eprintln!("{message}");
@@ -686,7 +710,7 @@ mod tests {
                 "root help must list `{name}` - {description}"
             );
         }
-        for required in ["get", "set", "install", "uninstall", "quit"] {
+        for required in ["get", "set", "install", "uninstall", "update", "quit"] {
             assert!(
                 help.contains(required),
                 "`{required}` missing from root help"

@@ -90,3 +90,81 @@ pub fn uninstall_service(
 ) -> Result<Vec<String>, ServiceError> {
     WindowsService.uninstall(config_base, data_base)
 }
+
+/// Whether an autostart registration for this OS is already installed.
+#[cfg(target_os = "linux")]
+pub fn registration_installed() -> bool {
+    Systemd.unit_installed()
+}
+
+/// Whether an autostart registration for this OS is already installed.
+#[cfg(target_os = "macos")]
+pub fn registration_installed() -> bool {
+    Launchd.unit_installed()
+}
+
+/// Whether an autostart registration for this OS is already installed.
+#[cfg(target_os = "windows")]
+pub fn registration_installed() -> bool {
+    WindowsService.unit_installed()
+}
+
+/// Rewrite the autostart registration for freshly replaced binaries and get
+/// the daemon running again. `hyprlay update` calls this only when a
+/// registration already exists, so an update never installs one.
+#[cfg(target_os = "linux")]
+pub fn refresh_registration(
+    exe_dir: &Path,
+    config_base: &Path,
+    data_base: &Path,
+) -> Result<Vec<String>, ServiceError> {
+    Systemd.install(exe_dir, config_base, data_base, true)
+}
+
+/// Rewrite the autostart registration for freshly replaced binaries and get
+/// the daemon running again.
+#[cfg(target_os = "macos")]
+pub fn refresh_registration(
+    exe_dir: &Path,
+    config_base: &Path,
+    data_base: &Path,
+) -> Result<Vec<String>, ServiceError> {
+    // `bootstrap` refuses an already-loaded label, so drop it first. A
+    // missing registration is tolerated by uninstall already.
+    let _ = Launchd.uninstall(config_base, data_base);
+    Launchd.install(exe_dir, config_base, data_base, true)
+}
+
+/// Rewrite the autostart registration for freshly replaced binaries and get
+/// the daemon running again.
+#[cfg(target_os = "windows")]
+pub fn refresh_registration(
+    exe_dir: &Path,
+    config_base: &Path,
+    data_base: &Path,
+) -> Result<Vec<String>, ServiceError> {
+    let mut report = WindowsService.install(exe_dir, config_base, data_base, false)?;
+    // There is no service manager to start: the daemon was stopped so its
+    // image could be replaced, so bring it back explicitly.
+    WindowsService.spawn_daemon()?;
+    report.push("started hyprlayd".to_string());
+    Ok(report)
+}
+
+/// Quit the running daemon over the control socket, however it was started.
+#[cfg(target_os = "linux")]
+pub fn quit_daemon() -> Result<(), ServiceError> {
+    Systemd.quit_via_socket()
+}
+
+/// Quit the running daemon over the control socket, however it was started.
+#[cfg(target_os = "macos")]
+pub fn quit_daemon() -> Result<(), ServiceError> {
+    Launchd.quit_via_socket()
+}
+
+/// Quit the running daemon over the control socket, however it was started.
+#[cfg(target_os = "windows")]
+pub fn quit_daemon() -> Result<(), ServiceError> {
+    WindowsService.quit_via_socket()
+}
