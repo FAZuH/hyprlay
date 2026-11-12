@@ -4,11 +4,11 @@
 //! [`SystemControl`] wrapper adapts it to the [`DaemonControl`] the fronts
 //! already inject.
 //!
-//! Behaviour is byte-identical to the old implementation: the same systemctl
-//! invocation, the same detached sibling spawn, the same socket quit, the same
-//! unit/desktop templates and report lines (apart from the daemon unit's
-//! session ordering, below), the same systemctl command sequence. Only the
-//! location moved (host CLI + core → this host adapter) so
+//! Behaviour matches the old implementation: the same systemctl invocation, the
+//! same detached sibling spawn, the same socket quit, the same unit/desktop
+//! templates and report lines, apart from two upgrade fixes below: the daemon
+//! unit's session ordering and the re-enable that drops a stale enable link.
+//! Only the location moved (host CLI + core → this host adapter) so
 //! `hyprlay-core` stays platform-neutral and every OS's install/autostart
 //! routes through the same `ServiceManager` port.
 //!
@@ -326,13 +326,26 @@ pub fn install(
     report.push("systemctl --user daemon-reload: ok".to_string());
 
     if start {
-        systemctl
-            .run(&["enable", "--now", "hyprlay"])
-            .map_err(|source| ServiceError::SystemctlStepFailed {
-                step: "enable --now hyprlay",
+        // `enable` only adds the link for the current `[Install]` section. A
+        // unit enabled by an older release keeps its stale `default.target`
+        // link and is still pulled in before the compositor, so upgrading
+        // needs `reenable`, which drops the old links first. `reenable`
+        // ignores `--now`, hence the explicit restart: it starts the daemon on
+        // a fresh install and makes a running one pick up the new binary.
+        systemctl.run(&["reenable", "hyprlay"]).map_err(|source| {
+            ServiceError::SystemctlStepFailed {
+                step: "reenable hyprlay",
                 source: Box::new(source),
-            })?;
-        report.push("systemctl --user enable --now hyprlay: ok".to_string());
+            }
+        })?;
+        report.push("systemctl --user reenable hyprlay: ok".to_string());
+        systemctl.run(&["restart", "hyprlay"]).map_err(|source| {
+            ServiceError::SystemctlStepFailed {
+                step: "restart hyprlay",
+                source: Box::new(source),
+            }
+        })?;
+        report.push("systemctl --user restart hyprlay: ok".to_string());
         systemctl
             .run(&["enable", "--now", "hyprlay-tray"])
             .map_err(|source| ServiceError::SystemctlStepFailed {
