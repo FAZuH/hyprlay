@@ -28,6 +28,12 @@ cargo build --release
 # then copy target/release/hyprlay{,d} to $PATH
 ```
 
+### Updating
+
+Replace both binaries, then re-run `hyprlay install`. It rewrites the systemd
+units, drops the enable link left by an older release, and restarts the daemon,
+so no manual `systemctl` call is needed.
+
 ## Preview
 
 <table>
