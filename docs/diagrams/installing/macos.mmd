@@ -1,0 +1,26 @@
+stateDiagram-v2
+    direction TB
+
+    state "absent" as Absent
+    state "installed" as Installed
+    state "failed" as Failed
+
+    state "install" as Install {
+        state "hyprlay.user.plist written" as PlistWritten
+        state "bootstrapped in the gui domain" as Bootstrapped
+        state "enabled" as Enabled
+        state "hyprlayd running" as Running
+
+        [*] --> PlistWritten
+        PlistWritten --> Bootstrapped : launchctl bootstrap
+        Bootstrapped --> Enabled : launchctl enable
+        Enabled --> Running : agent starts hyprlayd
+        Running --> [*]
+    }
+
+    [*] --> Absent
+    Absent --> Failed : sibling hyprlayd missing
+    Absent --> Install : hyprlay install
+    Install --> Installed
+    Install --> Failed : bootstrap or enable fails
+    Installed --> [*]

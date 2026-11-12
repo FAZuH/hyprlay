@@ -1,0 +1,28 @@
+stateDiagram-v2
+    direction TB
+
+    state "absent" as Absent
+    state "installed" as Installed
+    state "failed" as Failed
+
+    state "install" as Install {
+        state "units + desktop + icons written" as UnitsWritten
+        state "daemon-reload done" as Reloaded
+        state "reenabled on graphical-session.target" as Enabled
+        state "hyprlayd running" as DaemonRunning
+        state "tray enabled" as TrayEnabled
+
+        [*] --> UnitsWritten
+        UnitsWritten --> Reloaded : daemon-reload
+        Reloaded --> Enabled : reenable hyprlay
+        Enabled --> DaemonRunning : restart hyprlay
+        DaemonRunning --> TrayEnabled : enable --now hyprlay-tray
+        TrayEnabled --> [*]
+    }
+
+    [*] --> Absent
+    Absent --> Failed : hyprlayd missing
+    Absent --> Install : hyprlay install
+    Install --> Installed
+    Install --> Failed : any step fails
+    Installed --> [*]

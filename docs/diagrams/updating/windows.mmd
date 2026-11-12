@@ -1,0 +1,43 @@
+stateDiagram-v2
+    direction TB
+
+    state "installed" as Installed
+    state "checking releases/latest" as Checking
+    state "up to date" as Current
+    state "refused: cargo or system owned path" as Refused
+    state "report only, --check" as Reporting
+    state "downloading both assets" as Downloading
+    state "aborted, nothing replaced" as Aborted
+    state "staged and verified" as Staged
+    state "hyprlayd quit" as DaemonQuit
+    state "hyprlayd.exe replaced" as DaemonReplaced
+    state "hyprlay.exe replaced by self-replace" as CliReplaced
+    state "Startup entry refreshed" as Refreshing
+    state "updated, no Startup entry" as NoService
+    state "updated" as Updated
+    state "swap failed" as SwapFailed
+
+    [*] --> Installed
+    Installed --> Checking : hyprlay update
+    Checking --> Refused : path owned by cargo or package manager
+    Checking --> Reporting : --check
+    Checking --> Current : tag is not newer
+    Checking --> Downloading : newer tag
+    Downloading --> Aborted : network or digest failure
+    Downloading --> Staged : both digests match
+
+    Staged --> DaemonQuit : socket quit, best effort
+    DaemonQuit --> DaemonReplaced : rename hyprlayd.exe
+    DaemonReplaced --> SwapFailed : image still locked
+    DaemonReplaced --> CliReplaced : self-replace hyprlay.exe
+    CliReplaced --> SwapFailed : tray holds hyprlay.exe
+    CliReplaced --> Refreshing : Startup entry present
+    CliReplaced --> NoService : no Startup entry
+    Refreshing --> Updated : rewrite script + spawn hyprlayd
+    NoService --> Updated : prints run hyprlay install
+    Updated --> [*]
+
+    note right of DaemonReplaced
+        Windows locks a running image, so the daemon is quit first
+        and the rename retries 20 times at 100 ms.
+    end note

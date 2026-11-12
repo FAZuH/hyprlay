@@ -1,0 +1,17 @@
+stateDiagram-v2
+    direction TB
+
+    state "absent" as Absent
+    state "installed" as Installed
+
+    state "install" as Install {
+        state "Startup folder hyprlay.cmd written" as ScriptWritten
+
+        [*] --> ScriptWritten
+        ScriptWritten --> [*]
+    }
+
+    [*] --> Absent
+    Absent --> Install : hyprlay install
+    Install --> Installed : login runs hyprlayd via the script
+    Installed --> [*]
