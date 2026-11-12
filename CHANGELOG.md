@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Upgrading
+
+- Re-run `hyprlay install` after replacing the binaries to rewrite the systemd units.
+
 ### Overlay
 
 - Fixed overlay not starting at login

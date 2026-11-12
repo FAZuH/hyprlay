@@ -18,7 +18,8 @@ use hyprlay::platform::service::systemd::uninstall;
 use hyprlay_core::daemon_control::ServiceError;
 
 const DAEMON_RELOAD: &str = "systemctl --user daemon-reload";
-const ENABLE_NOW: &str = "systemctl --user enable --now hyprlay";
+const REENABLE: &str = "systemctl --user reenable hyprlay";
+const RESTART: &str = "systemctl --user restart hyprlay";
 const ENABLE_NOW_TRAY: &str = "systemctl --user enable --now hyprlay-tray";
 const DISABLE_NOW: &str = "systemctl --user disable --now hyprlay";
 const DISABLE_NOW_TRAY: &str = "systemctl --user disable --now hyprlay-tray";
@@ -269,7 +270,7 @@ fn install_writes_hicolor_app_icons_and_uninstall_removes_them() {
 }
 
 #[test]
-fn install_runs_daemon_reload_then_enable_now_both_units_in_order() {
+fn install_reloads_then_reenables_and_restarts_the_daemon_then_enables_the_tray() {
     let world = World::new("flow-order");
     world.with_sibling_bins();
     let spy = Spy::recording();
@@ -287,7 +288,8 @@ fn install_runs_daemon_reload_then_enable_now_both_units_in_order() {
         spy.lines(),
         vec![
             DAEMON_RELOAD.to_string(),
-            ENABLE_NOW.to_string(),
+            REENABLE.to_string(),
+            RESTART.to_string(),
             ENABLE_NOW_TRAY.to_string()
         ]
     );
@@ -408,10 +410,10 @@ fn failed_daemon_reload_reports_the_step_and_never_enables() {
 }
 
 #[test]
-fn failed_enable_now_reports_the_step_after_writing_both_files() {
+fn failed_reenable_reports_the_step_after_writing_both_files() {
     let world = World::new("enable-fails");
     world.with_sibling_bins();
-    let spy = Spy::failing_at(ENABLE_NOW);
+    let spy = Spy::failing_at(REENABLE);
 
     let err = install(
         &world.bin_dir,
@@ -423,15 +425,44 @@ fn failed_enable_now_reports_the_step_after_writing_both_files() {
     .unwrap_err();
 
     assert!(
-        err.to_string().contains("enable"),
+        err.to_string().contains("reenable"),
         "error names the step: {err}"
     );
     assert_eq!(
         spy.lines(),
-        vec![DAEMON_RELOAD.to_string(), ENABLE_NOW.to_string()]
+        vec![DAEMON_RELOAD.to_string(), REENABLE.to_string()]
     );
     assert!(world.unit().exists(), "unit stays written");
     assert!(world.desktop().exists(), "desktop entry stays written");
+}
+
+#[test]
+fn failed_restart_reports_the_step_after_a_successful_reenable() {
+    let world = World::new("restart-fails");
+    world.with_sibling_bins();
+    let spy = Spy::failing_at(RESTART);
+
+    let err = install(
+        &world.bin_dir,
+        &world.config_base,
+        &world.data_base,
+        true,
+        &spy,
+    )
+    .unwrap_err();
+
+    assert!(
+        err.to_string().contains("restart hyprlay"),
+        "error names the step: {err}"
+    );
+    assert_eq!(
+        spy.lines(),
+        vec![
+            DAEMON_RELOAD.to_string(),
+            REENABLE.to_string(),
+            RESTART.to_string()
+        ]
+    );
 }
 
 #[test]
